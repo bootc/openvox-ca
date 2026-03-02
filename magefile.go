@@ -48,7 +48,7 @@ import (
 // ── Namespaces ────────────────────────────────────────────────────────────────
 
 type Build mg.Namespace // build:all  build:fips
-type Test mg.Namespace  // test:unit  test:integ  test:integfips  test:load  test:integcompose  test:integcomposefips  test:loadcompose  test:bench  test:stress  test:puppet  test:puppetfips
+type Test mg.Namespace  // test:unit  test:integcompose  test:integcomposefips  test:loadcompose  test:bench  test:puppet  test:puppetfips
 type Dev mg.Namespace   // dev:check  dev:tidy    dev:clean  dev:container
 
 // ── Helpers ───────────────────────────────────────────────────────────────────
@@ -182,30 +182,6 @@ func (Test) Unit() error {
 	)
 }
 
-// Integ builds the binary and container image, starts a single container, runs
-// the full integration test suite, and tears the container down on exit.
-func (Test) Integ() error {
-	mg.Deps(Build{}.All)
-	fmt.Println("Running integration tests...")
-	return sh.RunV("bash", "test/integration.sh", "--up")
-}
-
-// IntegFIPS is like Integ but compiles with GOEXPERIMENT=boringcrypto so the
-// integration suite runs against the FIPS-compliant binary.
-func (Test) IntegFIPS() error {
-	mg.Deps(Build{}.FIPS)
-	fmt.Println("Running integration tests (FIPS build)...")
-	return sh.RunV("bash", "test/integration.sh", "--up")
-}
-
-// Load builds the binary and container image, starts a single container, runs
-// the integration suite plus the concurrency / load tests, then tears down.
-func (Test) Load() error {
-	mg.Deps(Build{}.All)
-	fmt.Println("Running integration + load tests...")
-	return sh.RunV("bash", "test/integration.sh", "--up", "--load")
-}
-
 // IntegCompose builds the binaries locally then runs the multi-host compose
 // integration test suite, tearing down on exit.
 func (Test) IntegCompose() error {
@@ -291,39 +267,6 @@ func (Test) Bench() error {
 	_ = runCompose(sysEnv, "-f", "compose-bench.yml", "down", "--volumes")
 
 	return err
-}
-
-// Stress builds the binaries locally then runs the upper-limit stress test
-// (compose-stress.yml). Deliberately ramps request rates past the server's
-// saturation point to find the performance ceiling. Always exits 0 —
-// observational, no thresholds.
-//
-// WARNING: Do not run against a shared or production server.
-func (Test) Stress() error {
-	mg.Deps(Build{}.All)
-	sysEnv := systemInfo()
-
-	fmt.Println("Building compose images for stress test...")
-	if err := runCompose(sysEnv, "-f", "compose-stress.yml", "build"); err != nil {
-		return err
-	}
-
-	fmt.Println("Running stress test (this will push the server to its limits)...")
-	// Ignore the exit code: k6 may exit non-zero if the container runtime
-	// propagates a signal during teardown, but the test itself has no thresholds.
-	// runCompose (not runComposeWithSpinner) is used here so that k6's own
-	// live progress display — enabled by tty:true in compose-stress.yml — is
-	// passed through to the terminal without being mangled by the spinner's
-	// line-by-line pipe reader.
-	_ = runCompose(sysEnv,
-		"-f", "compose-stress.yml", "up",
-		"--exit-code-from", "k6",
-		"--abort-on-container-exit")
-
-	fmt.Println("Tearing down stress stack...")
-	_ = runCompose(sysEnv, "-f", "compose-stress.yml", "down", "--volumes")
-
-	return nil
 }
 
 // Puppet builds the Puppet stack images (puppet-master, puppet-client) and runs

@@ -7,7 +7,7 @@
 # Then build this image:
 #   podman build -f Dockerfile.run -t puppet-ca:latest .
 #
-# Integration test targets (mage test:integ, test:integCompose, etc.) handle
+# Integration test targets (mage test:integCompose, etc.) handle
 # both steps automatically.
 
 FROM quay.io/centos/centos:stream10

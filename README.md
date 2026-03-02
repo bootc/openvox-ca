@@ -449,9 +449,6 @@ mage test:loadCompose
 # k6 load test suite: correctness, throughput benchmarks, saturation ramp
 mage test:bench
 
-# Build binary + container image, run integration + load tests (single container)
-mage test:load
-
 # Full Puppet stack: CA (TLS) + WEBrick master + OpenVoxDB + agent
 mage test:puppet
 ```
@@ -466,10 +463,6 @@ The k6 script (`test/load.js`) runs two concurrent scenarios:
 
 Thresholds that fail the run: error rate ≥ 1%, read p95 ≥ 500 ms, workflow p95 ≥ 5 s.
 
-`mage test:stress` uses `compose-stress.yml` and `test/stress.js`. It uses the `ramping-arrival-rate` executor to fix request rate and ramp it up until the server saturates — reads ramp to 500 req/s, writes (POST /generate) ramp to 50 req/s. There are no thresholds; the run always exits 0. Watch the k6 summary for `dropped_iterations` and p95/p99 latency inflection points to identify the ceiling.
-
-> **Warning:** `mage test:stress` will deliberately push the server past its limits. Do not run against a shared or production instance.
-
 ## Development
 
 ```bash
@@ -479,9 +472,6 @@ mage test:unit
 # Format, vet, and tidy modules
 mage dev:check
 
-# Run integration tests (builds binary + container, starts container, tears down)
-mage test:integ
-
 # Run integration tests using the compose stack
 mage test:integCompose
 
@@ -490,9 +480,6 @@ mage test:puppet
 
 # Run k6 load tests (correctness + throughput + saturation) via compose
 mage test:bench
-
-# Find the upper-limit saturation ceiling (always exits 0 — observational)
-mage test:stress
 ```
 
 ### File permissions

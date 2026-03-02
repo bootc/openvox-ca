@@ -230,6 +230,9 @@ assert_json_field "$_post_body" '"not_before"' \
 assert_json_field "$_post_body" '"not_after"' \
     "Signed status includes not_after"
 
+assert_json_field "$_post_body" '"authorization_extensions"' \
+    "Signed status includes authorization_extensions"
+
 # Agent downloads cert and verifies it cryptographically against the CA
 curl -sf "${CA_URL}/puppet-ca/v1/certificate/${_AGENT}" \
     -o "$WORK_DIR/agent.crt" 2>/dev/null \
@@ -243,6 +246,33 @@ openssl verify -CAfile "$WORK_DIR/ca.pem" "$WORK_DIR/agent.crt" >/dev/null 2>&1 
 openssl x509 -noout -subject -in "$WORK_DIR/agent.crt" 2>/dev/null | grep -qF "$_AGENT" \
     && pass "Agent cert CN matches submitted subject" \
     || fail "Agent cert CN matches submitted subject"
+
+# Issue #8: cert quality assertions
+_cert_text=$(openssl x509 -text -noout -in "$WORK_DIR/agent.crt" 2>/dev/null) || true
+
+# Signed cert must NOT carry the deprecated Netscape Comment extension (OID 2.16.840.1.113730.1.13).
+grep -qF "2.16.840.1.113730.1.13" <<< "$_cert_text" \
+    && fail "Signed cert must not contain Netscape Comment OID (2.16.840.1.113730.1.13)" \
+    || pass "Signed cert does not contain deprecated Netscape Comment extension"
+
+# Serial number must be random (large). Any realistic sequential CA would
+# never reach 2^32; a 128-bit random serial is almost certainly far larger.
+_serial_dec=$(openssl x509 -noout -serial -in "$WORK_DIR/agent.crt" 2>/dev/null \
+    | sed 's/serial=//' | tr '[:lower:]' '[:upper:]') || true
+_serial_len="${#_serial_dec}"
+[ "$_serial_len" -ge 16 ] \
+    && pass "Signed cert serial number appears random (≥16 hex digits)" \
+    || fail "Signed cert serial number appears sequential or too small" \
+           "serial hex: $_serial_dec (${_serial_len} digits)"
+
+# CRL Distribution Point URL must be present (CA started with --crl-url).
+grep -qF "certificate_revocation_list" <<< "$_cert_text" \
+    && pass "Signed cert contains CRL Distribution Point extension" \
+    || fail "Signed cert missing CRL Distribution Point extension"
+
+# CSR must be deleted after signing (sign() removes the pending request file).
+assert_http 404 "CSR deleted after manual signing (GET returns 404)" \
+    "${CA_URL}/puppet-ca/v1/certificate_request/${_AGENT}"
 
 # CRL If-Modified-Since
 assert_http 304 "CRL If-Modified-Since future → 304" \
@@ -1204,6 +1234,147 @@ printf 'server_url: "%s"\n' "${CA_URL}" > "$_CTL_CFG"
 puppet-ca-ctl --config="$_CTL_CFG" list >/dev/null 2>&1 \
     && pass "puppet-ca-ctl config-file driver: --config flag accepted" \
     || fail "puppet-ca-ctl config-file driver: --config flag accepted"
+
+# ═════════════════════════════════════════════════════════════════════════════
+# Group 17 — pp_cli_auth mTLS authorization
+#
+#   Starts short-lived local puppet-ca instances on port 8142 inside this
+#   container.  The shared puppet-ca service (port 8140) is untouched.
+#
+#   Phase 1 (loopback HTTP, autosign=true): bootstrap CA, generate a TLS
+#   server cert, a plain client cert, and an admin client cert carrying the
+#   pp_cli_auth OID (1.3.6.1.4.1.34380.1.3.39).
+#   Phase 2 (TLS, no CN allow list): verify the pp_cli_auth cert reaches
+#   admin endpoints while the plain cert is denied.
+#
+# OID source: https://github.com/puppetlabs/puppet/blob/main/lib/puppet/ssl/oids.rb
+# ═════════════════════════════════════════════════════════════════════════════
+printf '\n# Group 17 — pp_cli_auth mTLS authorization\n'
+
+_AUTH_PORT=8142
+_AUTH_CA_URL="http://127.0.0.1:${_AUTH_PORT}"
+_AUTH_DIR=$(mktemp -d)
+_AUTH_PID=""
+
+_wait_auth_ca() {
+    local url="$1" n=60
+    while [ "$n" -gt 0 ]; do
+        curl -sf "${url}/healthz/ready" -o /dev/null 2>/dev/null && return 0
+        sleep 0.3
+        n=$(( n - 1 ))
+    done
+    return 1
+}
+
+# ── Phase 1: loopback HTTP, autosign=true — generate all certs ───────────────
+
+puppet-ca-ctl setup --cadir "$_AUTH_DIR" --hostname auth-test-ca \
+    2>/dev/null
+
+puppet-ca --cadir "$_AUTH_DIR" \
+    --host 127.0.0.1 --port "$_AUTH_PORT" \
+    --no-tls-required \
+    --autosign-config=true \
+    >/dev/null 2>&1 &
+_AUTH_PID=$!
+
+if _wait_auth_ca "$_AUTH_CA_URL"; then
+    pass "pp_cli_auth: Phase 1 CA started (loopback HTTP, autosign=true)"
+
+    # TLS server cert (key saved to _AUTH_DIR/auth-test-ca_key.pem)
+    puppet-ca-ctl --server-url "$_AUTH_CA_URL" \
+        generate --certname auth-test-ca --out-dir "$_AUTH_DIR" \
+        > "$_AUTH_DIR/tls-server.crt" 2>/dev/null
+
+    # Plain client cert (no special extensions)
+    puppet-ca-ctl --server-url "$_AUTH_CA_URL" \
+        generate --certname regular-client --out-dir "$WORK_DIR" \
+        > "$WORK_DIR/regular-client.crt" 2>/dev/null
+
+    # Admin client cert with pp_cli_auth extension.
+    # DER:0c:04:74:72:75:65 is the DER encoding of UTF8String "true"
+    # (tag=0x0c, length=4, bytes="true").  The CA copies Puppet-arc OIDs from
+    # submitted CSRs to the issued certificate (see internal/ca/signing.go).
+    openssl genrsa -out "$WORK_DIR/admin.key" 2048 2>/dev/null
+    cat > "$WORK_DIR/pp_cli_auth.cnf" << 'OPENSSLEOF'
+[req]
+distinguished_name = dn
+req_extensions     = v3_req
+prompt             = no
+[dn]
+CN = openvox-admin
+[v3_req]
+1.3.6.1.4.1.34380.1.3.39 = DER:0c:04:74:72:75:65
+OPENSSLEOF
+
+    openssl req -new \
+        -key    "$WORK_DIR/admin.key" \
+        -config "$WORK_DIR/pp_cli_auth.cnf" \
+        -out    "$WORK_DIR/admin.csr" 2>/dev/null
+
+    # Submit CSR — autosign=true signs it immediately.
+    curl -s -o /dev/null \
+        -X PUT -H "Content-Type: text/plain" \
+        --data-binary @"$WORK_DIR/admin.csr" \
+        "${_AUTH_CA_URL}/certificate_request/openvox-admin" || true
+
+    # Fetch the signed cert.
+    curl -sf "${_AUTH_CA_URL}/certificate/openvox-admin" \
+        > "$WORK_DIR/admin.crt" 2>/dev/null || true
+
+    # Verify the CA preserved the pp_cli_auth OID in the signed cert.
+    _pp_oid_count=$(openssl x509 -text -noout -in "$WORK_DIR/admin.crt" 2>/dev/null \
+        | grep -c "1.3.6.1.4.1.34380.1.3.39") || true
+    [ "${_pp_oid_count:-0}" -gt 0 ] \
+        && pass "pp_cli_auth: OID preserved in signed cert" \
+        || fail "pp_cli_auth: OID preserved in signed cert" \
+               "OID 1.3.6.1.4.1.34380.1.3.39 not found in openssl -text output"
+else
+    fail "pp_cli_auth: Phase 1 CA started (loopback HTTP, autosign=true)" \
+        "timed out waiting for health"
+fi
+
+# Done with Phase 1.
+kill "$_AUTH_PID" 2>/dev/null; wait "$_AUTH_PID" 2>/dev/null || true
+_AUTH_PID=""
+
+# ── Phase 2: TLS, AllowPpCliAuth=true (default), no CN allow list ────────────
+
+puppet-ca --cadir "$_AUTH_DIR" \
+    --host 127.0.0.1 --port "$_AUTH_PORT" \
+    --tls-cert "$_AUTH_DIR/tls-server.crt" \
+    --tls-key  "$_AUTH_DIR/auth-test-ca_key.pem" \
+    >/dev/null 2>&1 &
+_AUTH_PID=$!
+
+if _wait_auth_ca "https://127.0.0.1:${_AUTH_PORT}"; then
+    pass "pp_cli_auth: Phase 2 CA started (TLS)"
+
+    # Admin cert (pp_cli_auth) → POST /sign/all must NOT be 403.
+    _st=$(curl -sk -o /dev/null -w '%{http_code}' \
+        --cert "$WORK_DIR/admin.crt" \
+        --key  "$WORK_DIR/admin.key" \
+        -X POST "https://127.0.0.1:${_AUTH_PORT}/sign/all") || true
+    [ "$_st" != "403" ] \
+        && pass "pp_cli_auth: cert with extension reaches admin endpoint (not 403)" \
+        || fail "pp_cli_auth: cert with extension reaches admin endpoint (not 403)" \
+               "got HTTP $_st"
+
+    # Plain cert → POST /sign/all must be 403.
+    _st=$(curl -sk -o /dev/null -w '%{http_code}' \
+        --cert "$WORK_DIR/regular-client.crt" \
+        --key  "$WORK_DIR/regular-client_key.pem" \
+        -X POST "https://127.0.0.1:${_AUTH_PORT}/sign/all") || true
+    [ "$_st" = "403" ] \
+        && pass "pp_cli_auth: cert without extension is denied admin endpoint (403)" \
+        || fail "pp_cli_auth: cert without extension is denied admin endpoint (403)" \
+               "got HTTP $_st"
+else
+    fail "pp_cli_auth: Phase 2 CA started (TLS)" "timed out waiting for health"
+fi
+
+kill "$_AUTH_PID" 2>/dev/null; wait "$_AUTH_PID" 2>/dev/null || true
+rm -rf "$_AUTH_DIR"
 
 # ═════════════════════════════════════════════════════════════════════════════
 # Results

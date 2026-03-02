@@ -8,7 +8,7 @@
 #                 validating true cross-host behaviour.
 #
 # Usage (from project root):
-#   mage integCompose          # build, run, tear down (exit 0 on all pass)
+#   mage test:integCompose     # build, run, tear down (exit 0 on all pass)
 #   podman-compose up --build  # interactive; ctrl-c to stop
 #
 # Environment variables honoured by test-runner:
@@ -30,6 +30,7 @@ services:
       - --cadir=/data
       - --autosign-config=false
       - --no-tls-required
+      - --crl-url=http://puppet-ca:8140/puppet-ca/v1/certificate_revocation_list/ca
       - -v=1
     expose:
       - "8140"

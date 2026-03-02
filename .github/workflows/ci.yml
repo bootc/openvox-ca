@@ -46,40 +46,10 @@ jobs:
       - name: Run unit tests
         run: mage test:unit
 
-  # ── Integration tests (podman, single container) ─────────────────────────────
-  # ubuntu-latest ships podman; integration.sh uses it directly.
-  # The matrix runs the test suite twice: once against the standard binary
-  # (CGO_ENABLED=0) and once against the FIPS binary (GOEXPERIMENT=boringcrypto,
-  # CGO_ENABLED=1).  gcc is pre-installed on ubuntu-latest so no extra setup
-  # is needed for the FIPS build.
-  integration:
-    name: Integration tests (${{ matrix.build }})
-    runs-on: ubuntu-latest
-    strategy:
-      fail-fast: false
-      matrix:
-        include:
-          - build: standard
-            mage_target: test:integ
-          - build: fips
-            mage_target: test:integFIPS
-    steps:
-      - uses: actions/checkout@v4
-      - uses: actions/setup-go@v5
-        with:
-          go-version-file: go.mod
-          cache: true
-      - name: Install Mage
-        run: go install github.com/magefile/mage@v1.15.0
-      - name: Run integration tests
-        env:
-          MAGE_TARGET: ${{ matrix.mage_target }}
-        run: mage "$MAGE_TARGET"
-
   # ── Puppet stack integration tests ──────────────────────────────────────────
   # Runs the full OpenVox 8 stack: Go CA (TLS) → OpenVox Server (WEBrick) →
   # OpenVoxDB.  Requires docker compose and network access to pull base images
-  # on first run.  Same standard/FIPS matrix as the other integration jobs.
+  # on first run.  Same standard/FIPS matrix as the compose job.
   puppet:
     name: Puppet stack tests (${{ matrix.build }})
     runs-on: ubuntu-latest
@@ -99,6 +69,9 @@ jobs:
           cache: true
       - name: Install Mage
         run: go install github.com/magefile/mage@v1.15.0
+      - name: Start rngd (replenish entropy pool for FIPS crypto)
+        if: matrix.build == 'fips'
+        run: sudo apt-get install -y --no-install-recommends rng-tools && sudo rngd -r /dev/urandom
       - name: Run Puppet stack integration tests
         env:
           MAGE_TARGET: ${{ matrix.mage_target }}
@@ -107,7 +80,7 @@ jobs:
   # ── Compose integration tests (docker compose) ───────────────────────────────
   # podman-compose is not pre-installed on GitHub runners; composeCmd() in
   # magefile.go falls back to `docker compose` (v2 plugin, always available).
-  # Same standard/FIPS matrix as the single-container integration job above.
+  # Same standard/FIPS matrix as the unit test job above.
   compose:
     name: Compose integration tests (${{ matrix.build }})
     runs-on: ubuntu-latest
@@ -127,6 +100,9 @@ jobs:
           cache: true
       - name: Install Mage
         run: go install github.com/magefile/mage@v1.15.0
+      - name: Start rngd (replenish entropy pool for FIPS crypto)
+        if: matrix.build == 'fips'
+        run: sudo apt-get install -y --no-install-recommends rng-tools && sudo rngd -r /dev/urandom
       - name: Run compose integration tests
         env:
           MAGE_TARGET: ${{ matrix.mage_target }}
