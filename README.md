@@ -26,7 +26,9 @@ A drop-in replacement for Puppet Server's built-in CA, written in Go. It impleme
 - **Random serial numbers** — every issued leaf certificate gets a cryptographically random 128-bit serial (CA/Browser Forum guidance)
 - **CRL Distribution Points** — optionally embed a CRL URL in every issued certificate (`--crl-url`) so verifiers can automatically fetch the CRL
 - **Configurable CRL validity** — control how long each published CRL is valid (`crl_validity_days`)
-- **FIPS-compatible** — standard library only (`crypto/x509`, `net/http`); no CGO by default
+- **OCSP responder** — built-in RFC 6960 OCSP responder; AIA extension embedded in issued certs when `--ocsp-url` is set; in-memory cache with nonce bypass
+- **Health probes** — `/healthz/live`, `/healthz/ready`, and `/healthz/startup` endpoints for Kubernetes-style liveness/readiness checks
+- **FIPS-compatible** — standard library only (`crypto/x509`, `net/http`); no CGO by default; FIPS build available via `GOEXPERIMENT=boringcrypto`
 - **`puppet-ca-ctl`** — operator CLI matching `tvaughan-server-ca` subcommands
 
 ## Building
@@ -48,7 +50,7 @@ go build -o bin/puppet-ca-ctl ./cmd/puppet-ca-ctl
 ### FIPS build (Linux/amd64)
 
 ```bash
-mage build:fips   # → bin/puppet-ca-fips  (GOEXPERIMENT=boringcrypto)
+mage build:fips   # → bin/puppet-ca + bin/puppet-ca-ctl  (GOEXPERIMENT=boringcrypto, CGO_ENABLED=1)
 ```
 
 ## puppet-ca — the server
@@ -270,11 +272,13 @@ All endpoints are served under both the bare path and `/puppet-ca/v1/<path>`, so
   "dns_alt_names": ["agent.example.com"],
   "subject_alt_names": ["agent.example.com"],
   "authorization_extensions": {},
-  "serial_number": 4,
+  "serial_number": 7329847239485029341,
   "not_before": "2025-01-01T00:00:00Z",
   "not_after": "2030-01-01T00:00:00Z"
 }
 ```
+
+> **Note:** `serial_number` is the low 64 bits of the certificate's cryptographically random 128-bit serial, returned as a signed int64 for API compatibility. It is omitted for certificates in the `requested` state.
 
 ### Certificate statuses (list)
 
@@ -327,17 +331,40 @@ Response:
 { "private_key": "-----BEGIN RSA PRIVATE KEY-----\n...", "certificate": "-----BEGIN CERTIFICATE-----\n..." }
 ```
 
+### OCSP
+
+| Method | Path | Description |
+|--------|------|-------------|
+| `POST` | `/ocsp` | RFC 6960 OCSP request; body is DER-encoded `OCSPRequest` |
+| `GET` | `/ocsp/{request}` | RFC 6960 GET form; `{request}` is standard or URL-safe base64-encoded DER |
+
+Both paths are also served under `/puppet-ca/v1/`. Responses are signed by the CA key directly (`Content-Type: application/ocsp-response`). GET responses include `Cache-Control: max-age=…, public`; requests carrying a nonce bypass the cache. The AIA extension is embedded in issued certificates when `--ocsp-url` is set.
+
+### Health probes
+
+These endpoints are served at bare paths only (no `/puppet-ca/v1` prefix) and require no client certificate.
+
+| Method | Path | Description |
+|--------|------|-------------|
+| `GET` | `/healthz/live` | Liveness probe — always `200` while the process is running |
+| `GET` | `/healthz/ready` | Readiness probe — `200` once the CA is initialised, `503` before |
+| `GET` | `/healthz/startup` | Startup probe — delegates to the readiness check |
+
+Response body: `{"status":"ok"}` (200) or `{"status":"not_ready"}` (503).
+
 ## Authorization tiers
 
 When mTLS is enabled (both `--tls-cert` and `--tls-key` set), each endpoint requires a minimum client certificate tier:
 
 | Tier | Required client cert | Endpoints |
 |------|---------------------|-----------|
-| **Public** | None | `GET /certificate/ca`, `GET /certificate/{subject}`, `GET /certificate_revocation_list/ca`, `PUT /certificate_request/{subject}` |
-| **Self or admin** | Cert CN matches path subject, OR cert is admin | `GET /certificate_status/{subject}`, `GET /certificate_request/{subject}` |
-| **Admin** | Cert is admin (see below) | All other endpoints |
+| **Public** | None | `GET /healthz/*`, `GET /certificate/{subject}`, `GET /certificate_revocation_list/ca`, `PUT /certificate_request/{subject}`, `GET /certificate_status/{subject}`, `GET /expirations`, `POST /ocsp`, `GET /ocsp/{request}` |
+| **Self or admin** | Cert CN matches path subject, OR cert is admin | `GET /certificate_request/{subject}` |
+| **Admin** | Cert is admin (see below) | `PUT /certificate_status/{subject}`, `DELETE /certificate_status/{subject}`, `DELETE /certificate_request/{subject}`, `GET /certificate_statuses/*`, `POST /sign`, `POST /sign/all`, `POST /generate/{subject}` |
 
 In plain HTTP mode (no TLS), all endpoints are accessible without authentication.
+
+> **Note:** `GET /certificate_status/{subject}` is public — agents need to check whether their own certificate has been revoked before they possess a valid client certificate. The response exposes only public-equivalent data (state, fingerprint, expiry).
 
 ### Admin credential resolution
 
@@ -453,7 +480,28 @@ mage test:bench
 mage test:puppet
 ```
 
-`test:integCompose` and `test:loadCompose` use `compose.yml` (autosign=false, TAP-format functional tests).
+`test:integCompose` and `test:loadCompose` use `compose.yml` — the canonical integration test suite. It runs two containers on an isolated network (puppet-ca + test-runner) and exercises the full API in TAP format across 17 test groups:
+
+| Group | Coverage |
+|-------|----------|
+| 1 | Endpoint smoke tests (health probes, CA cert, CRL, 404s, expirations) |
+| 2 | Full CSR lifecycle: submit → sign → verify → revoke → re-register; issue #8 assertions (no Netscape Comment OID, random serial ≥16 hex digits, CRL Distribution Point present, `authorization_extensions` field, CSR deleted after signing) |
+| 3 | `puppet-ca-ctl sign --all` (bulk signing) |
+| 4 | `POST /generate` (server-side key+cert generation) |
+| 5 | `GET /certificate_statuses?state=` filter; `puppet-ca-ctl list / list --all` |
+| 6 | `cert_ttl` custom validity via `PUT /certificate_status` |
+| 7 | `subject_alt_names` field in status responses |
+| 8 | CSR CN mismatch rejection (400) |
+| 9 | Error cases: invalid subjects, bad JSON, conflict (409), `BasicConstraints CA:TRUE` rejection |
+| 10 | Protocol features: bare paths, `/puppet-ca/v1/` prefixed paths |
+| 11 | `puppet-ca-ctl` operator workflow over the compose network |
+| 12 | OCSP: good/revoked status, nonce handling, cache invalidation on revoke, malformed request (400) |
+| 13 | Concurrency / load tests (opt-in via `DO_LOAD=true` / `mage test:loadCompose`) |
+| 14 | OCSP with CRL validation |
+| 15 | Autosign modes: `true`, glob-pattern file, executable plugin |
+| 16 | Config drivers: env vars, config file |
+| 17 | `pp_cli_auth` mTLS: Phase 1 bootstraps certs (loopback HTTP); Phase 2 asserts pp_cli_auth cert reaches admin endpoints while plain cert is denied |
+
 `test:bench` uses `compose-bench.yml` (autosign=true, k6 load runner).
 `test:puppet` uses `compose-puppet.yml` — a five-service stack that validates end-to-end catalog compilation, PuppetDB reporting, exported resources, and CRL revocation using a real OpenVox 8 agent and WEBrick puppet master. The CA runs with genuine TLS (a cert with CN=puppet-ca signed by the CA itself); all inter-service traffic verifies it.
 
