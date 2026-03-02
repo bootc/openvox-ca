@@ -1259,7 +1259,7 @@ _AUTH_PID=""
 _wait_auth_ca() {
     local url="$1" n=60
     while [ "$n" -gt 0 ]; do
-        curl -sf "${url}/healthz/ready" -o /dev/null 2>/dev/null && return 0
+        curl -sfk "${url}/healthz/ready" -o /dev/null 2>/dev/null && return 0
         sleep 0.3
         n=$(( n - 1 ))
     done
