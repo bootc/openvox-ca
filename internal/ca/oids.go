@@ -34,6 +34,19 @@ var (
 	// PuppetAuthOIDArc is the sub-arc for authorization extensions: 1.3.6.1.4.1.34380.1.3
 	PuppetAuthOIDArc = []int{1, 3, 6, 1, 4, 1, 34380, 1, 3}
 
+	// OIDPpCliAuth is the pp_cli_auth Puppet authorization extension.
+	// A certificate carrying this OID with UTF8String value "true" is granted
+	// CA admin access. OpenVox Server embeds it in its own certificate so the
+	// puppetserver CA CLI can authenticate without being listed by CN.
+	//
+	// Note: the CA copies Puppet-arc OIDs from submitted CSRs when signing
+	// (see signing.go). In production, prefer autosign=executable over
+	// autosign=true so that CSRs carrying this extension are not signed
+	// without operator review.
+	//
+	// Source: https://github.com/puppetlabs/puppet/blob/main/lib/puppet/ssl/oids.rb
+	OIDPpCliAuth = asn1.ObjectIdentifier{1, 3, 6, 1, 4, 1, 34380, 1, 3, 39}
+
 	// Netscape Comment OID
 	OIDNetscapeComment = asn1.ObjectIdentifier{2, 16, 840, 1, 113730, 1, 13}
 )
@@ -63,6 +76,8 @@ func hasPrefix(oid asn1.ObjectIdentifier, prefix []int) bool {
 // PuppetShortNames maps well-known Puppet OID strings to their short names.
 // Covers both the regular node attribute arc (1.3.6.1.4.1.34380.1.1.*) and
 // the authorization arc (1.3.6.1.4.1.34380.1.3.*).
+//
+// Source: https://github.com/puppetlabs/puppet/blob/main/lib/puppet/ssl/oids.rb
 var PuppetShortNames = map[string]string{
 	// Node attributes
 	"1.3.6.1.4.1.34380.1.1.1":  "pp_uuid",
@@ -95,6 +110,7 @@ var PuppetShortNames = map[string]string{
 	"1.3.6.1.4.1.34380.1.3.1":  "pp_authorization",
 	"1.3.6.1.4.1.34380.1.3.2":  "pp_auth_auto_renew",
 	"1.3.6.1.4.1.34380.1.3.13": "pp_auth_role",
+	"1.3.6.1.4.1.34380.1.3.39": "pp_cli_auth",
 }
 
 // OIDKey returns the display name for an OID: its Puppet short name if known,

@@ -23,6 +23,7 @@ import (
 	"crypto/tls"
 	"crypto/x509"
 	"crypto/x509/pkix"
+	"encoding/asn1"
 	"encoding/json"
 	"encoding/pem"
 	"math/big"
@@ -51,6 +52,35 @@ func issueClientCert(cn string, caCert *x509.Certificate, caKey *rsa.PrivateKey)
 		NotBefore:    time.Now().Add(-1 * time.Hour),
 		NotAfter:     time.Now().Add(1 * time.Hour),
 		ExtKeyUsage:  []x509.ExtKeyUsage{x509.ExtKeyUsageClientAuth},
+	}
+	certBytes, err := x509.CreateCertificate(rand.Reader, template, caCert, &key.PublicKey, caKey)
+	Expect(err).NotTo(HaveOccurred())
+	cert, err := x509.ParseCertificate(certBytes)
+	Expect(err).NotTo(HaveOccurred())
+	return cert
+}
+
+// issueClientCertWithPpCliAuth is like issueClientCert but also embeds the
+// pp_cli_auth extension (OID 1.3.6.1.4.1.34380.1.3.39) with value "true".
+func issueClientCertWithPpCliAuth(cn string, caCert *x509.Certificate, caKey *rsa.PrivateKey) *x509.Certificate {
+	key, err := rsa.GenerateKey(rand.Reader, 2048)
+	Expect(err).NotTo(HaveOccurred())
+
+	extValue, err := asn1.Marshal("true")
+	Expect(err).NotTo(HaveOccurred())
+
+	template := &x509.Certificate{
+		SerialNumber: big.NewInt(time.Now().UnixNano()),
+		Subject:      pkix.Name{CommonName: cn},
+		NotBefore:    time.Now().Add(-1 * time.Hour),
+		NotAfter:     time.Now().Add(1 * time.Hour),
+		ExtKeyUsage:  []x509.ExtKeyUsage{x509.ExtKeyUsageClientAuth},
+		ExtraExtensions: []pkix.Extension{
+			{
+				Id:    asn1.ObjectIdentifier{1, 3, 6, 1, 4, 1, 34380, 1, 3, 39},
+				Value: extValue,
+			},
+		},
 	}
 	certBytes, err := x509.CreateCertificate(rand.Reader, template, caCert, &key.PublicKey, caKey)
 	Expect(err).NotTo(HaveOccurred())
@@ -542,6 +572,49 @@ var _ = Describe("Auth Middleware", func() {
 			mux.ServeHTTP(rr, req)
 			// 404 because the node does not exist, but not 403.
 			Expect(rr.Code).NotTo(Equal(http.StatusForbidden))
+		})
+	})
+
+	// ── pp_cli_auth extension ──────────────────────────────────────────────────
+	// pp_cli_auth is always checked when TLS auth is configured; no flag needed.
+
+	Context("pp_cli_auth extension grants admin access (no CN in allow list)", func() {
+		var muxNoCNList http.Handler
+
+		BeforeEach(func() {
+			srv := api.New(myCA)
+			srv.AuthConfig = &api.AuthConfig{
+				CACert:    caCert,
+				AllowList: map[string]bool{},
+			}
+			muxNoCNList = srv.Routes()
+		})
+
+		It("allows POST /sign/all with a pp_cli_auth cert", func() {
+			clientCert := issueClientCertWithPpCliAuth("openvox-server", caCert, caKey)
+			req := httptest.NewRequest("POST", "/sign/all", nil)
+			req = withClientCert(req, clientCert)
+			rr := httptest.NewRecorder()
+			muxNoCNList.ServeHTTP(rr, req)
+			Expect(rr.Code).NotTo(Equal(http.StatusForbidden))
+		})
+
+		It("allows GET /certificate_request/{subject} (self-or-admin tier) with a pp_cli_auth cert", func() {
+			clientCert := issueClientCertWithPpCliAuth("openvox-server", caCert, caKey)
+			req := httptest.NewRequest("GET", "/certificate_request/some-node", nil)
+			req = withClientCert(req, clientCert)
+			rr := httptest.NewRecorder()
+			muxNoCNList.ServeHTTP(rr, req)
+			Expect(rr.Code).NotTo(Equal(http.StatusForbidden))
+		})
+
+		It("denies POST /sign/all for a cert without the extension", func() {
+			clientCert := issueClientCert("regular-node", caCert, caKey)
+			req := httptest.NewRequest("POST", "/sign/all", nil)
+			req = withClientCert(req, clientCert)
+			rr := httptest.NewRecorder()
+			muxNoCNList.ServeHTTP(rr, req)
+			Expect(rr.Code).To(Equal(http.StatusForbidden))
 		})
 	})
 })

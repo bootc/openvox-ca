@@ -18,12 +18,35 @@ package api
 
 import (
 	"crypto/x509"
+	"encoding/asn1"
 	"log/slog"
 	"net/http"
 	"strings"
 
 	"github.com/tvaughan/puppet-ca/internal/ca"
 )
+
+// hasPpCliAuth reports whether cert carries the ca.OIDPpCliAuth extension
+// with the UTF8String value "true".
+func hasPpCliAuth(cert *x509.Certificate) bool {
+	for _, ext := range cert.Extensions {
+		if ext.Id.Equal(ca.OIDPpCliAuth) {
+			var value string
+			if rest, err := asn1.Unmarshal(ext.Value, &value); err == nil && len(rest) == 0 {
+				return value == "true"
+			}
+			return false
+		}
+	}
+	return false
+}
+
+// isAdmin reports whether the client is authorized for admin-only operations.
+// A client is an admin if its CN is in the allow list, or if the certificate
+// carries the pp_cli_auth extension (ca.OIDPpCliAuth) with value "true".
+func isAdmin(cfg *AuthConfig, clientCert *x509.Certificate, clientCN string) bool {
+	return cfg.AllowList[clientCN] || hasPpCliAuth(clientCert)
+}
 
 type authTier int
 
@@ -87,14 +110,14 @@ func newAuthMiddleware(cfg *AuthConfig, myCA *ca.CA, next http.Handler) http.Han
 
 		case tierSelfOrAdmin:
 			subject := extractPathSubject(r.URL.Path)
-			if cfg.AllowList[clientCN] || (subject != "" && clientCN == subject) {
+			if isAdmin(cfg, clientCert, clientCN) || (subject != "" && clientCN == subject) {
 				next.ServeHTTP(w, r)
 			} else {
 				http.Error(w, "access denied", http.StatusForbidden)
 			}
 
 		case tierAdminOnly:
-			if cfg.AllowList[clientCN] {
+			if isAdmin(cfg, clientCert, clientCN) {
 				next.ServeHTTP(w, r)
 			} else {
 				http.Error(w, "access denied", http.StatusForbidden)

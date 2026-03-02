@@ -279,10 +279,21 @@ When mTLS is enabled (both `--tls-cert` and `--tls-key` set), each endpoint requ
 | Tier | Required client cert | Endpoints |
 |------|---------------------|-----------|
 | **Public** | None | `GET /certificate/ca`, `GET /certificate/{subject}`, `GET /certificate_revocation_list/ca`, `PUT /certificate_request/{subject}` |
-| **Self or admin** | Cert CN matches path subject, OR CN is in `--puppet-server` list | `GET /certificate_status/{subject}`, `GET /certificate_request/{subject}` |
-| **Admin** | CN in `--puppet-server` list | All other endpoints |
+| **Self or admin** | Cert CN matches path subject, OR cert is admin | `GET /certificate_status/{subject}`, `GET /certificate_request/{subject}` |
+| **Admin** | Cert is admin (see below) | All other endpoints |
 
 In plain HTTP mode (no TLS), all endpoints are accessible without authentication.
+
+### Admin credential resolution
+
+A client certificate is considered an admin credential if **either** condition is met:
+
+1. **CN allow list** — the certificate's Common Name appears in the `--puppet-server` comma-separated list.
+2. **`pp_cli_auth` extension** — the certificate carries the Puppet authorization extension OID `1.3.6.1.4.1.34380.1.3.39` with the UTF8String value `"true"`. OpenVox Server embeds this extension in its own certificate by default, so the `puppetserver ca` CLI can authenticate without being listed by CN.
+
+The `pp_cli_auth` check is enabled by default. Disable it with `--no-pp-cli-auth` (or `no_pp_cli_auth: true` in the config file) if you prefer strict CN-only authorization.
+
+> **OID source:** [`lib/puppet/ssl/oids.rb`](https://github.com/puppetlabs/puppet/blob/main/lib/puppet/ssl/oids.rb)
 
 ## puppet-ca-ctl — the operator CLI
 

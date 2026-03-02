@@ -35,6 +35,9 @@ DO_UP=false
 DO_KEEP=false
 DO_LOAD=false
 
+# PID of the TLS auth-test server (non-empty when running); used in cleanup.
+_AUTH_PID=""
+
 for arg in "$@"; do
     case "$arg" in
         --up)   DO_UP=true ;;
@@ -101,6 +104,11 @@ make_csr() {
 # ── Container lifecycle ─────────────────────────────────────────────────────────
 cleanup() {
     rm -rf "$WORK_DIR"
+    if [ -n "$_AUTH_PID" ]; then
+        kill "$_AUTH_PID" 2>/dev/null || true
+        wait "$_AUTH_PID" 2>/dev/null || true
+        _AUTH_PID=""
+    fi
     if $DO_UP && ! $DO_KEEP; then
         podman rm -f "$CA_CONTAINER" 2>/dev/null || true
     fi
@@ -536,10 +544,145 @@ _ocsp_bad=$(curl -s -o /dev/null -w '%{http_code}' \
     || fail "OCSP: malformed POST body returns 400" "got HTTP $_ocsp_bad"
 
 # ═══════════════════════════════════════════════════════════════════════════════
-# Group 6 — Concurrency / load tests  (opt-in via --load)
+# Group 6 — pp_cli_auth mTLS authorization
+#
+# Requires the puppet-ca and puppet-ca-ctl binaries (built by mage build:all).
+# Skipped automatically when binaries are not present.
+#
+# The test:
+#   1. Bootstraps a fresh CA in a temp dir.
+#   2. Phase 1 — loopback HTTP, autosign=true: generates a TLS server cert and
+#      two client certs (one plain, one with pp_cli_auth OID via CSR extension).
+#   3. Phase 2 — TLS, no CN allow list: verifies that the pp_cli_auth cert
+#      reaches admin endpoints while the plain cert is denied.
+#
+# OID source: https://github.com/puppetlabs/puppet/blob/main/lib/puppet/ssl/oids.rb
+# ═══════════════════════════════════════════════════════════════════════════════
+
+_PUPPET_CA_BIN="${PUPPET_CA_BIN:-./bin/puppet-ca}"
+_PUPPET_CA_CTL_BIN="${PUPPET_CA_CTL_BIN:-./bin/puppet-ca-ctl}"
+
+if [ -x "$_PUPPET_CA_BIN" ] && [ -x "$_PUPPET_CA_CTL_BIN" ]; then
+    printf '\n# Group 6 — pp_cli_auth mTLS authorization\n'
+
+    _AUTH_PORT=8999
+    _AUTH_DIR="$WORK_DIR/auth-ca"
+
+    # ── Phase 1: loopback HTTP, autosign=true — generate all certs ──────────
+
+    "$_PUPPET_CA_CTL_BIN" setup --cadir "$_AUTH_DIR" --hostname auth-test-ca \
+        2>/dev/null
+
+    "$_PUPPET_CA_BIN" --cadir "$_AUTH_DIR" \
+        --host 127.0.0.1 --port "$_AUTH_PORT" \
+        --no-tls-required \
+        --autosign-config=true \
+        &
+    _AUTH_PID=$!
+
+    for _i in $(seq 1 30); do
+        curl -sf "http://127.0.0.1:${_AUTH_PORT}/healthz/ready" >/dev/null 2>&1 && break
+        sleep 0.3
+    done
+
+    # TLS server cert (key saved to _AUTH_DIR/auth-test-ca_key.pem)
+    "$_PUPPET_CA_CTL_BIN" --server-url "http://127.0.0.1:${_AUTH_PORT}" \
+        generate --certname auth-test-ca --out-dir "$_AUTH_DIR" \
+        > "$_AUTH_DIR/tls-server.crt" 2>/dev/null
+
+    # Plain client cert (no special extensions)
+    "$_PUPPET_CA_CTL_BIN" --server-url "http://127.0.0.1:${_AUTH_PORT}" \
+        generate --certname regular-client --out-dir "$WORK_DIR" \
+        > "$WORK_DIR/regular-client.crt" 2>/dev/null
+
+    # Admin client cert with pp_cli_auth extension.
+    # DER:0c:04:74:72:75:65 is the DER encoding of UTF8String "true"
+    # (tag=0x0c, length=4, bytes="true").  The CA copies Puppet-arc OIDs from
+    # submitted CSRs to the issued certificate (see internal/ca/signing.go).
+    openssl genrsa -out "$WORK_DIR/admin.key" 2048 2>/dev/null
+    cat > "$WORK_DIR/pp_cli_auth.cnf" << 'OPENSSLEOF'
+[req]
+distinguished_name = dn
+req_extensions     = v3_req
+prompt             = no
+[dn]
+CN = openvox-admin
+[v3_req]
+1.3.6.1.4.1.34380.1.3.39 = DER:0c:04:74:72:75:65
+OPENSSLEOF
+
+    openssl req -new \
+        -key    "$WORK_DIR/admin.key" \
+        -config "$WORK_DIR/pp_cli_auth.cnf" \
+        -out    "$WORK_DIR/admin.csr" 2>/dev/null
+
+    # Submit CSR — autosign=true signs it immediately.
+    curl -s -o /dev/null \
+        -X PUT -H "Content-Type: text/plain" \
+        --data-binary @"$WORK_DIR/admin.csr" \
+        "http://127.0.0.1:${_AUTH_PORT}/certificate_request/openvox-admin" || true
+
+    # Fetch the signed cert.
+    curl -sf "http://127.0.0.1:${_AUTH_PORT}/certificate/openvox-admin" \
+        > "$WORK_DIR/admin.crt" 2>/dev/null || true
+
+    # Verify the CA preserved the pp_cli_auth OID in the signed cert.
+    _pp_oid_count=$(openssl x509 -text -noout -in "$WORK_DIR/admin.crt" 2>/dev/null \
+        | grep -c "1.3.6.1.4.1.34380.1.3.39") || true
+    [ "${_pp_oid_count:-0}" -gt 0 ] \
+        && pass "pp_cli_auth: OID preserved in signed cert" \
+        || fail "pp_cli_auth: OID preserved in signed cert" \
+               "OID 1.3.6.1.4.1.34380.1.3.39 not found in openssl -text output"
+
+    # Done with Phase 1.
+    kill "$_AUTH_PID" 2>/dev/null; wait "$_AUTH_PID" 2>/dev/null || true
+    _AUTH_PID=""
+
+    # ── Phase 2: TLS, AllowPpCliAuth=true (default), no CN allow list ───────
+
+    "$_PUPPET_CA_BIN" --cadir "$_AUTH_DIR" \
+        --host 127.0.0.1 --port "$_AUTH_PORT" \
+        --tls-cert "$_AUTH_DIR/tls-server.crt" \
+        --tls-key  "$_AUTH_DIR/auth-test-ca_key.pem" \
+        &
+    _AUTH_PID=$!
+
+    for _i in $(seq 1 30); do
+        curl -sfk "https://127.0.0.1:${_AUTH_PORT}/healthz/ready" >/dev/null 2>&1 && break
+        sleep 0.3
+    done
+
+    # Admin cert (pp_cli_auth) → POST /sign/all must NOT be 403.
+    _st=$(curl -sk -o /dev/null -w '%{http_code}' \
+        --cert "$WORK_DIR/admin.crt" \
+        --key  "$WORK_DIR/admin.key" \
+        -X POST "https://127.0.0.1:${_AUTH_PORT}/sign/all") || true
+    [ "$_st" != "403" ] \
+        && pass "pp_cli_auth: cert with extension reaches admin endpoint (not 403)" \
+        || fail "pp_cli_auth: cert with extension reaches admin endpoint (not 403)" \
+               "got HTTP $_st"
+
+    # Plain cert → POST /sign/all must be 403.
+    _st=$(curl -sk -o /dev/null -w '%{http_code}' \
+        --cert "$WORK_DIR/regular-client.crt" \
+        --key  "$WORK_DIR/regular-client_key.pem" \
+        -X POST "https://127.0.0.1:${_AUTH_PORT}/sign/all") || true
+    [ "$_st" = "403" ] \
+        && pass "pp_cli_auth: cert without extension is denied admin endpoint (403)" \
+        || fail "pp_cli_auth: cert without extension is denied admin endpoint (403)" \
+               "got HTTP $_st"
+
+    kill "$_AUTH_PID" 2>/dev/null; wait "$_AUTH_PID" 2>/dev/null || true
+    _AUTH_PID=""
+else
+    printf '\n# Group 6 — pp_cli_auth mTLS authorization (SKIPPED: binaries not found)\n'
+fi
+
+# ═══════════════════════════════════════════════════════════════════════════════
+# Group 7 — Concurrency / load tests  (opt-in via --load)
 # ═══════════════════════════════════════════════════════════════════════════════
 if $DO_LOAD; then
-    printf '\n# Group 6 — Concurrency / load tests\n'
+    printf '\n# Group 7 — Concurrency / load tests\n'
 
     # --- 5a: Concurrent CSR submissions ---
     _WRITE_N=20

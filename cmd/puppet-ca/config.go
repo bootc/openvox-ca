@@ -38,9 +38,9 @@ type serverConfig struct {
 	LogFile        string `yaml:"logfile"`
 	TLSCert        string `yaml:"tls_cert"`
 	TLSKey         string `yaml:"tls_key"`
-	PuppetServer   string `yaml:"puppet_server"`
-	NoTLSRequired  bool   `yaml:"no_tls_required"`
-	OCSPUrl        string `yaml:"ocsp_url"`
+	PuppetServer  string `yaml:"puppet_server"`
+	NoTLSRequired bool   `yaml:"no_tls_required"`
+	OCSPUrl       string `yaml:"ocsp_url"`
 }
 
 // loadServerConfig applies built-in defaults, optionally loads a YAML config

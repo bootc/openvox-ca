@@ -113,7 +113,6 @@ func main() {
 			if cmd.Flags().Changed("ocsp-url") {
 				cfg.OCSPUrl = ocspURL
 			}
-
 			// --- Validation ---
 			if cfg.CADir == "" {
 				return fmt.Errorf("--cadir is required (or set PUPPET_CA_CADIR / cadir in config file)")
