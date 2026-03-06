@@ -80,9 +80,17 @@ func newClient() (*Client, error) {
 		}
 		tlsCfg.RootCAs = pool
 	} else {
-		// No CA cert provided: skip TLS verification (useful for self-signed dev certs).
+		// SECURITY: No CA cert provided — TLS server identity is not verified.
+		// This makes the connection vulnerable to man-in-the-middle attacks.
+		// Operators should provide --ca-cert for production use.
+		// NIST 800-53: SC-8 (Transmission Confidentiality and Integrity)
+		fmt.Fprintln(os.Stderr, "WARNING: --ca-cert not provided; TLS server certificate will NOT be verified (vulnerable to MITM)")
 		tlsCfg.InsecureSkipVerify = true //nolint:gosec
 	}
+
+	// SECURITY: Enforce TLS 1.3 minimum to prevent protocol downgrade attacks.
+	// NIST 800-53: SC-8 (Transmission Confidentiality and Integrity)
+	tlsCfg.MinVersion = tls.VersionTLS13
 
 	if globalClientCert != "" && globalClientKey != "" {
 		cert, err := tls.LoadX509KeyPair(globalClientCert, globalClientKey)
@@ -363,7 +371,7 @@ func newGenerateCmd() *cobra.Command {
 			}
 
 			keyPath := filepath.Join(outDir, certname+"_key.pem")
-			if err := os.WriteFile(keyPath, []byte(result.PrivateKey), 0640); err != nil {
+			if err := os.WriteFile(keyPath, []byte(result.PrivateKey), 0600); err != nil {
 				return fmt.Errorf("failed to save private key to %s: %w", keyPath, err)
 			}
 			fmt.Fprintf(os.Stderr, "Private key saved to %s\n", keyPath)
@@ -380,6 +388,8 @@ func newGenerateCmd() *cobra.Command {
 
 func newSetupCmd() *cobra.Command {
 	var caDir, hostname string
+	var encryptKey bool
+	var passphraseFile string
 	cmd := &cobra.Command{
 		Use:          "setup",
 		Short:        "Initialise a new CA (offline)",
@@ -392,6 +402,10 @@ func newSetupCmd() *cobra.Command {
 
 			store := storage.New(absDir)
 			myCA := ca.New(store, ca.AutosignConfig{Mode: "off"}, hostname)
+			myCA.EncryptCAKey = encryptKey
+			myCA.KeyPassphrase = ca.KeyPassphraseConfig{
+				PassphraseFile: passphraseFile,
+			}
 			if err := myCA.Init(); err != nil {
 				return err
 			}
@@ -401,6 +415,8 @@ func newSetupCmd() *cobra.Command {
 	}
 	cmd.Flags().StringVar(&caDir, "cadir", "", "Directory to initialise CA in")
 	cmd.Flags().StringVar(&hostname, "hostname", "puppet", "Hostname for the CA certificate CN")
+	cmd.Flags().BoolVar(&encryptKey, "encrypt-ca-key", false, "Encrypt the CA private key at rest")
+	cmd.Flags().StringVar(&passphraseFile, "ca-key-passphrase-file", "", "Path to file containing the CA key passphrase")
 	_ = cmd.MarkFlagRequired("cadir")
 	return cmd
 }

@@ -61,13 +61,22 @@ const (
 // newAuthMiddleware returns an http.Handler that wraps next with mTLS authorization.
 // If cfg is nil (no TLS configured) all requests pass through unconditionally,
 // preserving plain HTTP / dev-mode compatibility.
+//
+// SECURITY: This is the primary access control enforcement point.
+// All non-public requests are validated through a four-tier model:
+//   - tierPublic: no client cert required (bootstrap endpoints)
+//   - tierAnyClient: any CA-signed client cert
+//   - tierSelfOrAdmin: own cert or admin CN
+//   - tierAdminOnly: admin CN only (signing, revocation, generation)
+//
+// NIST 800-53: AC-3 (Access Enforcement), IA-3 (Device Identification and Authentication)
 func newAuthMiddleware(cfg *AuthConfig, myCA *ca.CA, next http.Handler) http.Handler {
 	if cfg == nil {
 		return next
 	}
 
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		tier := lookupTier(r.Method, r.URL.Path)
+		tier := lookupTier(r.Method, r.URL.Path, cfg)
 
 		// Public endpoints need no cert.
 		if tier == tierPublic {
@@ -83,14 +92,15 @@ func newAuthMiddleware(cfg *AuthConfig, myCA *ca.CA, next http.Handler) http.Han
 
 		clientCert := r.TLS.PeerCertificates[0]
 
-		// Verify the client cert was signed by our CA.
+		// SECURITY: Verify the client cert was signed by our CA.
+		// NIST 800-53: IA-5(2) (PKI-Based Authentication)
 		pool := x509.NewCertPool()
 		pool.AddCert(cfg.CACert)
 		if _, err := clientCert.Verify(x509.VerifyOptions{
 			Roots:     pool,
 			KeyUsages: []x509.ExtKeyUsage{x509.ExtKeyUsageClientAuth},
 		}); err != nil {
-			slog.Debug("Auth: client cert verification failed",
+			slog.Warn("Auth: client cert verification failed",
 				"cn", clientCert.Subject.CommonName, "error", err)
 			http.Error(w, "access denied", http.StatusForbidden)
 			return
@@ -98,17 +108,17 @@ func newAuthMiddleware(cfg *AuthConfig, myCA *ca.CA, next http.Handler) http.Han
 
 		clientCN := clientCert.Subject.CommonName
 
-		// Check whether the presented cert's serial appears in the CRL.
-		// We check the serial of the actual presented certificate — not the
-		// serial of whatever cert happens to be on disk for the same CN —
-		// so that old revoked credentials are rejected even after a
-		// re-issuance for the same CN.  Fail-closed: a CRL read error is
-		// also treated as a denial.
+		// SECURITY: CRL-based revocation check on the presented certificate's
+		// serial number. Checks the actual presented cert — not the cert on
+		// disk for the same CN — so old revoked credentials are rejected even
+		// after re-issuance. Fail-closed: a CRL read error is also treated
+		// as a denial.
+		// NIST 800-53: IA-5(2) (PKI-Based Authentication), SC-17 (PKI Certificates)
 		if revoked, err := myCA.IsRevokedSerial(clientCert.SerialNumber); err != nil || revoked {
 			if err != nil {
 				slog.Warn("Auth: CRL check failed (denying)", "cn", clientCN, "error", err)
 			} else {
-				slog.Debug("Auth: client cert is revoked", "cn", clientCN)
+				slog.Warn("Auth: client cert is revoked", "cn", clientCN)
 			}
 			http.Error(w, "access denied", http.StatusForbidden)
 			return
@@ -140,7 +150,7 @@ func newAuthMiddleware(cfg *AuthConfig, myCA *ca.CA, next http.Handler) http.Han
 }
 
 // lookupTier classifies a request into an authorization tier based on method and path.
-func lookupTier(method, path string) authTier {
+func lookupTier(method, path string, cfg *AuthConfig) authTier {
 	// Strip the /puppet-ca/v1 prefix if present for uniform matching.
 	p := strings.TrimPrefix(path, "/puppet-ca/v1")
 
@@ -163,14 +173,17 @@ func lookupTier(method, path string) authTier {
 		// and intermediate caches must be able to fetch responses unauthenticated.
 		return tierPublic
 
-	// Public reads — no cert required.
-	// certificate_status and expirations expose only public-equivalent data
-	// (cert state/fingerprint/expiry, CA/CRL validity windows) that an agent
-	// can derive by downloading the cert or CRL directly.  Making them public
-	// lets bootstrapping agents and unauthenticated monitoring tools poll
-	// status and expiry without first obtaining a client certificate.
+	// certificate_status exposes cert metadata (serial numbers, authorization
+	// extensions) that could aid infrastructure enumeration. By default,
+	// require a CA-signed client cert. Operators can opt in to public access
+	// with --allow-public-status for backward compatibility with bootstrapping
+	// agents that poll status before obtaining a client certificate.
+	// NIST 800-53: AC-3 (Access Enforcement)
 	case method == "GET" && strings.HasPrefix(p, "/certificate_status/"):
-		return tierPublic
+		if cfg != nil && cfg.AllowPublicStatus {
+			return tierPublic
+		}
+		return tierAnyClient
 	case method == "GET" && p == "/expirations":
 		return tierPublic
 

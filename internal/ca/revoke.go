@@ -37,7 +37,7 @@ func (c *CA) Revoke(subject string) error {
 	c.mu.Lock()
 	defer c.mu.Unlock()
 
-	slog.Debug("Revoking certificate", "subject", subject)
+	slog.Info("Revoking certificate", "subject", subject)
 
 	// 1. Find Serial
 	serialStr, err := c.findSerialForSubject(subject)
@@ -94,12 +94,20 @@ func (c *CA) Revoke(subject string) error {
 		return fmt.Errorf("failed to write CRL: %w", err)
 	}
 
+	// Update the in-memory CRL cache so auth checks use the new CRL
+	// immediately without reading from disk.
+	parsedCRL, err := x509.ParseRevocationList(crlBytes)
+	if err != nil {
+		return fmt.Errorf("failed to parse new CRL for cache: %w", err)
+	}
+	c.cachedCRL = parsedCRL
+
 	// Invalidate the cached OCSP response for this serial so the next query
 	// returns the correct Revoked status instead of a stale Good response.
 	// Use the same normalised key as the OCSP index (uppercase hex, no padding).
 	delete(c.ocspCache, serialHexStr(serialInt))
 
-	slog.Debug("Certificate revoked", "subject", subject, "serial", serialStr)
+	slog.Info("Certificate revoked", "subject", subject, "serial", serialStr)
 	return nil
 }
 
@@ -125,10 +133,25 @@ func (c *CA) findSerialForSubject(subject string) (string, error) {
 
 	scanner := bufio.NewScanner(bytes.NewReader(data))
 	last := ""
+	lineNum := 0
+	badLines := 0
 	for scanner.Scan() {
-		if serial, subj, ok := parseInventoryLine(scanner.Text()); ok && subj == subject {
+		lineNum++
+		line := scanner.Text()
+		if strings.TrimSpace(line) == "" {
+			continue
+		}
+		serial, subj, ok := parseInventoryLine(line)
+		if !ok {
+			badLines++
+			continue
+		}
+		if subj == subject {
 			last = serial
 		}
+	}
+	if badLines > 0 {
+		slog.Warn("Inventory file contains unparseable lines", "count", badLines)
 	}
 	if err := scanner.Err(); err != nil {
 		return "", err
@@ -151,8 +174,15 @@ func (c *CA) findSerialForSubject(subject string) (string, error) {
 func (c *CA) IsRevokedSerial(serial *big.Int) (bool, error) {
 	c.mu.RLock()
 	defer c.mu.RUnlock()
-	revoked, _, err := c.isRevokedSerial(serial)
-	return revoked, err
+	if c.cachedCRL == nil {
+		return false, fmt.Errorf("CRL not loaded")
+	}
+	for _, entry := range c.cachedCRL.RevokedCertificateEntries {
+		if entry.SerialNumber.Cmp(serial) == 0 {
+			return true, nil
+		}
+	}
+	return false, nil
 }
 
 // IsRevoked checks whether the certificate for subject appears in the CRL.
@@ -175,16 +205,12 @@ func (c *CA) IsRevoked(subject string) bool {
 		return false
 	}
 
-	crlPEM, err := c.Storage.GetCRL()
-	if err != nil {
-		return false
-	}
-	crlBlock, _ := pem.Decode(crlPEM)
-	if crlBlock == nil {
-		return false
-	}
-	crl, err := x509.ParseRevocationList(crlBlock.Bytes)
-	if err != nil {
+	c.mu.RLock()
+	crl := c.cachedCRL
+	c.mu.RUnlock()
+
+	if crl == nil {
+		slog.Warn("IsRevoked: CRL not loaded, assuming not revoked (fail-open for display only)", "subject", subject)
 		return false
 	}
 

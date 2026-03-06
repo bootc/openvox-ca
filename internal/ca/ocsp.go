@@ -19,10 +19,8 @@ package ca
 import (
 	"bufio"
 	"bytes"
-	"crypto/x509"
 	"crypto/x509/pkix"
 	"encoding/asn1"
-	"encoding/pem"
 	"errors"
 	"fmt"
 	"log/slog"
@@ -189,24 +187,15 @@ func (c *CA) OCSPResponse(reqDER []byte) ([]byte, error) {
 	return respDER, nil
 }
 
-// isRevokedSerial checks the current CRL for the given serial number.
+// isRevokedSerial checks the in-memory CRL cache for the given serial number.
 // Returns (true, revocationTime, nil) if found, (false, zero, nil) if not,
-// or (false, zero, error) if the CRL cannot be read or parsed.
+// or (false, zero, error) if the CRL is not loaded.
 // Must be called while c.mu is already held by the caller.
 func (c *CA) isRevokedSerial(serial *big.Int) (bool, time.Time, error) {
-	crlPEM, err := c.Storage.GetCRL()
-	if err != nil {
-		return false, time.Time{}, fmt.Errorf("reading CRL: %w", err)
+	if c.cachedCRL == nil {
+		return false, time.Time{}, fmt.Errorf("CRL not loaded")
 	}
-	block, _ := pem.Decode(crlPEM)
-	if block == nil {
-		return false, time.Time{}, fmt.Errorf("CRL is empty or not PEM-encoded")
-	}
-	crl, err := x509.ParseRevocationList(block.Bytes)
-	if err != nil {
-		return false, time.Time{}, fmt.Errorf("parsing CRL: %w", err)
-	}
-	for _, entry := range crl.RevokedCertificateEntries {
+	for _, entry := range c.cachedCRL.RevokedCertificateEntries {
 		if entry.SerialNumber.Cmp(serial) == 0 {
 			return true, entry.RevocationTime, nil
 		}

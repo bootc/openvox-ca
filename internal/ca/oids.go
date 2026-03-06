@@ -46,7 +46,6 @@ var (
 	//
 	// Source: https://github.com/puppetlabs/puppet/blob/main/lib/puppet/ssl/oids.rb
 	OIDPpCliAuth = asn1.ObjectIdentifier{1, 3, 6, 1, 4, 1, 34380, 1, 3, 39}
-
 )
 
 // IsPuppetOID returns true if the OID belongs to the Puppet arc.

@@ -24,7 +24,7 @@ import (
 )
 
 const (
-	FilePermPrivate = 0640
+	FilePermPrivate = 0600
 	FilePermPublic  = 0644
 	DirPerm         = 0750
 )
@@ -93,7 +93,35 @@ func (s *StorageService) CRLPath() string {
 func (s *StorageService) UpdateCRL(pemData []byte) error {
 	s.crlMu.Lock()
 	defer s.crlMu.Unlock()
-	return os.WriteFile(s.CRLPath(), pemData, FilePermPublic)
+	return atomicWriteFile(s.CRLPath(), pemData, FilePermPrivate)
+}
+
+// atomicWriteFile writes data to a temporary file in the same directory as
+// target, then renames it into place. This prevents partial writes from
+// leaving a corrupt file on disk (e.g. during a crash or power loss).
+func atomicWriteFile(target string, data []byte, perm os.FileMode) error {
+	dir := filepath.Dir(target)
+	tmp, err := os.CreateTemp(dir, ".tmp-*")
+	if err != nil {
+		return err
+	}
+	tmpName := tmp.Name()
+
+	if _, err := tmp.Write(data); err != nil {
+		tmp.Close()
+		os.Remove(tmpName)
+		return err
+	}
+	if err := tmp.Chmod(perm); err != nil {
+		tmp.Close()
+		os.Remove(tmpName)
+		return err
+	}
+	if err := tmp.Close(); err != nil {
+		os.Remove(tmpName)
+		return err
+	}
+	return os.Rename(tmpName, target)
 }
 
 func (s *StorageService) GetCRL() ([]byte, error) {
@@ -199,6 +227,43 @@ func (s *StorageService) SerialPath() string {
 
 func (s *StorageService) PrivateKeyPath(subject string) string {
 	return filepath.Join(s.baseDir, "private", subject+"_key.pem")
+}
+
+// KeyPermWarning describes a private key file whose permissions are more
+// permissive than expected.
+type KeyPermWarning struct {
+	Path string
+	Mode os.FileMode
+}
+
+// CheckKeyPermissions checks that private key files have the expected
+// permissions (FilePermPrivate). Returns a list of warnings for any files
+// whose permissions are more permissive than expected.
+// An empty return means all files are OK (or no key files exist yet).
+func (s *StorageService) CheckKeyPermissions() []KeyPermWarning {
+	privateDir := filepath.Join(s.baseDir, "private")
+	entries, err := os.ReadDir(privateDir)
+	if err != nil {
+		return nil // directory may not exist yet
+	}
+	var warnings []KeyPermWarning
+	for _, e := range entries {
+		if e.IsDir() || !strings.HasSuffix(e.Name(), "_key.pem") {
+			continue
+		}
+		info, err := e.Info()
+		if err != nil {
+			continue
+		}
+		perm := info.Mode().Perm()
+		if perm&^os.FileMode(FilePermPrivate) != 0 { // any bit set beyond FilePermPrivate (0600)
+			warnings = append(warnings, KeyPermWarning{
+				Path: filepath.Join(privateDir, e.Name()),
+				Mode: perm,
+			})
+		}
+	}
+	return warnings
 }
 
 func (s *StorageService) SavePrivateKey(subject string, pemData []byte) error {

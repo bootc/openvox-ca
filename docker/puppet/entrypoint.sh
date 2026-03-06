@@ -98,11 +98,6 @@ else
 fi
 
 # ── File permissions ──────────────────────────────────────────────────────
-chown -R puppet:puppet "${PUPPET_SSL}"
-chmod 644 \
-    "${PUPPET_SSL}/ca/ca_crt.pem" \
-    "${PUPPET_SSL}/ca/ca_crl.pem" \
-    "${PUPPET_SSL}/certs/${FQDN}.pem"
 chmod 640 "${PUPPET_SSL}/private_keys/${FQDN}.pem"
 
 # ── Symlinks required by puppet agent and PuppetDB terminus ───────────────
@@ -123,7 +118,6 @@ environment = production
 [server]
 ca = false
 EOF
-chown puppet:puppet /etc/puppetlabs/puppet/puppet.conf
 echo "puppet.conf written."
 
 # ── Configure webserver.conf (TLS) ────────────────────────────────────────
@@ -180,13 +174,8 @@ storeconfigs_backend = puppetdb
 reports              = store,puppetdb
 EOF
 
-    chown puppet:puppet \
-        /etc/puppetlabs/puppet/puppetdb.conf \
-        /etc/puppetlabs/puppet/routes.yaml
     echo "PuppetDB configured: https://${OPENVOXDB_HOST}:${_DB_PORT}"
 fi
-
-chown puppet:puppet /etc/puppetlabs/puppet/puppet.conf
 
 # ── Background CRL refresh daemon ────────────────────────────────────────
 # Refreshes the CRL every 30 minutes.  Puppet Server re-reads the CRL file

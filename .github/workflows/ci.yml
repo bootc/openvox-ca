@@ -88,6 +88,23 @@ jobs:
           MAGE_TARGET: ${{ matrix.mage_target }}
         run: mage "$MAGE_TARGET"
 
+  # ── Migration integration tests ────────────────────────────────────────────
+  # Boots a real VoxPupuli Puppet Server, creates a genuine CA, then imports
+  # it into puppet-ca and verifies the full migration path.
+  migration:
+    name: Migration tests
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-go@v5
+        with:
+          go-version-file: go.mod
+          cache: true
+      - name: Install Mage
+        run: go install github.com/magefile/mage@v1.15.0
+      - name: Run migration integration tests
+        run: mage test:migration
+
   # ── Compose integration tests (docker compose) ───────────────────────────────
   # podman-compose is not pre-installed on GitHub runners; composeCmd() in
   # magefile.go falls back to `docker compose` (v2 plugin, always available).

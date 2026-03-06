@@ -26,6 +26,10 @@ import (
 // ipRateLimiter is a fixed-window per-IP rate limiter.
 // Each IP address is allowed at most maxReqs requests per window duration.
 // Old windows are evicted lazily on access so memory stays bounded over time.
+//
+// SECURITY: Applied to the unauthenticated PUT /certificate_request endpoint
+// to prevent CSR flooding attacks.
+// NIST 800-53: SC-5 (Denial-of-Service Protection)
 type ipRateLimiter struct {
 	mu      sync.Mutex
 	window  time.Duration
@@ -68,10 +72,46 @@ func (l *ipRateLimiter) Allow(ip string) bool {
 // clientIP extracts the remote IP address from r, stripping the port.
 // It does not trust X-Forwarded-For or similar headers since the server
 // accepts direct connections (no trusted reverse proxy layer).
+// NIST 800-53: SC-5 (Denial-of-Service Protection)
 func clientIP(r *http.Request) string {
 	host, _, err := net.SplitHostPort(r.RemoteAddr)
 	if err != nil {
 		return r.RemoteAddr
 	}
 	return host
+}
+
+// destructiveOpTracker is a fixed-window per-identity counter for destructive
+// operations (revoke, clean). When a single identity exceeds the threshold
+// within the window, a warning is logged for operational awareness.
+// NIST 800-53: AU-6 (Audit Record Review, Analysis, and Reporting)
+type destructiveOpTracker struct {
+	mu        sync.Mutex
+	window    time.Duration
+	threshold int
+	entries   map[string]*rlEntry
+}
+
+func newDestructiveOpTracker(threshold int, window time.Duration) *destructiveOpTracker {
+	return &destructiveOpTracker{
+		window:    window,
+		threshold: threshold,
+		entries:   make(map[string]*rlEntry),
+	}
+}
+
+// Record increments the counter for the given identity (typically a client CN)
+// and returns true if the threshold has been exceeded.
+func (t *destructiveOpTracker) Record(identity string) bool {
+	now := time.Now()
+	t.mu.Lock()
+	defer t.mu.Unlock()
+
+	e, ok := t.entries[identity]
+	if !ok || now.Sub(e.start) >= t.window {
+		t.entries[identity] = &rlEntry{start: now, count: 1}
+		return false
+	}
+	e.count++
+	return e.count > t.threshold
 }

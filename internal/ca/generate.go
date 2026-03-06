@@ -95,6 +95,12 @@ func (c *CA) Generate(subject string, dnsAltNames []string) (*GenerateResult, er
 		return nil, fmt.Errorf("failed to save private key for %s: %w", subject, err)
 	}
 
+	// SECURITY: Log that a private key has been persisted to server storage.
+	// Generated keys remain on disk indefinitely; operators should implement
+	// external lifecycle controls (rotation, cleanup) for these keys.
+	// NIST 800-53: SC-12 (Cryptographic Key Establishment and Management)
+	slog.Info("Generated private key persisted to server filesystem",
+		"subject", subject, "path", c.Storage.PrivateKeyPath(subject))
 	slog.Debug("Certificate generated", "subject", subject, "algo", string(leafCfg.Algo))
 	return &GenerateResult{
 		PrivateKeyPEM:  keyPEM,

@@ -1,8 +1,8 @@
 # Compiled binaries
 bin/
 dist/
-puppet-ca
-puppet-ca-ctl
+/puppet-ca
+/puppet-ca-ctl
 *.exe
 
 # Test binaries and output
@@ -28,3 +28,6 @@ Thumbs.db
 
 # Claude Code session data
 .claude/
+
+# Threat model output
+Threat_Model/

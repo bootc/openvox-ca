@@ -44,6 +44,7 @@ type serverConfig struct {
 	PuppetServerFile string `yaml:"puppet_server_file"`
 	NoPpCliAuth      bool   `yaml:"no_pp_cli_auth"`
 	NoTLSRequired    bool   `yaml:"no_tls_required"`
+	AllowPublicStatus bool  `yaml:"allow_public_status"`
 	OCSPUrl          string `yaml:"ocsp_url"`
 	CRLUrl           string `yaml:"crl_url"`
 
@@ -67,6 +68,11 @@ type serverConfig struct {
 	CAValidityDays   int `yaml:"ca_validity_days"`   // 0 = built-in default (~5 years)
 	LeafValidityDays int `yaml:"leaf_validity_days"` // 0 = built-in default (~5 years)
 	CRLValidityDays  int `yaml:"crl_validity_days"`  // 0 = built-in default (30 days)
+	CSRRateLimit     int `yaml:"csr_rate_limit"`     // max CSR submissions per IP per minute; 0 = use built-in default (60)
+
+	// CA key encryption at rest.
+	EncryptCAKey       bool   `yaml:"encrypt_ca_key"`        // encrypt the CA private key at rest (AES-256-GCM + Argon2id)
+	CAKeyPassphraseFile string `yaml:"ca_key_passphrase_file"` // path to file containing the CA key passphrase
 }
 
 // loadServerConfig applies built-in defaults, optionally loads a YAML config
@@ -142,6 +148,11 @@ func applyServerEnv(cfg *serverConfig) {
 			cfg.NoTLSRequired = b
 		}
 	}
+	if v := os.Getenv("PUPPET_CA_ALLOW_PUBLIC_STATUS"); v != "" {
+		if b, err := strconv.ParseBool(v); err == nil {
+			cfg.AllowPublicStatus = b
+		}
+	}
 	if v := os.Getenv("PUPPET_CA_OCSP_URL"); v != "" {
 		cfg.OCSPUrl = v
 	}
@@ -198,6 +209,19 @@ func applyServerEnv(cfg *serverConfig) {
 		if n, err := strconv.Atoi(v); err == nil && n > 0 {
 			cfg.CRLValidityDays = n
 		}
+	}
+	if v := os.Getenv("PUPPET_CA_CSR_RATE_LIMIT"); v != "" {
+		if n, err := strconv.Atoi(v); err == nil {
+			cfg.CSRRateLimit = n
+		}
+	}
+	if v := os.Getenv("PUPPET_CA_ENCRYPT_CA_KEY"); v != "" {
+		if b, err := strconv.ParseBool(v); err == nil {
+			cfg.EncryptCAKey = b
+		}
+	}
+	if v := os.Getenv("PUPPET_CA_KEY_PASSPHRASE_FILE"); v != "" {
+		cfg.CAKeyPassphraseFile = v
 	}
 }
 

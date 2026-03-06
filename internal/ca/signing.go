@@ -83,7 +83,9 @@ var subjectRegex = regexp.MustCompile(`^[a-z0-9._-]+$`)
 
 // ValidateSubject returns an error if subject contains unsafe characters.
 // It is the single source of truth for subject name validation used by both
-// the CA layer and the API layer.
+// the CA layer and the API layer. Rejects path traversal (e.g. "..") and
+// any characters outside the safe set.
+// NIST 800-53: SI-10 (Information Input Validation)
 func ValidateSubject(subject string) error {
 	if !subjectRegex.MatchString(subject) || strings.Contains(subject, "..") {
 		return fmt.Errorf("invalid subject name %q: must match ^[a-z0-9._-]+$ and must not contain ..", subject)
@@ -122,7 +124,7 @@ func (c *CA) signWithDuration(subject string, ttl time.Duration) ([]byte, error)
 		return nil, err
 	}
 
-	slog.Debug("Signing certificate", "subject", subject)
+	slog.Info("Signing certificate", "subject", subject)
 
 	csrPEM, err := c.Storage.GetCSR(subject)
 	if err != nil {
@@ -141,9 +143,10 @@ func (c *CA) signWithDuration(subject string, ttl time.Duration) ([]byte, error)
 		return nil, fmt.Errorf("invalid CSR signature for %s: %w", subject, err)
 	}
 
-	// Reject CSRs that request CA capabilities (BasicConstraints: CA:TRUE, OID 2.5.29.19).
-	// Matches the Puppet CA's behavior: returns an error whose message starts with
-	// "Found extensions" and contains the OID string so callers can return 409.
+	// SECURITY: Reject CSRs that request CA capabilities (BasicConstraints:
+	// CA:TRUE, OID 2.5.29.19). Without this check a submitted CSR could produce
+	// a subordinate CA certificate, enabling the holder to sign arbitrary certs.
+	// NIST 800-53: CM-7 (Least Functionality), IA-5(2) (PKI-Based Authentication)
 	oidBasicConstraints := asn1.ObjectIdentifier{2, 5, 29, 19}
 	for _, ext := range csr.Extensions {
 		if ext.Id.Equal(oidBasicConstraints) {
@@ -156,7 +159,8 @@ func (c *CA) signWithDuration(subject string, ttl time.Duration) ([]byte, error)
 		}
 	}
 
-	// Generate a random 128-bit serial number (CA/Browser Forum guidance).
+	// SECURITY: Generate a random 128-bit serial number (CA/Browser Forum guidance).
+	// NIST 800-53: SC-12 (Cryptographic Key Establishment and Management)
 	serialLimit := new(big.Int).Lsh(big.NewInt(1), 128)
 	serialInt, err := rand.Int(rand.Reader, serialLimit)
 	if err != nil {
@@ -227,9 +231,13 @@ func (c *CA) signWithDuration(subject string, ttl time.Duration) ([]byte, error)
 		})
 	}
 
-	// Copy all Puppet OID extensions from the CSR.
+	// SECURITY: Copy Puppet OID extensions from the CSR, excluding
+	// authorization-arc OIDs (1.3.6.1.4.1.34380.1.3.*). Allowing CSRs to
+	// inject auth OIDs like pp_cli_auth would let any agent request admin
+	// privileges — a direct privilege escalation.
+	// NIST 800-53: AC-6 (Least Privilege), CM-7 (Least Functionality)
 	for _, ext := range csr.Extensions {
-		if IsPuppetOID(ext.Id) {
+		if IsPuppetOID(ext.Id) && !IsAuthOID(ext.Id) {
 			template.ExtraExtensions = append(template.ExtraExtensions, ext)
 		}
 	}
@@ -263,7 +271,7 @@ func (c *CA) signWithDuration(subject string, ttl time.Duration) ([]byte, error)
 		slog.Warn("Could not delete CSR after signing", "subject", subject, "error", err)
 	}
 
-	slog.Debug("Certificate signed", "subject", subject, "serial", serialStr)
+	slog.Info("Certificate signed", "subject", subject, "serial", serialStr)
 	return certPEM, nil
 }
 
@@ -303,7 +311,7 @@ func (c *CA) Clean(subject string) error {
 		}
 	}
 
-	slog.Debug("Certificate cleaned", "subject", subject)
+	slog.Info("Certificate cleaned", "subject", subject)
 	return nil
 }
 
@@ -363,10 +371,24 @@ func (c *CA) SaveRequest(subject string, csrPEM []byte) (bool, error) {
 		return false, fmt.Errorf("failed to parse CSR for %s: %w", subject, err)
 	}
 
-	// CN in the CSR must match the URL subject — Puppet CA enforces this.
+	// SECURITY: CN in the CSR must match the URL subject. Without this check
+	// an attacker could submit a CSR for "admin.example.com" via the URL path
+	// for "node1.example.com", obtaining a certificate for a different identity.
+	// NIST 800-53: IA-5(2) (PKI-Based Authentication), SI-10 (Information Input Validation)
 	if csr.Subject.CommonName != subject {
 		return false, fmt.Errorf("Instance name %s does not match requested key %s",
 			csr.Subject.CommonName, subject)
+	}
+
+	// SECURITY: Warn if the CSR carries authorization-arc OIDs — these will be
+	// stripped during signing but the submission itself is suspicious and may
+	// indicate a privilege escalation attempt.
+	// NIST 800-53: AU-6 (Audit Record Review, Analysis, and Reporting)
+	for _, ext := range csr.Extensions {
+		if IsAuthOID(ext.Id) {
+			slog.Warn("CSR contains authorization extension that will be stripped",
+				"subject", subject, "oid", ext.Id.String())
+		}
 	}
 
 	slog.Debug("Received CSR", "subject", subject)

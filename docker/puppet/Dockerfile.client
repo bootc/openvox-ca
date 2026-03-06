@@ -12,5 +12,24 @@ RUN dnf -y install https://yum.voxpupuli.org/openvox8-release-el-10.noarch.rpm &
 
 ENV PATH=/opt/puppetlabs/puppet/bin:${PATH}
 
-# Keep the container running; the test script exec's into it.
+# SECURITY: Run as non-root to limit blast radius of container escape.
+# NIST 800-53: AC-6 (Least Privilege), CM-7 (Least Functionality)
+#
+# The puppet agent needs write access to its config, cache, log, and run
+# directories at runtime (SSL bootstrap, catalog cache, reports, etc.).
+RUN useradd -r -m -d /home/puppet-agent -s /sbin/nologin puppet-agent && \
+    mkdir -p \
+        /etc/puppetlabs/puppet/ssl \
+        /opt/puppetlabs/puppet/cache \
+        /opt/puppetlabs/puppet/public \
+        /var/log/puppetlabs/puppet \
+        /var/run/puppetlabs && \
+    chown -R puppet-agent:puppet-agent \
+        /etc/puppetlabs/puppet \
+        /opt/puppetlabs/puppet/cache \
+        /opt/puppetlabs/puppet/public \
+        /var/log/puppetlabs/puppet \
+        /var/run/puppetlabs
+USER puppet-agent
+
 ENTRYPOINT ["tail", "-f", "/dev/null"]

@@ -31,9 +31,11 @@ USER puppet
 EXPOSE 8140
 
 # --cadir             : where CA state is stored
-# --autosign-config   : sign all incoming CSRs immediately (dev/test only)
 # --verbosity         : debug logging
+#
+# NOTE: autosign is OFF by default. Set --autosign-config=true only in
+# dev/test environments — autosign lets any CSR submitter obtain a signed
+# certificate without operator review.
 ENTRYPOINT ["/usr/local/bin/puppet-ca"]
 CMD ["--cadir=/etc/puppetlabs/puppet/ssl/ca", \
-     "--autosign-config=true", \
      "--verbosity=1"]

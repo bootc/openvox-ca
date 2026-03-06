@@ -4,15 +4,16 @@
 
 > 🤖 LLM/AI WARNING 🤖
 >
-> This project was largely written by [Claude](https://claude.ai/) using Sonnet
-> 4.5. It has been reviewed and tested, but use in production at your own
-> discretion.
+> This project was largely written by [Claude](https://claude.ai/)
+> It has been reviewed and tested, but use in production at your own discretion.
 >
 > 🤖 LLM/AI WARNING 🤖
 
 ---
 
 A drop-in replacement for Puppet Server's built-in CA, written in Go. It implements the same HTTP API that Puppet agents and `puppet cert` / `puppetserver ca` tooling use, backed by a flat-file certificate store compatible with existing Puppet CA directories.
+
+> **Migrating from Puppet Server?** See the [migration guide](docs/migrating-from-puppet-server.md) for step-by-step instructions, directory layout mapping, and CLI command translation.
 
 ## Features
 
@@ -71,8 +72,11 @@ mage build:fips   # → bin/puppet-ca + bin/puppet-ca-ctl  (GOEXPERIMENT=boringc
 | `--puppet-server-file` | `""` | Path to a file of CNs granted admin API access (one per line; `#` comments and blank lines ignored) |
 | `--no-pp-cli-auth` | `false` | Disable `pp_cli_auth` extension as an admin credential; require CN allow list only |
 | `--no-tls-required` | `false` | Allow plain HTTP on non-loopback addresses; use only behind a trusted TLS proxy or in test environments |
+| `--allow-public-status` | `false` | Allow unauthenticated `GET /certificate_status`; by default this endpoint requires a CA-signed client cert |
 | `--ocsp-url` | `""` | OCSP responder URL to embed in issued certificates |
 | `--crl-url` | `""` | CRL distribution point URL to embed in issued certificates |
+| `--encrypt-ca-key` | `false` | Encrypt the CA private key at rest (AES-256-GCM + Argon2id) |
+| `--ca-key-passphrase-file` | `""` | Path to file containing the CA key passphrase (first line used) |
 | `--daemon` | `false` | Fork to background (not recommended in containers) |
 | `--logfile` | `""` | Write JSON logs to this file instead of stderr |
 | `--verbosity` / `-v` | `0` | Verbosity: `0`=Info, `1`=Debug, `2`=Trace |
@@ -102,6 +106,7 @@ puppet_server: puppet.example.com
 puppet_server_file: ""
 no_pp_cli_auth: false
 no_tls_required: false
+allow_public_status: false  # set true to allow unauthenticated GET /certificate_status
 autosign_config: ""
 logfile: ""
 verbosity: 0
@@ -125,6 +130,9 @@ ca_path_length: -1    # -1 = unconstrained, 0 = leaf certs only, N = N levels of
 ca_validity_days: 0   # 0 = built-in default (~5 years); positive integer overrides
 leaf_validity_days: 0 # 0 = built-in default (~5 years); positive integer overrides
 crl_validity_days: 0  # 0 = built-in default (30 days); positive integer overrides
+# CA key encryption at rest.
+encrypt_ca_key: false           # encrypt the CA private key (AES-256-GCM + Argon2id)
+ca_key_passphrase_file: ""      # path to passphrase file; auto-generated if omitted
 ```
 
 **Environment variables (mirrors CLI flags):**
@@ -144,8 +152,13 @@ crl_validity_days: 0  # 0 = built-in default (30 days); positive integer overrid
 | `--puppet-server-file` | `PUPPET_CA_PUPPET_SERVER_FILE` |
 | `--no-pp-cli-auth` | `PUPPET_CA_NO_PP_CLI_AUTH` |
 | `--no-tls-required` | `PUPPET_CA_NO_TLS_REQUIRED` |
+| `--allow-public-status` | `PUPPET_CA_ALLOW_PUBLIC_STATUS` |
 | `--ocsp-url` | `PUPPET_CA_OCSP_URL` |
 | `--crl-url` | `PUPPET_CA_CRL_URL` |
+| `--encrypt-ca-key` | `PUPPET_CA_ENCRYPT_CA_KEY` |
+| `--ca-key-passphrase-file` | `PUPPET_CA_KEY_PASSPHRASE_FILE` |
+
+The CA key passphrase can also be provided via `PUPPET_CA_KEY_PASSPHRASE` (env var only, no CLI flag to avoid `/proc/cmdline` exposure).
 
 **Environment variables (config file / env var only — no CLI flag):**
 
@@ -235,8 +248,10 @@ csr_pem=$(cat)
   signed/             Issued certificates
   requests/           Pending CSRs
   private/
-    ca_key.pem        CA private key  (mode 0640)
-    {subject}_key.pem Server-side generated private keys (mode 0640)
+    ca_key.pem              CA private key (mode 0600; encrypted PEM when --encrypt-ca-key)
+    .ca_key_passphrase      Auto-generated passphrase file (mode 0600; only when --encrypt-ca-key
+                            is used without an explicit passphrase source)
+    {subject}_key.pem       Server-side generated private keys (mode 0600)
 ```
 
 > **Note:** Serial numbers are now cryptographically random (128-bit). The `serial`
@@ -358,13 +373,14 @@ When mTLS is enabled (both `--tls-cert` and `--tls-key` set), each endpoint requ
 
 | Tier | Required client cert | Endpoints |
 |------|---------------------|-----------|
-| **Public** | None | `GET /healthz/*`, `GET /certificate/{subject}`, `GET /certificate_revocation_list/ca`, `PUT /certificate_request/{subject}`, `GET /certificate_status/{subject}`, `GET /expirations`, `POST /ocsp`, `GET /ocsp/{request}` |
+| **Public** | None | `GET /healthz/*`, `GET /certificate/{subject}`, `GET /certificate_revocation_list/ca`, `PUT /certificate_request/{subject}`, `GET /expirations`, `POST /ocsp`, `GET /ocsp/{request}` |
+| **Any client** | Any CA-signed cert | `GET /certificate_status/{subject}` (public with `--allow-public-status`) |
 | **Self or admin** | Cert CN matches path subject, OR cert is admin | `GET /certificate_request/{subject}` |
 | **Admin** | Cert is admin (see below) | `PUT /certificate_status/{subject}`, `DELETE /certificate_status/{subject}`, `DELETE /certificate_request/{subject}`, `GET /certificate_statuses/*`, `POST /sign`, `POST /sign/all`, `POST /generate/{subject}` |
 
 In plain HTTP mode (no TLS), all endpoints are accessible without authentication.
 
-> **Note:** `GET /certificate_status/{subject}` is public — agents need to check whether their own certificate has been revoked before they possess a valid client certificate. The response exposes only public-equivalent data (state, fingerprint, expiry).
+> **Note:** `GET /certificate_status/{subject}` requires a CA-signed client certificate by default. Use `--allow-public-status` to make it public for environments where bootstrapping agents need to poll status before obtaining a client certificate. The response exposes state, fingerprint, serial number, and authorization extensions.
 
 ### Admin credential resolution
 
@@ -376,6 +392,107 @@ A client certificate is considered an admin credential if **either** condition i
 The `pp_cli_auth` check is enabled by default. Disable it with `--no-pp-cli-auth` (or `no_pp_cli_auth: true` in the config file) if you prefer strict CN-only authorization.
 
 > **OID source:** [`lib/puppet/ssl/oids.rb`](https://github.com/puppetlabs/puppet/blob/main/lib/puppet/ssl/oids.rb)
+
+## CA key encryption at rest
+
+By default, the CA private key is stored as unencrypted PEM at `<cadir>/private/ca_key.pem`.
+Enable `--encrypt-ca-key` to encrypt the key at rest using AES-256-GCM with an Argon2id-derived key.
+
+### How it works
+
+- The private key is marshalled to PKCS#8 DER, then encrypted with AES-256-GCM.
+- The encryption key is derived from a passphrase using Argon2id (time=3, memory=64 MiB, threads=4).
+- The encrypted key is stored as a PEM block with type `ENCRYPTED PRIVATE KEY`.
+- On startup, the key is decrypted into memory and used for all signing operations.
+
+### Passphrase resolution order
+
+1. **`--ca-key-passphrase-file`** — reads the first line of the specified file.
+2. **`PUPPET_CA_KEY_PASSPHRASE`** environment variable — avoids CLI `/proc/cmdline` exposure.
+3. **Auto-generated** — if no passphrase source is configured, a cryptographically random
+   passphrase is generated and saved to `<cadir>/private/.ca_key_passphrase` (mode `0600`).
+   The path is logged at startup so operators know where it is.
+
+### Example usage
+
+```bash
+# Bootstrap with encryption (auto-generated passphrase):
+puppet-ca --cadir /var/lib/puppet-ca --encrypt-ca-key
+
+# Bootstrap with an explicit passphrase file:
+echo "my-secret-passphrase" > /etc/puppet-ca/key-passphrase
+chmod 600 /etc/puppet-ca/key-passphrase
+puppet-ca --cadir /var/lib/puppet-ca --encrypt-ca-key \
+  --ca-key-passphrase-file /etc/puppet-ca/key-passphrase
+
+# Or via environment variable:
+export PUPPET_CA_KEY_PASSPHRASE="my-secret-passphrase"
+puppet-ca --cadir /var/lib/puppet-ca --encrypt-ca-key
+
+# puppet-ca-ctl setup also supports encryption:
+puppet-ca-ctl setup --cadir /var/lib/puppet-ca --encrypt-ca-key
+```
+
+### Backward compatibility
+
+Existing CAs with unencrypted keys continue to work without changes. The `--encrypt-ca-key`
+flag only affects new CA bootstraps. Loading transparently handles both encrypted and
+unencrypted PEM files.
+
+### Security considerations
+
+Encrypting the CA key at rest protects against **offline exfiltration** — if an attacker
+obtains the key file from a backup, disk image, or volume snapshot, the key is unusable
+without the passphrase. It does **not** protect against a live host compromise where the
+attacker can read the passphrase source or dump the process memory.
+
+For stronger protection, consider hardware security modules (HSM) via PKCS#11 — see
+[Planned: PKCS#11 / HSM support](#planned-pkcs11--hsm-support) below.
+
+### Planned: PKCS#11 / HSM support
+
+A future enhancement will add PKCS#11 support so the CA private key can be held in a
+hardware security module (HSM), TPM, or software token (e.g. SoftHSM2). The key would
+never leave the token — only signing operations would be delegated via the PKCS#11 API.
+
+The implementation path is straightforward because the CA already stores its key as a
+`crypto.Signer` interface (`internal/ca/ca.go`). A PKCS#11-backed signer would implement
+the same interface, requiring no changes to the signing, revocation, or OCSP code paths.
+
+**Planned design:**
+- A `--ca-key-provider` flag: `file` (default, current behaviour) or `pkcs11`
+- For `pkcs11`: a PKCS#11 module URI or library path, slot/token label, and PIN
+  (via file or env var, same pattern as `--ca-key-passphrase-file`)
+- Integration with **p11-kit** for module discovery, allowing operators to configure the
+  PKCS#11 backend (SoftHSM2, TPM2 PKCS#11, cloud KMS bridges, Nitrokey, YubiHSM, etc.)
+  via the system p11-kit configuration rather than hardcoding library paths
+- CGo dependency for the PKCS#11 C bindings (build-time opt-in)
+
+This is tracked as a separate feature. Contributions welcome.
+
+### Monitoring destructive operations
+
+The server tracks the rate of destructive operations (certificate revocation and
+deletion) per authenticated client. When a single client exceeds **5 destructive
+operations per minute**, a warning is emitted to the structured log:
+
+```
+level=WARN msg="High rate of destructive operations detected" client=admin.example.com operation=revoke
+```
+
+This is a **detective control** — it does not block the operation, but alerts
+operators to potentially anomalous administrative activity. Operators should:
+
+- Forward `puppet-ca` logs to a centralized log aggregator (e.g. Loki,
+  Elasticsearch, Splunk)
+- Create alerts on `"High rate of destructive operations"` log messages
+- Investigate any alerts promptly — a burst of revocations may indicate a
+  compromised admin certificate or an operational error
+- Consider whether the `--allow-list` should be tightened if unexpected clients
+  appear in these warnings
+
+The threshold (5 ops/minute) is a sensible default for environments where
+bulk revocation is uncommon. Future versions may make this configurable.
 
 ## puppet-ca-ctl — the operator CLI
 
@@ -480,7 +597,7 @@ mage test:bench
 mage test:puppet
 ```
 
-`test:integCompose` and `test:loadCompose` use `compose.yml` — the canonical integration test suite. It runs two containers on an isolated network (puppet-ca + test-runner) and exercises the full API in TAP format across 17 test groups:
+`test:integCompose` and `test:loadCompose` use `compose.yml` — the canonical integration test suite. It runs two containers on an isolated network (puppet-ca + test-runner) and exercises the full API in TAP format across 19 test groups:
 
 | Group | Coverage |
 |-------|----------|
@@ -501,9 +618,12 @@ mage test:puppet
 | 15 | Autosign modes: `true`, glob-pattern file, executable plugin |
 | 16 | Config drivers: env vars, config file |
 | 17 | `pp_cli_auth` mTLS: Phase 1 bootstraps certs (loopback HTTP); Phase 2 asserts pp_cli_auth cert reaches admin endpoints while plain cert is denied |
+| 18 | `puppet-ca-ctl` error paths: revoke/clean/sign/generate against non-existent or duplicate subjects; arg validation; `--dns` SAN delivery; full mTLS via `--ca-cert`/`--client-cert`/`--client-key`; unreachable server |
+| 19 | Migration from Puppet Server CA: import CA cert/key/CRL via `puppet-ca-ctl import`, copy pre-existing signed certs, verify fetch/sign/revoke/list all work on the migrated CA |
 
 `test:bench` uses `compose-bench.yml` (autosign=true, k6 load runner).
 `test:puppet` uses `compose-puppet.yml` — a five-service stack that validates end-to-end catalog compilation, PuppetDB reporting, exported resources, and CRL revocation using a real OpenVox 8 agent and WEBrick puppet master. The CA runs with genuine TLS (a cert with CN=puppet-ca signed by the CA itself); all inter-service traffic verifies it.
+`test:migration` uses `compose-migration.yml` — starts a real VoxPupuli Puppet Server (`voxpupuli/puppetserver:latest`) to create a genuine Puppet CA, then imports its CA material into puppet-ca using `puppet-ca-ctl import` and verifies the full migration path: old certs are fetchable, new certs can be signed, migrated certs can be revoked and cleaned.
 
 The k6 script (`test/load.js`) runs two concurrent scenarios:
 - **reads** — hammers GET /certificate/ca, CRL, and expirations; ramps to 200 VUs
@@ -535,7 +655,8 @@ mage test:bench
 | Content | Mode |
 |---------|------|
 | Directories | `0750` |
-| Private keys | `0640` |
-| Public data (certs, CSRs, CRL, inventory) | `0644` |
+| Private keys | `0600` |
+| CRL file | `0600` |
+| Public data (certs, CSRs, inventory) | `0644` |
 
 The user running `puppet-ca` must own (or have write access to) `--cadir`.

@@ -117,7 +117,7 @@ func ImportCA(store *storage.StorageService, certBundlePEM, keyPEM, crlPEM []byt
 		return fmt.Errorf("failed to create CA directories: %w", err)
 	}
 
-	// --- Write CA key (mode 0640) ---
+	// --- Write CA key (mode 0600) ---
 	if err := os.WriteFile(store.CAKeyPath(), keyPEM, storage.FilePermPrivate); err != nil {
 		return fmt.Errorf("failed to write CA key: %w", err)
 	}

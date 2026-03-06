@@ -133,9 +133,20 @@ clean_client_cert() {
 }
 
 # ── Helper: run puppet agent on client container ──────────────────────────
+# Explicit --confdir / --vardir / --logdir / --rundir override the non-root
+# defaults (~/.puppetlabs/...) so puppet uses the pre-created directories
+# that are writable by the puppet-agent user (see Dockerfile.client).
+_PUPPET_DIRS=(
+    --confdir   /etc/puppetlabs/puppet
+    --vardir    /opt/puppetlabs/puppet/cache
+    --logdir    /var/log/puppetlabs/puppet
+    --rundir    /var/run/puppetlabs
+    --publicdir /opt/puppetlabs/puppet/public
+)
 run_agent() {
     exec_client \
         puppet agent --test \
+        "${_PUPPET_DIRS[@]}" \
         --server    puppet-master \
         --ca_server puppet-ca \
         --ca_port   8140 \
@@ -143,9 +154,13 @@ run_agent() {
 }
 
 # ── Helper: run puppet agent on master container (self-apply) ────────────
+# Explicit --confdir is required because puppetserver sets HOME to
+# /opt/puppetlabs/server/data/puppetserver, causing puppet agent to derive
+# confdir as $HOME/.puppetlabs/etc/puppet instead of /etc/puppetlabs/puppet.
 run_master_agent() {
     exec_master \
         puppet agent --test \
+        --confdir   /etc/puppetlabs/puppet \
         --server    puppet-master \
         --ca_server puppet-ca \
         --ca_port   8140 \
@@ -272,13 +287,12 @@ assert_http 200 "CRL endpoint public (no client cert)" \
     --cacert "$WORK_DIR/ca.pem" \
     "${CA_HOST_URL}/puppet-ca/v1/certificate_revocation_list/ca"
 
-assert_http 404 "Nonexistent cert status returns 404" \
-    "${_CA[@]}" "${CA_HOST_URL}/puppet-ca/v1/certificate_status/nonexistent"
-
 assert_http 200 "Expirations endpoint returns 200" \
     "${_CA[@]}" "${CA_HOST_URL}/puppet-ca/v1/expirations"
 
-# Test a manual CSR lifecycle (autosign=true, so it signs immediately).
+# Generate a test cert via the CSR lifecycle (autosign=true → signs immediately).
+# This cert is reused below as an mTLS client credential for endpoints that
+# require a CA-signed certificate (e.g. certificate_status).
 _INTEG_HOST="integ-${RUN_ID}.localdomain"
 openssl genrsa -out "$WORK_DIR/integ.key" 2048 2>/dev/null || true
 [ -f "$WORK_DIR/integ.key" ] && chmod 600 "$WORK_DIR/integ.key"
@@ -298,13 +312,6 @@ _csr_st=$(curl -s -o /dev/null -w '%{http_code}' \
 
 sleep 1  # autosign is immediate but allow a moment
 
-_status_body=$(curl -s "${_CA[@]}" \
-    "${CA_HOST_URL}/puppet-ca/v1/certificate_status/${_INTEG_HOST}" \
-    2>/dev/null) || true
-grep -qF '"state":"signed"' <<< "$_status_body" \
-    && pass "Autosigned cert status is 'signed'" \
-    || fail "Autosigned cert status is 'signed'" "body: $_status_body"
-
 if curl -sf "${_CA[@]}" \
         "${CA_HOST_URL}/puppet-ca/v1/certificate/${_INTEG_HOST}" \
         -o "$WORK_DIR/integ.crt" 2>/dev/null; then
@@ -319,6 +326,28 @@ if openssl verify -CAfile "$WORK_DIR/ca.pem" \
 else
     fail "Signed cert verifies against CA"
 fi
+
+# mTLS credentials for endpoints that require a CA-signed client cert.
+_INTEG_MTLS=(
+    --cacert "$WORK_DIR/ca.pem"
+    --cert   "$WORK_DIR/integ.crt"
+    --key    "$WORK_DIR/integ.key"
+)
+
+# certificate_status requires a CA-signed client cert (tierAnyClient).
+# Unauthenticated requests must be rejected; authenticated ones must succeed.
+assert_http 403 "certificate_status without client cert returns 403" \
+    "${_CA[@]}" "${CA_HOST_URL}/puppet-ca/v1/certificate_status/${_INTEG_HOST}"
+
+_status_body=$(curl -s "${_INTEG_MTLS[@]}" \
+    "${CA_HOST_URL}/puppet-ca/v1/certificate_status/${_INTEG_HOST}" \
+    2>/dev/null) || true
+grep -qF '"state":"signed"' <<< "$_status_body" \
+    && pass "Autosigned cert status is 'signed' (mTLS)" \
+    || fail "Autosigned cert status is 'signed' (mTLS)" "body: $_status_body"
+
+assert_http 404 "Nonexistent cert status returns 404 (mTLS)" \
+    "${_INTEG_MTLS[@]}" "${CA_HOST_URL}/puppet-ca/v1/certificate_status/nonexistent"
 
 # Revoke the integ cert (admin — requires master cert; run from master container).
 _revoke_st=$(exec_master curl -s -o /dev/null -w '%{http_code}' \

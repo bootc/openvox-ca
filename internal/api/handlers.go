@@ -38,9 +38,10 @@ import (
 // AuthConfig is the mTLS authorization configuration wired into the server.
 // Nil means no mTLS enforcement (plain HTTP / dev mode).
 type AuthConfig struct {
-	CACert      *x509.Certificate
-	AllowList   map[string]bool // admin CNs (puppet-server hostnames)
-	NoPpCliAuth bool            // when true, pp_cli_auth extension does not grant admin access
+	CACert            *x509.Certificate
+	AllowList         map[string]bool // admin CNs (puppet-server hostnames)
+	NoPpCliAuth       bool            // when true, pp_cli_auth extension does not grant admin access
+	AllowPublicStatus bool            // when true, GET /certificate_status is public (no client cert required)
 }
 
 type Server struct {
@@ -50,12 +51,22 @@ type Server struct {
 	// address per minute on the unauthenticated PUT /certificate_request
 	// endpoint. Zero (the default) disables rate limiting.
 	CSRRateLimit int
+	// PlainHTTP is set when the server is running without TLS.
+	// The /generate endpoint refuses to serve private keys when this is true.
+	PlainHTTP bool
+	// SignBatchLimit is the maximum number of certificates that can be signed
+	// in a single POST /sign or POST /sign/all request. Zero disables the limit.
+	SignBatchLimit int
 
-	csrLimiter *ipRateLimiter
+	csrLimiter     *ipRateLimiter
+	destructiveOps *destructiveOpTracker
 }
 
 func New(c *ca.CA) *Server {
-	return &Server{CA: c}
+	return &Server{
+		CA:             c,
+		destructiveOps: newDestructiveOpTracker(5, time.Minute),
+	}
 }
 
 // Routes registers all handlers and returns the handler (with auth middleware if configured).
@@ -132,7 +143,7 @@ func (s *Server) handleGetStatus(w http.ResponseWriter, r *http.Request) {
 		http.Error(w, "invalid subject", http.StatusBadRequest)
 		return
 	}
-	slog.Debug("GET certificate_status", "subject", subject)
+	slog.Info("GET certificate_status", "subject", subject, "client", clientCN(r))
 
 	// Check signed dir first.
 	certPEM, err := s.CA.Storage.GetCert(subject)
@@ -168,7 +179,7 @@ func (s *Server) handlePutStatus(w http.ResponseWriter, r *http.Request) {
 		http.Error(w, "invalid subject", http.StatusBadRequest)
 		return
 	}
-	slog.Debug("PUT certificate_status", "subject", subject)
+	slog.Info("PUT certificate_status", "subject", subject, "client", clientCN(r))
 
 	var body PutStatusBody
 	if err := json.NewDecoder(r.Body).Decode(&body); err != nil {
@@ -196,6 +207,10 @@ func (s *Server) handlePutStatus(w http.ResponseWriter, r *http.Request) {
 			slog.Warn("Revoke failed", "subject", subject, "error", err)
 			http.Error(w, err.Error(), http.StatusConflict)
 			return
+		}
+		if s.destructiveOps != nil && s.destructiveOps.Record(clientCN(r)) {
+			slog.Warn("High rate of destructive operations detected",
+				"client", clientCN(r), "operation", "revoke")
 		}
 		w.WriteHeader(http.StatusNoContent)
 
@@ -284,6 +299,9 @@ func (s *Server) handleGetRequest(w http.ResponseWriter, r *http.Request) {
 }
 
 func (s *Server) handlePutRequest(w http.ResponseWriter, r *http.Request) {
+	// SECURITY: Per-IP rate limiting on the unauthenticated CSR submission
+	// endpoint. Prevents CSR flooding denial-of-service attacks.
+	// NIST 800-53: SC-5 (Denial-of-Service Protection)
 	if s.csrLimiter != nil && !s.csrLimiter.Allow(clientIP(r)) {
 		http.Error(w, "rate limit exceeded", http.StatusTooManyRequests)
 		return
@@ -296,6 +314,8 @@ func (s *Server) handlePutRequest(w http.ResponseWriter, r *http.Request) {
 	}
 	slog.Debug("PUT certificate_request", "subject", subject)
 
+	// SECURITY: Limit CSR body to 1 MiB to prevent memory exhaustion.
+	// NIST 800-53: SC-5 (Denial-of-Service Protection)
 	csrPEM, err := io.ReadAll(io.LimitReader(r.Body, 1<<20))
 	if err != nil {
 		http.Error(w, "failed to read body: "+err.Error(), http.StatusInternalServerError)
@@ -325,7 +345,7 @@ func (s *Server) handleDeleteRequest(w http.ResponseWriter, r *http.Request) {
 		http.Error(w, "invalid subject", http.StatusBadRequest)
 		return
 	}
-	slog.Debug("DELETE certificate_request", "subject", subject)
+	slog.Info("DELETE certificate_request", "subject", subject, "client", clientCN(r))
 
 	if err := s.CA.Storage.DeleteCSR(subject); err != nil {
 		http.Error(w, "CSR not found", http.StatusNotFound)
@@ -342,12 +362,21 @@ type generateResponse struct {
 }
 
 func (s *Server) handlePostGenerate(w http.ResponseWriter, r *http.Request) {
+	// SECURITY: Refuse to serve private keys over plain HTTP — the response
+	// body contains the generated private key in cleartext. Without TLS, any
+	// on-path observer can capture the key.
+	// NIST 800-53: SC-8 (Transmission Confidentiality and Integrity), SC-12 (Cryptographic Key Establishment and Management)
+	if s.PlainHTTP {
+		http.Error(w, "private key delivery requires TLS", http.StatusForbidden)
+		return
+	}
+
 	subject := r.PathValue("subject")
 	if err := ca.ValidateSubject(subject); err != nil {
 		http.Error(w, "invalid subject: "+err.Error(), http.StatusBadRequest)
 		return
 	}
-	slog.Debug("POST generate", "subject", subject)
+	slog.Info("POST generate", "subject", subject, "client", clientCN(r))
 
 	// Optional DNS alt names from query params (?dns=a&dns=b).
 	dnsAltNames := r.URL.Query()["dns"]
@@ -367,6 +396,41 @@ func (s *Server) handlePostGenerate(w http.ResponseWriter, r *http.Request) {
 		PrivateKey:  string(result.PrivateKeyPEM),
 		Certificate: string(result.CertificatePEM),
 	})
+}
+
+// clientCN extracts the Common Name from the TLS client certificate, if any.
+// Returns "" when TLS is not configured or no client cert is presented.
+func clientCN(r *http.Request) string {
+	if r.TLS != nil && len(r.TLS.PeerCertificates) > 0 {
+		return r.TLS.PeerCertificates[0].Subject.CommonName
+	}
+	return ""
+}
+
+// signInBatches signs subjects in chunks of SignBatchLimit (if set) and merges
+// the results. This prevents unbounded bulk signing while still completing the
+// full request rather than rejecting it.
+func (s *Server) signInBatches(subjects []string) ca.SignResult {
+	if s.SignBatchLimit <= 0 || len(subjects) <= s.SignBatchLimit {
+		return s.CA.SignMultiple(subjects)
+	}
+
+	merged := ca.SignResult{
+		Signed:        []string{},
+		NoCSR:         []string{},
+		SigningErrors: []string{},
+	}
+	for i := 0; i < len(subjects); i += s.SignBatchLimit {
+		end := i + s.SignBatchLimit
+		if end > len(subjects) {
+			end = len(subjects)
+		}
+		batch := s.CA.SignMultiple(subjects[i:end])
+		merged.Signed = append(merged.Signed, batch.Signed...)
+		merged.NoCSR = append(merged.NoCSR, batch.NoCSR...)
+		merged.SigningErrors = append(merged.SigningErrors, batch.SigningErrors...)
+	}
+	return merged
 }
 
 // --- Helpers ---
@@ -487,7 +551,7 @@ func (s *Server) handleDeleteStatus(w http.ResponseWriter, r *http.Request) {
 		http.Error(w, "invalid subject", http.StatusBadRequest)
 		return
 	}
-	slog.Debug("DELETE certificate_status", "subject", subject)
+	slog.Info("DELETE certificate_status", "subject", subject, "client", clientCN(r))
 
 	if err := s.CA.Clean(subject); err != nil {
 		slog.Warn("Clean failed", "subject", subject, "error", err)
@@ -497,6 +561,10 @@ func (s *Server) handleDeleteStatus(w http.ResponseWriter, r *http.Request) {
 			http.Error(w, err.Error(), http.StatusConflict)
 		}
 		return
+	}
+	if s.destructiveOps != nil && s.destructiveOps.Record(clientCN(r)) {
+		slog.Warn("High rate of destructive operations detected",
+			"client", clientCN(r), "operation", "clean")
 	}
 	w.WriteHeader(http.StatusNoContent)
 }
@@ -599,7 +667,8 @@ type SignRequestBody struct {
 }
 
 func (s *Server) handlePostSign(w http.ResponseWriter, r *http.Request) {
-	slog.Debug("POST sign")
+	cn := clientCN(r)
+	slog.Info("POST sign", "client", cn)
 
 	var body SignRequestBody
 	if err := json.NewDecoder(r.Body).Decode(&body); err != nil {
@@ -611,19 +680,24 @@ func (s *Server) handlePostSign(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	result := s.CA.SignMultiple(body.Certnames)
+	slog.Info("Signing certificates", "count", len(body.Certnames), "subjects", body.Certnames, "client", cn)
+	result := s.signInBatches(body.Certnames)
 	w.Header().Set("Content-Type", "application/json")
 	json.NewEncoder(w).Encode(result)
 }
 
 func (s *Server) handlePostSignAll(w http.ResponseWriter, r *http.Request) {
-	slog.Debug("POST sign/all")
+	cn := clientCN(r)
+	slog.Info("POST sign/all", "client", cn)
 
-	result, err := s.CA.SignAll()
+	pending, err := s.CA.Storage.ListCSRs()
 	if err != nil {
-		http.Error(w, "failed to sign all: "+err.Error(), http.StatusInternalServerError)
+		http.Error(w, "failed to list pending CSRs: "+err.Error(), http.StatusInternalServerError)
 		return
 	}
+
+	result := s.signInBatches(pending)
+	slog.Info("Signed all pending CSRs", "signed", len(result.Signed), "errors", len(result.SigningErrors), "client", cn)
 	w.Header().Set("Content-Type", "application/json")
 	json.NewEncoder(w).Encode(result)
 }

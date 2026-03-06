@@ -50,7 +50,7 @@ import (
 // ── Namespaces ────────────────────────────────────────────────────────────────
 
 type Build mg.Namespace // build:all  build:fips  build:dist
-type Test mg.Namespace  // test:unit  test:integcompose  test:integcomposefips  test:loadcompose  test:bench  test:puppet  test:puppetfips
+type Test mg.Namespace  // test:unit  test:integcompose  test:integcomposefips  test:loadcompose  test:bench  test:puppet  test:puppetfips  test:migration
 type Dev mg.Namespace   // dev:check  dev:tidy    dev:clean  dev:container
 
 // ── Helpers ───────────────────────────────────────────────────────────────────
@@ -395,6 +395,31 @@ func (Test) Puppet() error {
 
 	fmt.Println("Running puppet stack integration tests...")
 	return sh.RunV("bash", "test/puppet/puppet-stack.sh", "--up")
+}
+
+// Migration builds the puppet-ca image and runs the migration integration test
+// suite: imports a genuine VoxPupuli Puppet Server CA into puppet-ca, then
+// verifies that the migrated CA can serve old certs, sign new ones, revoke,
+// and clean.
+//
+// Requires a container runtime and network access to pull
+// docker.io/voxpupuli/puppetserver:latest on first run.
+func (Test) Migration() error {
+	mg.Deps(Build{}.All)
+	fmt.Println("Building compose images for migration test...")
+	if err := runCompose(nil, "-f", "compose-migration.yml", "build"); err != nil {
+		return err
+	}
+
+	fmt.Println("Running migration integration tests...")
+	err := runCompose(nil, "-f", "compose-migration.yml", "up",
+		"--exit-code-from", "test-runner",
+		"--abort-on-container-exit")
+
+	fmt.Println("Tearing down migration stack...")
+	_ = runCompose(nil, "-f", "compose-migration.yml", "down", "--volumes")
+
+	return err
 }
 
 // PuppetFIPS is like Puppet but compiles with GOEXPERIMENT=boringcrypto so the

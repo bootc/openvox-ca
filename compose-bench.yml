@@ -20,10 +20,13 @@ services:
       context: .
       dockerfile: Dockerfile.run
     image: puppet-ca-integ:latest   # reuse the image built by mage build / integCompose
+    # WARNING: --no-tls-required and --autosign-config=true are for load
+    # testing ONLY. Never use these flags in production.
     command:
       - --cadir=/data
       - --autosign-config=true      # workflow scenario needs immediate signing
       - --no-tls-required           # test-only stack; CA not reachable from outside compose network
+      - --csr-rate-limit=0          # disable rate limiting for load testing
       - -v=0                        # quiet logging; reduces I/O noise during load
     expose:
       - "8140"

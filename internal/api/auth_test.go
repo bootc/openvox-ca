@@ -365,8 +365,8 @@ var _ = Describe("Auth Middleware", func() {
 
 	// ── CRL unavailable → fail-closed ─────────────────────────────────────────
 
-	Context("CRL unavailable", func() {
-		It("returns 403 when the CRL file cannot be read (fail-closed)", func() {
+	Context("CRL unavailable on disk", func() {
+		It("still allows auth when CRL file is deleted (in-memory cache)", func() {
 			// Sign a cert through the CA so it is a valid client cert.
 			csrPEM, err := testutil.GenerateCSR("crl-test-node")
 			Expect(err).NotTo(HaveOccurred())
@@ -381,13 +381,15 @@ var _ = Describe("Auth Middleware", func() {
 			// Remove the CRL file to simulate a disk fault.
 			Expect(os.Remove(store.CRLPath())).To(Succeed())
 
-			// The middleware must deny the request (fail-closed) rather than
-			// allowing access because it cannot check revocation status.
+			// The in-memory CRL cache allows auth to continue even when
+			// the file is missing — no longer a total DoS. The request
+			// reaches the handler (not blocked by auth); the CSR was
+			// consumed during signing so the handler returns 404.
 			req := httptest.NewRequest("GET", "/certificate_request/crl-test-node", nil)
 			req = withClientCert(req, issuedCert)
 			rr := httptest.NewRecorder()
 			mux.ServeHTTP(rr, req)
-			Expect(rr.Code).To(Equal(http.StatusForbidden))
+			Expect(rr.Code).NotTo(Equal(http.StatusForbidden))
 		})
 	})
 
@@ -666,7 +668,7 @@ var _ = Describe("Auth Middleware", func() {
 	})
 
 	Context("public endpoint is reachable regardless of client cert", func() {
-		It("GET /certificate_status/{own-node} is not rejected (public tier)", func() {
+		It("GET /certificate_status/{own-node} is not rejected with a valid client cert (anyClient tier)", func() {
 			clientCert := issueClientCert("my-node", caCert, caKey)
 			req := httptest.NewRequest("GET", "/certificate_status/my-node", nil)
 			req = withClientCert(req, clientCert)
@@ -674,6 +676,73 @@ var _ = Describe("Auth Middleware", func() {
 			mux.ServeHTTP(rr, req)
 			// 404 because the node does not exist, but not 403.
 			Expect(rr.Code).NotTo(Equal(http.StatusForbidden))
+		})
+	})
+
+	// ── AllowPublicStatus opt-in ──────────────────────────────────────────────
+
+	Context("GET /certificate_status default (AllowPublicStatus=false)", func() {
+		It("returns 403 when no client cert is presented", func() {
+			req := httptest.NewRequest("GET", "/certificate_status/some-node", nil)
+			// Simulate TLS connection with no client cert
+			req.TLS = &tls.ConnectionState{}
+			rr := httptest.NewRecorder()
+			mux.ServeHTTP(rr, req)
+			Expect(rr.Code).To(Equal(http.StatusForbidden))
+		})
+
+		It("returns 403 for prefixed path without client cert", func() {
+			req := httptest.NewRequest("GET", "/puppet-ca/v1/certificate_status/some-node", nil)
+			req.TLS = &tls.ConnectionState{}
+			rr := httptest.NewRecorder()
+			mux.ServeHTTP(rr, req)
+			Expect(rr.Code).To(Equal(http.StatusForbidden))
+		})
+	})
+
+	Context("AllowPublicStatus=true allows unauthenticated GET /certificate_status", func() {
+		var publicStatusMux http.Handler
+
+		BeforeEach(func() {
+			srv := api.New(myCA)
+			srv.AuthConfig = &api.AuthConfig{
+				CACert:            caCert,
+				AllowList:         map[string]bool{"puppet-server": true},
+				AllowPublicStatus: true,
+			}
+			publicStatusMux = srv.Routes()
+		})
+
+		It("does not require a client cert for GET /certificate_status", func() {
+			req := httptest.NewRequest("GET", "/certificate_status/any-node", nil)
+			rr := httptest.NewRecorder()
+			publicStatusMux.ServeHTTP(rr, req)
+			// Should get through to the handler (404 because node doesn't exist), not 403.
+			Expect(rr.Code).NotTo(Equal(http.StatusForbidden))
+		})
+
+		It("does not require a client cert for prefixed GET /puppet-ca/v1/certificate_status", func() {
+			req := httptest.NewRequest("GET", "/puppet-ca/v1/certificate_status/any-node", nil)
+			rr := httptest.NewRecorder()
+			publicStatusMux.ServeHTTP(rr, req)
+			Expect(rr.Code).NotTo(Equal(http.StatusForbidden))
+		})
+
+		It("still requires admin for PUT /certificate_status (not affected by AllowPublicStatus)", func() {
+			body, _ := json.Marshal(api.PutStatusBody{DesiredState: "signed"})
+			req := httptest.NewRequest("PUT", "/certificate_status/some-node", bytes.NewReader(body))
+			req.TLS = &tls.ConnectionState{}
+			rr := httptest.NewRecorder()
+			publicStatusMux.ServeHTTP(rr, req)
+			Expect(rr.Code).To(Equal(http.StatusForbidden))
+		})
+
+		It("still requires admin for DELETE /certificate_status (not affected by AllowPublicStatus)", func() {
+			req := httptest.NewRequest("DELETE", "/certificate_status/some-node", nil)
+			req.TLS = &tls.ConnectionState{}
+			rr := httptest.NewRecorder()
+			publicStatusMux.ServeHTTP(rr, req)
+			Expect(rr.Code).To(Equal(http.StatusForbidden))
 		})
 	})
 
@@ -716,6 +785,81 @@ var _ = Describe("Auth Middleware", func() {
 			rr := httptest.NewRecorder()
 			muxNoCNList.ServeHTTP(rr, req)
 			Expect(rr.Code).To(Equal(http.StatusForbidden))
+		})
+	})
+
+	// ── pp_cli_auth escalation via CSR is blocked ────────────────────────────
+	// Full attack path from PUPPET-CA-20260305-001: submit CSR with pp_cli_auth
+	// → autosign → retrieve cert → attempt admin access → must be DENIED.
+
+	Context("CSR-injected pp_cli_auth does not grant admin after autosign (attack path blocked)", func() {
+		It("denies admin access for a cert autosigned from a CSR containing pp_cli_auth", func() {
+			// Stand up a CA with autosign=true to simulate the attack path.
+			escalationDir, err := os.MkdirTemp("", "puppet-ca-escalation-test")
+			Expect(err).NotTo(HaveOccurred())
+			defer os.RemoveAll(escalationDir)
+			autosignStore := storage.New(escalationDir)
+			autosignCA := ca.New(autosignStore, ca.AutosignConfig{Mode: "true"}, "puppet.test")
+			Expect(autosignStore.EnsureDirs()).To(Succeed())
+			Expect(os.WriteFile(autosignStore.CAKeyPath(), cachedKeyPEM, 0640)).To(Succeed())
+			Expect(os.WriteFile(autosignStore.CACertPath(), cachedCrtPEM, 0644)).To(Succeed())
+			Expect(autosignStore.UpdateCRL(cachedCrlPEM)).To(Succeed())
+			Expect(os.WriteFile(autosignStore.InventoryPath(), []byte{}, 0644)).To(Succeed())
+			Expect(autosignCA.Init()).To(Succeed())
+
+			// Step 1: Craft a CSR with pp_cli_auth = "true".
+			key, err := rsa.GenerateKey(rand.Reader, 2048)
+			Expect(err).NotTo(HaveOccurred())
+			ppCliAuthVal, err := asn1.Marshal("true")
+			Expect(err).NotTo(HaveOccurred())
+			csrBytes, err := x509.CreateCertificateRequest(rand.Reader, &x509.CertificateRequest{
+				Subject: pkix.Name{CommonName: "evil-node"},
+				ExtraExtensions: []pkix.Extension{{
+					Id:    asn1.ObjectIdentifier{1, 3, 6, 1, 4, 1, 34380, 1, 3, 39},
+					Value: ppCliAuthVal,
+				}},
+			}, key)
+			Expect(err).NotTo(HaveOccurred())
+			csrPEM := pem.EncodeToMemory(&pem.Block{Type: "CERTIFICATE REQUEST", Bytes: csrBytes})
+
+			// Step 2: Submit CSR — autosign signs it immediately.
+			srv := api.New(autosignCA)
+			srv.AuthConfig = &api.AuthConfig{
+				CACert:    caCert,
+				AllowList: map[string]bool{},
+			}
+			attackMux := srv.Routes()
+
+			rr := httptest.NewRecorder()
+			attackMux.ServeHTTP(rr, httptest.NewRequest("PUT",
+				"/puppet-ca/v1/certificate_request/evil-node", bytes.NewReader(csrPEM)))
+			Expect(rr.Code).To(Equal(http.StatusOK))
+
+			// Step 3: Retrieve the signed certificate.
+			certRR := httptest.NewRecorder()
+			attackMux.ServeHTTP(certRR, httptest.NewRequest("GET",
+				"/puppet-ca/v1/certificate/evil-node", nil))
+			Expect(certRR.Code).To(Equal(http.StatusOK))
+
+			block, _ := pem.Decode(certRR.Body.Bytes())
+			Expect(block).NotTo(BeNil(), "response must contain a PEM certificate")
+			evilCert, err := x509.ParseCertificate(block.Bytes)
+			Expect(err).NotTo(HaveOccurred())
+
+			// Verify the signed cert does NOT carry pp_cli_auth.
+			oidPpCliAuth := asn1.ObjectIdentifier{1, 3, 6, 1, 4, 1, 34380, 1, 3, 39}
+			for _, ext := range evilCert.Extensions {
+				Expect(ext.Id.Equal(oidPpCliAuth)).To(BeFalse(),
+					"signed cert must not contain pp_cli_auth extension")
+			}
+
+			// Step 4: Use the cert for admin access — must be DENIED.
+			req := httptest.NewRequest("POST", "/puppet-ca/v1/sign/all", nil)
+			req = withClientCert(req, evilCert)
+			adminRR := httptest.NewRecorder()
+			attackMux.ServeHTTP(adminRR, req)
+			Expect(adminRR.Code).To(Equal(http.StatusForbidden),
+				"attacker cert from CSR with pp_cli_auth must NOT grant admin access")
 		})
 	})
 

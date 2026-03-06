@@ -20,14 +20,22 @@ RUN echo 'JAVA_ARGS="-Xms512m -Xmx512m -XX:ReservedCodeCacheSize=512m"' \
 
 ENV PATH=/opt/puppetlabs/server/bin:/opt/puppetlabs/puppet/bin:${PATH}
 
-# Create SSL directory tree; openvox-server RPM creates the puppet user.
+# Give puppet ownership of config and SSL dirs so the entrypoint can write
+# puppet.conf, webserver.conf, ca.cfg, etc. as non-root.
 RUN mkdir -p /etc/puppetlabs/puppet/ssl && \
-    chown puppet:puppet /etc/puppetlabs/puppet/ssl
+    chown -R puppet:puppet \
+        /etc/puppetlabs/puppet \
+        /etc/puppetlabs/puppetserver/conf.d \
+        /etc/puppetlabs/puppetserver/services.d
 
 # Copy bootstrap + startup entrypoint.
 COPY entrypoint.sh /usr/local/bin/entrypoint.sh
 RUN chmod +x /usr/local/bin/entrypoint.sh
 
 EXPOSE 8140
+
+# SECURITY: Run as non-root to limit blast radius of container escape.
+# NIST 800-53: AC-6 (Least Privilege), CM-7 (Least Functionality)
+USER puppet
 
 ENTRYPOINT ["/usr/local/bin/entrypoint.sh"]

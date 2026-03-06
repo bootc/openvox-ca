@@ -651,6 +651,85 @@ var _ = Describe("API Workflow", func() {
 		})
 	})
 
+	Context("POST /sign/all with SignBatchLimit", func() {
+		It("should sign all CSRs in batches when batch limit is set", func() {
+			// Create a server with a small batch limit.
+			batchServer := api.New(myCA)
+			batchServer.SignBatchLimit = 2
+			batchMux := batchServer.Routes()
+
+			// Submit 5 CSRs.
+			subjects := []string{"batch-a", "batch-b", "batch-c", "batch-d", "batch-e"}
+			for _, sub := range subjects {
+				csrPEM, err := testutil.GenerateCSR(sub)
+				Expect(err).NotTo(HaveOccurred())
+				batchMux.ServeHTTP(httptest.NewRecorder(),
+					httptest.NewRequest("PUT", "/certificate_request/"+sub, bytes.NewReader(csrPEM)))
+			}
+
+			req := httptest.NewRequest("POST", "/sign/all", nil)
+			rr := httptest.NewRecorder()
+			batchMux.ServeHTTP(rr, req)
+			Expect(rr.Code).To(Equal(http.StatusOK))
+
+			var result struct {
+				Signed        []string `json:"signed"`
+				SigningErrors []string `json:"signing-errors"`
+			}
+			Expect(json.Unmarshal(rr.Body.Bytes(), &result)).To(Succeed())
+			Expect(result.Signed).To(ConsistOf(subjects))
+			Expect(result.SigningErrors).To(BeEmpty())
+		})
+
+		It("should sign all CSRs in one pass when batch limit is zero (disabled)", func() {
+			batchServer := api.New(myCA)
+			batchServer.SignBatchLimit = 0
+			batchMux := batchServer.Routes()
+
+			for _, sub := range []string{"nobatch-a", "nobatch-b", "nobatch-c"} {
+				csrPEM, err := testutil.GenerateCSR(sub)
+				Expect(err).NotTo(HaveOccurred())
+				batchMux.ServeHTTP(httptest.NewRecorder(),
+					httptest.NewRequest("PUT", "/certificate_request/"+sub, bytes.NewReader(csrPEM)))
+			}
+
+			req := httptest.NewRequest("POST", "/sign/all", nil)
+			rr := httptest.NewRecorder()
+			batchMux.ServeHTTP(rr, req)
+			Expect(rr.Code).To(Equal(http.StatusOK))
+
+			var result struct {
+				Signed []string `json:"signed"`
+			}
+			Expect(json.Unmarshal(rr.Body.Bytes(), &result)).To(Succeed())
+			Expect(result.Signed).To(ConsistOf("nobatch-a", "nobatch-b", "nobatch-c"))
+		})
+
+		It("should work correctly when batch limit equals the number of CSRs", func() {
+			batchServer := api.New(myCA)
+			batchServer.SignBatchLimit = 2
+			batchMux := batchServer.Routes()
+
+			for _, sub := range []string{"exact-a", "exact-b"} {
+				csrPEM, err := testutil.GenerateCSR(sub)
+				Expect(err).NotTo(HaveOccurred())
+				batchMux.ServeHTTP(httptest.NewRecorder(),
+					httptest.NewRequest("PUT", "/certificate_request/"+sub, bytes.NewReader(csrPEM)))
+			}
+
+			req := httptest.NewRequest("POST", "/sign/all", nil)
+			rr := httptest.NewRecorder()
+			batchMux.ServeHTTP(rr, req)
+			Expect(rr.Code).To(Equal(http.StatusOK))
+
+			var result struct {
+				Signed []string `json:"signed"`
+			}
+			Expect(json.Unmarshal(rr.Body.Bytes(), &result)).To(Succeed())
+			Expect(result.Signed).To(ConsistOf("exact-a", "exact-b"))
+		})
+	})
+
 	Context("dns_alt_names serializes as [] not null", func() {
 		It("should return [] for dns_alt_names on a plain CSR status", func() {
 			subject := "dns-status-node"
@@ -732,6 +811,20 @@ var _ = Describe("API Workflow", func() {
 			rr := httptest.NewRecorder()
 			mux.ServeHTTP(rr, req)
 			Expect(rr.Code).To(Equal(http.StatusBadRequest))
+		})
+	})
+
+	Context("POST /generate/{subject} over plain HTTP", func() {
+		It("should return 403 when PlainHTTP is true", func() {
+			plainServer := api.New(myCA)
+			plainServer.PlainHTTP = true
+			plainMux := plainServer.Routes()
+
+			req := httptest.NewRequest("POST", "/generate/plain-node", nil)
+			rr := httptest.NewRecorder()
+			plainMux.ServeHTTP(rr, req)
+			Expect(rr.Code).To(Equal(http.StatusForbidden))
+			Expect(rr.Body.String()).To(ContainSubstring("requires TLS"))
 		})
 	})
 

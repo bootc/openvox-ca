@@ -60,11 +60,15 @@ func main() {
 		tlsKey           string
 		puppetServers    string
 		puppetServerFile string
-		noPpCliAuth      bool
-		noTLSRequired    bool
-		ocspURL          string
-		crlURL           string
-		configFile       string
+		noPpCliAuth       bool
+		noTLSRequired       bool
+		allowPublicStatus   bool
+		ocspURL             string
+		crlURL              string
+		csrRateLimit        int
+		configFile          string
+		encryptCAKey        bool
+		caKeyPassphraseFile string
 	)
 
 	cmd := &cobra.Command{
@@ -119,11 +123,23 @@ func main() {
 			if cmd.Flags().Changed("no-tls-required") {
 				cfg.NoTLSRequired = noTLSRequired
 			}
+			if cmd.Flags().Changed("allow-public-status") {
+				cfg.AllowPublicStatus = allowPublicStatus
+			}
 			if cmd.Flags().Changed("ocsp-url") {
 				cfg.OCSPUrl = ocspURL
 			}
 			if cmd.Flags().Changed("crl-url") {
 				cfg.CRLUrl = crlURL
+			}
+			if cmd.Flags().Changed("csr-rate-limit") {
+				cfg.CSRRateLimit = csrRateLimit
+			}
+			if cmd.Flags().Changed("encrypt-ca-key") {
+				cfg.EncryptCAKey = encryptCAKey
+			}
+			if cmd.Flags().Changed("ca-key-passphrase-file") {
+				cfg.CAKeyPassphraseFile = caKeyPassphraseFile
 			}
 			// --- Validation ---
 			if cfg.CADir == "" {
@@ -189,12 +205,13 @@ func main() {
 				"verbosity", cfg.Verbosity,
 			)
 
-			// --- TLS enforcement ---
-			// Plain HTTP over a non-loopback interface lets any on-path host
-			// inject forged certificates. Refuse to start unless:
+			// SECURITY: TLS enforcement — plain HTTP over a non-loopback
+			// interface lets any on-path host inject forged certificates.
+			// Refuse to start unless:
 			//   (a) TLS is configured (--tls-cert + --tls-key), or
 			//   (b) the bind address is loopback-only, or
 			//   (c) the operator explicitly opts out with --no-tls-required.
+			// NIST 800-53: SC-8 (Transmission Confidentiality and Integrity), SC-23 (Session Authenticity)
 			tlsConfigured := cfg.TLSCert != "" && cfg.TLSKey != ""
 			if !tlsConfigured {
 				if !isLoopback(cfg.Host) && !cfg.NoTLSRequired {
@@ -230,6 +247,13 @@ func main() {
 				// leave as off
 			case "true":
 				asCfg.Mode = "true"
+				// SECURITY: Warn that autosign=true bypasses all CSR validation.
+				// Any node that submits a CSR will receive a signed certificate
+				// without any verification. This should only be used in isolated
+				// test environments.
+				// NIST 800-53: IA-5 (Authenticator Management)
+				slog.Warn("SECURITY: autosign is set to 'true' — ALL certificate signing requests will be automatically signed without validation. " +
+					"This is dangerous in production. Use an autosign script or file-based allowlist instead.")
 			default:
 				info, err := os.Stat(cfg.AutosignConfig)
 				if err != nil {
@@ -286,14 +310,40 @@ func main() {
 			myCA.CAPathLength = cfg.CAPathLength
 			myCA.CAValidityDays = cfg.CAValidityDays
 			myCA.LeafValidityDays = cfg.LeafValidityDays
+			myCA.EncryptCAKey = cfg.EncryptCAKey
+			myCA.KeyPassphrase = ca.KeyPassphraseConfig{
+				PassphraseFile: cfg.CAKeyPassphraseFile,
+			}
 
 			if err := myCA.Init(); err != nil {
 				slog.Error("Failed to initialise CA", "error", err)
 				os.Exit(1)
 			}
 
+			// SECURITY: Warn if any private key files have overly permissive modes.
+			// The server does not modify existing file permissions — operators should
+			// fix these manually (e.g. chmod 0640 or stricter).
+			// NIST 800-53: SC-12 (Cryptographic Key Establishment and Management)
+			if warnings := store.CheckKeyPermissions(); len(warnings) > 0 {
+				for _, w := range warnings {
+					slog.Warn("Private key file has overly permissive mode",
+						"path", w.Path, "mode", w.Mode.String(), "expected", "0600 or stricter")
+				}
+			}
+
 			// --- HTTP(S) Server ---
 			srv := api.New(myCA)
+
+			// CSR rate limiting: default 60/min/IP unless explicitly set to 0.
+			csrRL := cfg.CSRRateLimit
+			if csrRL == 0 && !cmd.Flags().Changed("csr-rate-limit") {
+				if os.Getenv("PUPPET_CA_CSR_RATE_LIMIT") == "" {
+					csrRL = 60
+				}
+			}
+			srv.CSRRateLimit = csrRL
+			srv.SignBatchLimit = 50 // Default max batch size for sign operations
+			srv.PlainHTTP = !tlsConfigured && !isLoopback(cfg.Host) && !cfg.NoTLSRequired
 
 			// Wire mTLS auth middleware when TLS is configured.
 			if cfg.TLSCert != "" && cfg.TLSKey != "" {
@@ -312,9 +362,19 @@ func main() {
 					allowList[cn] = true
 				}
 				srv.AuthConfig = &api.AuthConfig{
-					CACert:      myCA.CACert,
-					AllowList:   allowList,
-					NoPpCliAuth: cfg.NoPpCliAuth,
+					CACert:            myCA.CACert,
+					AllowList:         allowList,
+					NoPpCliAuth:       cfg.NoPpCliAuth,
+					AllowPublicStatus: cfg.AllowPublicStatus,
+				}
+				if !cfg.NoPpCliAuth {
+					// SECURITY: Inform the operator that pp_cli_auth OID grants admin access.
+					// Any certificate carrying this extension with value "true" will be treated
+					// as an admin. Use --no-pp-cli-auth to restrict admin access to the CN allow list only.
+					// NIST 800-53: AC-6 (Least Privilege)
+					slog.Info("pp_cli_auth extension is enabled as an admin credential (default). " +
+						"Any certificate carrying pp_cli_auth=true will have admin access. " +
+						"Use --no-pp-cli-auth to disable this and require explicit CN allow list.")
 				}
 			}
 
@@ -351,6 +411,12 @@ func main() {
 					}
 				}
 
+				// SECURITY: TLS server configuration with mTLS support.
+				// RequestClientCert allows public endpoints to work without a
+				// client cert while the auth middleware enforces cert requirements
+				// per-tier. MinVersion TLS 1.2 blocks legacy protocol downgrades.
+				// NIST 800-53: SC-8 (Transmission Confidentiality and Integrity),
+				//              SC-23 (Session Authenticity), IA-3 (Device Identification)
 				server.TLSConfig = &tls.Config{
 					Certificates: []tls.Certificate{serverCert},
 					ClientCAs:    caPool,
@@ -390,8 +456,12 @@ func main() {
 	f.StringVar(&puppetServerFile, "puppet-server-file", "", "Path to a file of puppet-server CNs allowed admin access (one per line; # comments and blank lines ignored)")
 	f.BoolVar(&noPpCliAuth, "no-pp-cli-auth", false, "Disable pp_cli_auth extension as an admin credential; require CN allow list only")
 	f.BoolVar(&noTLSRequired, "no-tls-required", false, "Allow plain HTTP on non-loopback addresses (use only behind a trusted TLS proxy or in test environments)")
+	f.BoolVar(&allowPublicStatus, "allow-public-status", false, "Allow unauthenticated GET /certificate_status (by default, requires a CA-signed client cert)")
 	f.StringVar(&ocspURL, "ocsp-url", "", "OCSP responder URL to embed in issued certificates (e.g. http://puppet-ca:8140/ocsp)")
 	f.StringVar(&crlURL, "crl-url", "", "CRL distribution point URL to embed in issued certificates (e.g. http://puppet-ca:8140/puppet-ca/v1/certificate_revocation_list/ca)")
+	f.IntVar(&csrRateLimit, "csr-rate-limit", 60, "Max CSR submissions per IP per minute on the public PUT /certificate_request endpoint (0 disables)")
+	f.BoolVar(&encryptCAKey, "encrypt-ca-key", false, "Encrypt the CA private key at rest (AES-256-GCM + Argon2id); a passphrase is auto-generated if not provided")
+	f.StringVar(&caKeyPassphraseFile, "ca-key-passphrase-file", "", "Path to file containing the CA key passphrase (first line used)")
 
 	if err := cmd.Execute(); err != nil {
 		os.Exit(1)

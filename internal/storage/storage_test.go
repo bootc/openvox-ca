@@ -266,6 +266,67 @@ var _ = Describe("StorageService", func() {
 		})
 	})
 
+	// --- CheckKeyPermissions ---
+
+	Describe("CheckKeyPermissions", func() {
+		BeforeEach(func() {
+			Expect(store.EnsureDirs()).To(Succeed())
+		})
+
+		It("returns nil when no key files exist", func() {
+			warnings := store.CheckKeyPermissions()
+			Expect(warnings).To(BeEmpty())
+		})
+
+		It("returns nil when all key files have 0600 permissions", func() {
+			Expect(os.WriteFile(store.PrivateKeyPath("node-a"), []byte("fake"), storage.FilePermPrivate)).To(Succeed())
+			Expect(os.WriteFile(store.PrivateKeyPath("node-b"), []byte("fake"), storage.FilePermPrivate)).To(Succeed())
+			warnings := store.CheckKeyPermissions()
+			Expect(warnings).To(BeEmpty())
+		})
+
+		It("reports files with group-readable permissions (0640)", func() {
+			keyPath := store.PrivateKeyPath("loose-node")
+			Expect(os.WriteFile(keyPath, []byte("fake"), 0640)).To(Succeed())
+			warnings := store.CheckKeyPermissions()
+			Expect(warnings).To(HaveLen(1))
+			Expect(warnings[0].Path).To(Equal(keyPath))
+			Expect(warnings[0].Mode).To(Equal(os.FileMode(0640)))
+		})
+
+		It("reports files with world-readable permissions (0644)", func() {
+			keyPath := store.PrivateKeyPath("wide-open")
+			Expect(os.WriteFile(keyPath, []byte("fake"), 0644)).To(Succeed())
+			warnings := store.CheckKeyPermissions()
+			Expect(warnings).To(HaveLen(1))
+			Expect(warnings[0].Path).To(Equal(keyPath))
+			Expect(warnings[0].Mode).To(Equal(os.FileMode(0644)))
+		})
+
+		It("only checks files ending in _key.pem", func() {
+			// A loose-perm file that doesn't match the _key.pem pattern should be ignored.
+			Expect(os.WriteFile(filepath.Join(store.CADir(), "private", "other.pem"), []byte("x"), 0644)).To(Succeed())
+			Expect(os.WriteFile(store.PrivateKeyPath("good-node"), []byte("fake"), storage.FilePermPrivate)).To(Succeed())
+			warnings := store.CheckKeyPermissions()
+			Expect(warnings).To(BeEmpty())
+		})
+
+		It("returns warnings only for loose files in a mixed set", func() {
+			Expect(os.WriteFile(store.PrivateKeyPath("ok-node"), []byte("fake"), 0600)).To(Succeed())
+			loosePath := store.PrivateKeyPath("bad-node")
+			Expect(os.WriteFile(loosePath, []byte("fake"), 0644)).To(Succeed())
+			warnings := store.CheckKeyPermissions()
+			Expect(warnings).To(HaveLen(1))
+			Expect(warnings[0].Path).To(Equal(loosePath))
+		})
+
+		It("returns nil when the private directory does not exist", func() {
+			noDir := storage.New("/nonexistent/path")
+			warnings := noDir.CheckKeyPermissions()
+			Expect(warnings).To(BeEmpty())
+		})
+	})
+
 	// --- ListCerts ---
 
 	Describe("ListCerts", func() {

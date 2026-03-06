@@ -232,6 +232,30 @@ esac
 			Expect(err).To(HaveOccurred())
 		})
 
+		It("does not pass parent process secrets to the executable", func() {
+			// Set a secret in the test process environment.
+			os.Setenv("SECRET_KEY", "test-secret-value")
+			defer os.Unsetenv("SECRET_KEY")
+
+			// Script exits 0 only if SECRET_KEY is NOT in its environment.
+			script := writeScript("#!/bin/sh\n[ -z \"$SECRET_KEY\" ] && exit 0 || exit 1\n")
+			ok, err := ca.CheckAutosign(
+				ca.AutosignConfig{Mode: "executable", FileOrPath: script},
+				csr, csrPEM)
+			Expect(err).NotTo(HaveOccurred())
+			Expect(ok).To(BeTrue(), "autosign executable should NOT inherit SECRET_KEY from parent environment")
+		})
+
+		It("provides PATH and HOME to the executable", func() {
+			// Script exits 0 only if PATH and HOME are set.
+			script := writeScript("#!/bin/sh\n[ -n \"$PATH\" ] && [ -n \"$HOME\" ] && exit 0 || exit 1\n")
+			ok, err := ca.CheckAutosign(
+				ca.AutosignConfig{Mode: "executable", FileOrPath: script},
+				csr, csrPEM)
+			Expect(err).NotTo(HaveOccurred())
+			Expect(ok).To(BeTrue(), "autosign executable should have PATH and HOME set")
+		})
+
 		It("returns an error when the executable exceeds the timeout", func() {
 			// Script sleeps far longer than the configured timeout.
 			script := writeScript("#!/bin/sh\nsleep 30\n")

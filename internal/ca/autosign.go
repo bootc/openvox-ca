@@ -93,7 +93,18 @@ func checkAutosignExecutable(cfg AutosignConfig, commonName string, csrPEM []byt
 	defer cancel()
 
 	cmd := exec.CommandContext(ctx, cfg.FileOrPath, commonName)
-	cmd.Env = os.Environ()
+	// SECURITY: Environment sanitization — only allowlisted variables are
+	// passed to the autosign subprocess. Prevents leaking secrets (API keys,
+	// cloud tokens, DB credentials) from the CA process environment to
+	// user-supplied scripts.
+	// NIST 800-53: CM-7 (Least Functionality), SC-4 (Information in Shared System Resources)
+	cmd.Env = []string{
+		"PATH=/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin",
+		"HOME=" + os.Getenv("HOME"),
+	}
+	if lang := os.Getenv("LANG"); lang != "" {
+		cmd.Env = append(cmd.Env, "LANG="+lang)
+	}
 	cmd.Stdin = bytes.NewReader(csrPEM)
 
 	if err := cmd.Run(); err != nil {

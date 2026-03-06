@@ -1,0 +1,60 @@
+# Migration integration test: VoxPupuli Puppet Server CA -> puppet-ca.
+#
+# Topology
+# --------
+#   old-puppet   — VoxPupuli puppetserver (JVM) with its own built-in CA.
+#                  Bootstraps a genuine Puppet CA, autosigns agent CSRs.
+#   test-runner  — puppet-ca + puppet-ca-ctl image.  Waits for old-puppet to
+#                  become healthy, submits CSRs, then imports the CA material
+#                  into puppet-ca and verifies everything still works.
+#
+# The test exercises the real migration path documented in
+# docs/migrating-from-puppet-server.md.
+#
+# Usage (from project root):
+#   mage test:migration
+#   podman-compose -f compose-migration.yml up --build \
+#       --exit-code-from test-runner --abort-on-container-exit
+
+name: puppet-ca-migration
+
+services:
+
+  # ── Old Puppet Server (VoxPupuli, JVM) ────────────────────────────────────
+  old-puppet:
+    image: docker.io/voxpupuli/puppetserver:latest
+    hostname: old-puppet
+    environment:
+      PUPPETSERVER_HOSTNAME: old-puppet
+      AUTOSIGN: "true"
+      PUPPETSERVER_JAVA_ARGS: "-Xms512m -Xmx512m"
+    volumes:
+      # Expose the Puppet Server's CA directory to the test-runner.
+      - old-cadir:/etc/puppetlabs/puppetserver/ca
+    expose:
+      - "8140"
+    healthcheck:
+      test: ["CMD-SHELL",
+             "curl -sfk https://localhost:8140/status/v1/simple 2>/dev/null | grep -q running"]
+      interval: 10s
+      timeout: 5s
+      retries: 30
+      start_period: 120s
+
+  # ── Test runner (puppet-ca image, runs migration test script) ─────────────
+  # Runs as root so it can read the old CA files (VoxPupuli creates them
+  # 0600 root:root).  The test script copies them to a writable temp dir
+  # before use — same as a real migration where an admin would scp/rsync.
+  test-runner:
+    image: puppet-ca-integ:latest
+    user: "0:0"
+    depends_on:
+      old-puppet:
+        condition: service_healthy
+    volumes:
+      - old-cadir:/old-ca:ro
+      - ./test:/test:ro,z
+    entrypoint: ["bash", "/test/migration/migration-test.sh"]
+
+volumes:
+  old-cadir:

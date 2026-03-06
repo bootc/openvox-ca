@@ -86,8 +86,18 @@ type CA struct {
 	// CRLValidityDays overrides the default CRL validity window. Zero uses the
 	// built-in default (30 days).
 	CRLValidityDays int
+
+	// KeyPassphrase configures how the CA private key is encrypted at rest.
+	// When set, the key is stored as an encrypted PEM (AES-256-GCM + Argon2id).
+	// When nil/zero, keys are stored as unencrypted PEM (backward compatible).
+	KeyPassphrase KeyPassphraseConfig
+
+	// EncryptCAKey controls whether the CA key is encrypted at rest.
+	// When true, the key is encrypted using the resolved passphrase.
+	EncryptCAKey bool
 	serialIndex map[string]string         // uppercase hex serial (no leading zeros) → subject; protected by mu
 	ocspCache   map[string]ocspCacheEntry // same key; protected by mu
+	cachedCRL   *x509.RevocationList      // in-memory CRL for auth checks; protected by mu
 	mu          sync.RWMutex
 }
 

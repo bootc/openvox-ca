@@ -441,10 +441,11 @@ var _ = Describe("CA Revocation", func() {
 		Expect(revoked).To(BeFalse())
 	})
 
-	It("IsRevokedSerial returns an error when the CRL file is missing", func() {
+	It("IsRevokedSerial still works when the CRL file is deleted (in-memory cache)", func() {
 		Expect(os.Remove(store.CRLPath())).To(Succeed())
-		_, err := myCA.IsRevokedSerial(new(big.Int).SetInt64(1))
-		Expect(err).To(HaveOccurred())
+		revoked, err := myCA.IsRevokedSerial(new(big.Int).SetInt64(1))
+		Expect(err).NotTo(HaveOccurred())
+		Expect(revoked).To(BeFalse())
 	})
 })
 
@@ -566,6 +567,41 @@ var _ = Describe("CA Autosign", func() {
 		Expect(signed).To(BeTrue())
 		Expect(store.HasCert("auto-node")).To(BeTrue())
 		Expect(store.HasCSR("auto-node")).To(BeFalse(), "CSR should be deleted after signing")
+	})
+
+	It("autosign=true strips authorization OIDs from the autosigned certificate", func() {
+		myCA := newCA(ca.AutosignConfig{Mode: "true"})
+
+		// Build a CSR carrying pp_cli_auth = "true".
+		key, err := rsa.GenerateKey(rand.Reader, 2048)
+		Expect(err).NotTo(HaveOccurred())
+		ppCliAuthVal, err := asn1.Marshal("true")
+		Expect(err).NotTo(HaveOccurred())
+		oidPpCliAuth := asn1.ObjectIdentifier{1, 3, 6, 1, 4, 1, 34380, 1, 3, 39}
+
+		csrBytes, err := x509.CreateCertificateRequest(rand.Reader, &x509.CertificateRequest{
+			Subject:         pkix.Name{CommonName: "evil-autosign"},
+			ExtraExtensions: []pkix.Extension{{Id: oidPpCliAuth, Value: ppCliAuthVal}},
+		}, key)
+		Expect(err).NotTo(HaveOccurred())
+		csrPEM := pem.EncodeToMemory(&pem.Block{Type: "CERTIFICATE REQUEST", Bytes: csrBytes})
+
+		signed, err := myCA.SaveRequest("evil-autosign", csrPEM)
+		Expect(err).NotTo(HaveOccurred())
+		Expect(signed).To(BeTrue(), "autosign=true should sign immediately")
+
+		// Parse the signed cert and verify pp_cli_auth is NOT present.
+		certPEM, err := store.GetCert("evil-autosign")
+		Expect(err).NotTo(HaveOccurred())
+		block, _ := pem.Decode(certPEM)
+		Expect(block).NotTo(BeNil())
+		cert, err := x509.ParseCertificate(block.Bytes)
+		Expect(err).NotTo(HaveOccurred())
+
+		for _, ext := range cert.Extensions {
+			Expect(ext.Id.Equal(oidPpCliAuth)).To(BeFalse(),
+				"autosigned cert must NOT carry pp_cli_auth — this would grant CA admin access")
+		}
 	})
 
 	It("autosign=file signs when CN matches a glob pattern", func() {
@@ -723,6 +759,67 @@ var _ = Describe("Issued certificate properties (issue #8)", func() {
 	})
 
 	AfterEach(func() { os.RemoveAll(tmpDir) })
+
+	// --- Authorization OIDs stripped from CSR ---
+
+	It("strips authorization-arc OIDs (like pp_cli_auth) from signed certificates", func() {
+		store := storage.New(tmpDir)
+		myCA := ca.New(store, ca.AutosignConfig{Mode: "off"}, "puppet.test")
+		Expect(store.EnsureDirs()).To(Succeed())
+		Expect(os.WriteFile(store.CAKeyPath(), cachedKeyPEM, 0640)).To(Succeed())
+		Expect(os.WriteFile(store.CACertPath(), cachedCrtPEM, 0644)).To(Succeed())
+		Expect(store.UpdateCRL(cachedCrlPEM)).To(Succeed())
+		Expect(store.WriteSerial("0001")).To(Succeed())
+		Expect(os.WriteFile(store.InventoryPath(), []byte{}, 0644)).To(Succeed())
+		Expect(myCA.Init()).To(Succeed())
+
+		// Build a CSR carrying pp_cli_auth = "true" and a non-auth Puppet OID.
+		key, err := rsa.GenerateKey(rand.Reader, 2048)
+		Expect(err).NotTo(HaveOccurred())
+
+		ppCliAuthVal, err := asn1.Marshal("true")
+		Expect(err).NotTo(HaveOccurred())
+		ppRegVal, err := asn1.Marshal("some-value")
+		Expect(err).NotTo(HaveOccurred())
+
+		oidPpCliAuth := asn1.ObjectIdentifier{1, 3, 6, 1, 4, 1, 34380, 1, 3, 39}
+		oidPpRegCert := asn1.ObjectIdentifier{1, 3, 6, 1, 4, 1, 34380, 1, 1, 1} // non-auth Puppet OID
+
+		csrBytes, err := x509.CreateCertificateRequest(rand.Reader, &x509.CertificateRequest{
+			Subject: pkix.Name{CommonName: "auth-strip-node"},
+			ExtraExtensions: []pkix.Extension{
+				{Id: oidPpCliAuth, Value: ppCliAuthVal},
+				{Id: oidPpRegCert, Value: ppRegVal},
+			},
+		}, key)
+		Expect(err).NotTo(HaveOccurred())
+
+		csrPEM := pem.EncodeToMemory(&pem.Block{Type: "CERTIFICATE REQUEST", Bytes: csrBytes})
+		_, err = myCA.SaveRequest("auth-strip-node", csrPEM)
+		Expect(err).NotTo(HaveOccurred())
+
+		certPEM, err := myCA.Sign("auth-strip-node")
+		Expect(err).NotTo(HaveOccurred())
+
+		block, _ := pem.Decode(certPEM)
+		Expect(block).NotTo(BeNil())
+		cert, err := x509.ParseCertificate(block.Bytes)
+		Expect(err).NotTo(HaveOccurred())
+
+		// The auth OID must be stripped.
+		for _, ext := range cert.Extensions {
+			Expect(ext.Id.Equal(oidPpCliAuth)).To(BeFalse(),
+				"signed cert must not carry the pp_cli_auth extension")
+		}
+		// The non-auth Puppet OID must be preserved.
+		found := false
+		for _, ext := range cert.Extensions {
+			if ext.Id.Equal(oidPpRegCert) {
+				found = true
+			}
+		}
+		Expect(found).To(BeTrue(), "signed cert must preserve non-auth Puppet OID extensions")
+	})
 
 	// --- Netscape Comment removed ---
 

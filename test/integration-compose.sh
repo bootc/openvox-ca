@@ -1293,8 +1293,13 @@ if _wait_auth_ca "$_AUTH_CA_URL"; then
 
     # Admin client cert with pp_cli_auth extension.
     # DER:0c:04:74:72:75:65 is the DER encoding of UTF8String "true"
-    # (tag=0x0c, length=4, bytes="true").  The CA copies Puppet-arc OIDs from
-    # submitted CSRs to the issued certificate (see internal/ca/signing.go).
+    # (tag=0x0c, length=4, bytes="true").
+    #
+    # IMPORTANT: We sign this cert directly with openssl rather than submitting
+    # it through the CA API, because the CA correctly strips auth-arc OIDs
+    # (1.3.6.1.4.1.34380.1.3.*) from CSRs to prevent privilege escalation
+    # (see internal/ca/signing.go lines 239-243). Direct signing with the CA
+    # key is how a real deployment would provision admin certificates.
     openssl genrsa -out "$WORK_DIR/admin.key" 2048 2>/dev/null
     cat > "$WORK_DIR/pp_cli_auth.cnf" << 'OPENSSLEOF'
 [req]
@@ -1312,17 +1317,20 @@ OPENSSLEOF
         -config "$WORK_DIR/pp_cli_auth.cnf" \
         -out    "$WORK_DIR/admin.csr" 2>/dev/null
 
-    # Submit CSR — autosign=true signs it immediately.
-    curl -s -o /dev/null \
-        -X PUT -H "Content-Type: text/plain" \
-        --data-binary @"$WORK_DIR/admin.csr" \
-        "${_AUTH_CA_URL}/certificate_request/openvox-admin" || true
+    # Sign the CSR directly with the CA key (preserves the pp_cli_auth OID).
+    cat > "$WORK_DIR/pp_cli_auth_ext.cnf" << 'OPENSSLEOF'
+1.3.6.1.4.1.34380.1.3.39 = DER:0c:04:74:72:75:65
+OPENSSLEOF
+    openssl x509 -req \
+        -in      "$WORK_DIR/admin.csr" \
+        -CA      "$_AUTH_DIR/ca_crt.pem" \
+        -CAkey   "$_AUTH_DIR/private/ca_key.pem" \
+        -CAcreateserial \
+        -days    365 \
+        -extfile "$WORK_DIR/pp_cli_auth_ext.cnf" \
+        -out     "$WORK_DIR/admin.crt" 2>/dev/null
 
-    # Fetch the signed cert.
-    curl -sf "${_AUTH_CA_URL}/certificate/openvox-admin" \
-        > "$WORK_DIR/admin.crt" 2>/dev/null || true
-
-    # Verify the CA preserved the pp_cli_auth OID in the signed cert.
+    # Verify the cert carries the pp_cli_auth OID.
     _pp_oid_count=$(openssl x509 -text -noout -in "$WORK_DIR/admin.crt" 2>/dev/null \
         | grep -c "1.3.6.1.4.1.34380.1.3.39") || true
     [ "${_pp_oid_count:-0}" -gt 0 ] \
@@ -1375,6 +1383,528 @@ fi
 
 kill "$_AUTH_PID" 2>/dev/null; wait "$_AUTH_PID" 2>/dev/null || true
 rm -rf "$_AUTH_DIR"
+
+# ═════════════════════════════════════════════════════════════════════════════
+# Group 18 — puppet-ca-ctl error paths and edge cases
+#
+#   Validates that the CLI propagates server errors correctly, exits non-zero
+#   on failures, and handles argument validation.
+# ═════════════════════════════════════════════════════════════════════════════
+printf '\n# Group 18 — puppet-ca-ctl error paths and edge cases\n'
+
+# --- 18a: revoke non-existent cert must fail with non-zero exit ---
+_rv_out=$($CTL revoke --certname "ghost-revoke-${RUN_ID}" 2>&1) && _rv_rc=$? || _rv_rc=$?
+[ "$_rv_rc" -ne 0 ] \
+    && pass "puppet-ca-ctl revoke non-existent cert exits non-zero" \
+    || fail "puppet-ca-ctl revoke non-existent cert exits non-zero" "exit=$_rv_rc"
+echo "$_rv_out" | grep -qiE 'error|fail|not found|HTTP [45]' \
+    && pass "puppet-ca-ctl revoke non-existent cert reports error message" \
+    || fail "puppet-ca-ctl revoke non-existent cert reports error message" "output: $_rv_out"
+
+# --- 18b: clean non-existent subject must fail with non-zero exit ---
+_cl_out=$($CTL clean --certname "ghost-clean-${RUN_ID}" 2>&1) && _cl_rc=$? || _cl_rc=$?
+[ "$_cl_rc" -ne 0 ] \
+    && pass "puppet-ca-ctl clean non-existent subject exits non-zero" \
+    || fail "puppet-ca-ctl clean non-existent subject exits non-zero" "exit=$_cl_rc"
+echo "$_cl_out" | grep -qiE 'error|fail|not found|HTTP [45]' \
+    && pass "puppet-ca-ctl clean non-existent subject reports error message" \
+    || fail "puppet-ca-ctl clean non-existent subject reports error message" "output: $_cl_out"
+
+# --- 18c: sign --certname without a pending CSR must fail ---
+_sn_out=$($CTL sign --certname "ghost-sign-${RUN_ID}" 2>&1) && _sn_rc=$? || _sn_rc=$?
+[ "$_sn_rc" -ne 0 ] \
+    && pass "puppet-ca-ctl sign without pending CSR exits non-zero" \
+    || fail "puppet-ca-ctl sign without pending CSR exits non-zero" "exit=$_sn_rc"
+echo "$_sn_out" | grep -qiE 'error|fail|not found|HTTP [45]' \
+    && pass "puppet-ca-ctl sign without pending CSR reports error message" \
+    || fail "puppet-ca-ctl sign without pending CSR reports error message" "output: $_sn_out"
+
+# --- 18d: sign with neither --certname nor --all must fail ---
+_sna_out=$($CTL sign 2>&1) && _sna_rc=$? || _sna_rc=$?
+[ "$_sna_rc" -ne 0 ] \
+    && pass "puppet-ca-ctl sign with no args exits non-zero" \
+    || fail "puppet-ca-ctl sign with no args exits non-zero" "exit=$_sna_rc"
+echo "$_sna_out" | grep -qiE 'certname.*required|--all' \
+    && pass "puppet-ca-ctl sign with no args mentions --certname or --all" \
+    || fail "puppet-ca-ctl sign with no args mentions --certname or --all" "output: $_sna_out"
+
+# --- 18e: generate --certname when cert already exists must fail ---
+# Use _GEN_CTL which was generated in Group 4.
+_ge_out=$($CTL generate --certname "$_GEN_CTL" --out-dir "$WORK_DIR" 2>&1) && _ge_rc=$? || _ge_rc=$?
+[ "$_ge_rc" -ne 0 ] \
+    && pass "puppet-ca-ctl generate duplicate cert exits non-zero" \
+    || fail "puppet-ca-ctl generate duplicate cert exits non-zero" "exit=$_ge_rc"
+echo "$_ge_out" | grep -qiE 'error|fail|exists|conflict|HTTP [45]' \
+    && pass "puppet-ca-ctl generate duplicate cert reports error message" \
+    || fail "puppet-ca-ctl generate duplicate cert reports error message" "output: $_ge_out"
+
+# --- 18f: generate --dns delivers SANs in the resulting certificate ---
+_GEN_DNS="gen-dns-${RUN_ID}.example.com"
+_GEN_DNS_DIR="$WORK_DIR/genout-dns"
+mkdir -p "$_GEN_DNS_DIR"
+_dns_cert=$($CTL generate --certname "$_GEN_DNS" \
+    --dns "alt1-${RUN_ID}.example.com,alt2-${RUN_ID}.example.com" \
+    --out-dir "$_GEN_DNS_DIR" 2>/dev/null) || true
+
+[ -n "$_dns_cert" ] \
+    && pass "puppet-ca-ctl generate --dns outputs certificate" \
+    || fail "puppet-ca-ctl generate --dns outputs certificate" "output was empty"
+
+echo "$_dns_cert" > "$WORK_DIR/dns_gen.crt"
+_san_text=$(openssl x509 -noout -text -in "$WORK_DIR/dns_gen.crt" 2>/dev/null) || true
+echo "$_san_text" | grep -qF "alt1-${RUN_ID}.example.com" \
+    && pass "puppet-ca-ctl generate --dns: first SAN present in cert" \
+    || fail "puppet-ca-ctl generate --dns: first SAN present in cert" \
+           "SAN not found in cert extensions"
+echo "$_san_text" | grep -qF "alt2-${RUN_ID}.example.com" \
+    && pass "puppet-ca-ctl generate --dns: second SAN present in cert" \
+    || fail "puppet-ca-ctl generate --dns: second SAN present in cert" \
+           "SAN not found in cert extensions"
+
+# --- 18g: puppet-ca-ctl over mTLS (--ca-cert, --client-cert, --client-key) ---
+# Reuses the Phase 1/Phase 2 pattern from Group 17 but drives the TLS
+# connection through puppet-ca-ctl itself rather than raw curl.
+_MTLS_PORT=8143
+_MTLS_DIR=$(mktemp -d)
+_MTLS_PID=""
+
+puppet-ca-ctl setup --cadir "$_MTLS_DIR" --hostname mtls-ctl-test \
+    2>/dev/null
+
+# Phase 1: HTTP + autosign to bootstrap certs
+puppet-ca --cadir "$_MTLS_DIR" \
+    --host 127.0.0.1 --port "$_MTLS_PORT" \
+    --no-tls-required \
+    --autosign-config=true \
+    >/dev/null 2>&1 &
+_MTLS_PID=$!
+
+_mtls_http_url="http://127.0.0.1:${_MTLS_PORT}"
+_mtls_ready=false
+for _i in $(seq 1 60); do
+    if curl -sfk "${_mtls_http_url}/healthz/ready" -o /dev/null 2>/dev/null; then
+        _mtls_ready=true; break
+    fi
+    sleep 0.3
+done
+
+if [ "$_mtls_ready" = "true" ]; then
+    pass "mTLS CLI: Phase 1 CA started"
+
+    # Generate a TLS server cert
+    puppet-ca-ctl --server-url "$_mtls_http_url" \
+        generate --certname mtls-ctl-test --out-dir "$_MTLS_DIR" \
+        > "$_MTLS_DIR/tls-server.crt" 2>/dev/null
+
+    # Generate an admin client cert via puppet-ca-ctl
+    puppet-ca-ctl --server-url "$_mtls_http_url" \
+        generate --certname mtls-client --out-dir "$WORK_DIR" \
+        > "$WORK_DIR/mtls-client.crt" 2>/dev/null
+
+    # Generate a non-admin client cert (CN not in --puppet-server list)
+    puppet-ca-ctl --server-url "$_mtls_http_url" \
+        generate --certname mtls-nonadmin --out-dir "$WORK_DIR" \
+        > "$WORK_DIR/mtls-nonadmin.crt" 2>/dev/null
+
+    # Prepare a CSR for later signing in Phase 2 (do NOT submit during
+    # Phase 1 because autosign=true would auto-sign it, leaving no pending
+    # CSR for the sign-over-mTLS test).
+    _MTLS_SIGN="mtls-sign-${RUN_ID}"
+    make_csr "$_MTLS_SIGN" "$WORK_DIR/mtls-sign.csr"
+
+    kill "$_MTLS_PID" 2>/dev/null; wait "$_MTLS_PID" 2>/dev/null || true
+    _MTLS_PID=""
+
+    # Phase 2: TLS with client certs — use puppet-ca-ctl with --ca-cert etc.
+    puppet-ca --cadir "$_MTLS_DIR" \
+        --host 127.0.0.1 --port "$_MTLS_PORT" \
+        --tls-cert "$_MTLS_DIR/tls-server.crt" \
+        --tls-key  "$_MTLS_DIR/mtls-ctl-test_key.pem" \
+        --puppet-server mtls-client \
+        >/dev/null 2>&1 &
+    _MTLS_PID=$!
+
+    _mtls_tls_url="https://127.0.0.1:${_MTLS_PORT}"
+    _mtls_ready2=false
+    for _i in $(seq 1 60); do
+        if curl -sfk "${_mtls_tls_url}/healthz/ready" -o /dev/null 2>/dev/null; then
+            _mtls_ready2=true; break
+        fi
+        sleep 0.3
+    done
+
+    if [ "$_mtls_ready2" = "true" ]; then
+        pass "mTLS CLI: Phase 2 CA started (TLS)"
+
+        # Submit the CSR in Phase 2 (certificate_request PUT is tierPublic).
+        curl -sk -o /dev/null \
+            -X PUT -H "Content-Type: text/plain" \
+            --data-binary @"$WORK_DIR/mtls-sign.csr" \
+            "${_mtls_tls_url}/puppet-ca/v1/certificate_request/${_MTLS_SIGN}" 2>/dev/null || true
+
+        # puppet-ca-ctl list --all over mTLS
+        # Note: --ca-cert is intentionally omitted so InsecureSkipVerify is
+        # used for server cert verification. The server cert CN=mtls-ctl-test
+        # doesn't match 127.0.0.1 and Go's TLS verifier would reject it.
+        # This test focuses on *client* cert presentation, not server cert
+        # hostname verification.
+        _mtls_list=$(puppet-ca-ctl \
+            --server-url "$_mtls_tls_url" \
+            --client-cert "$WORK_DIR/mtls-client.crt" \
+            --client-key  "$WORK_DIR/mtls-client_key.pem" \
+            list --all 2>/dev/null) && _mtls_list_rc=$? || _mtls_list_rc=$?
+        [ "$_mtls_list_rc" -eq 0 ] \
+            && pass "puppet-ca-ctl list --all over mTLS succeeds" \
+            || fail "puppet-ca-ctl list --all over mTLS succeeds" "exit=$_mtls_list_rc"
+
+        # puppet-ca-ctl sign over mTLS
+        _mtls_sign_out=$(puppet-ca-ctl \
+            --server-url "$_mtls_tls_url" \
+            --client-cert "$WORK_DIR/mtls-client.crt" \
+            --client-key  "$WORK_DIR/mtls-client_key.pem" \
+            sign --certname "$_MTLS_SIGN" 2>/dev/null) && _mtls_sign_rc=$? || _mtls_sign_rc=$?
+        [ "$_mtls_sign_rc" -eq 0 ] \
+            && pass "puppet-ca-ctl sign over mTLS succeeds" \
+            || fail "puppet-ca-ctl sign over mTLS succeeds" "exit=$_mtls_sign_rc output=$_mtls_sign_out"
+
+        # puppet-ca-ctl revoke over mTLS
+        _mtls_rev_out=$(puppet-ca-ctl \
+            --server-url "$_mtls_tls_url" \
+            --client-cert "$WORK_DIR/mtls-client.crt" \
+            --client-key  "$WORK_DIR/mtls-client_key.pem" \
+            revoke --certname "$_MTLS_SIGN" 2>/dev/null) && _mtls_rev_rc=$? || _mtls_rev_rc=$?
+        [ "$_mtls_rev_rc" -eq 0 ] \
+            && pass "puppet-ca-ctl revoke over mTLS succeeds" \
+            || fail "puppet-ca-ctl revoke over mTLS succeeds" "exit=$_mtls_rev_rc output=$_mtls_rev_out"
+
+        # Non-admin cert must be denied on admin-only endpoint
+        _mtls_deny_out=$(puppet-ca-ctl \
+            --server-url "$_mtls_tls_url" \
+            --client-cert "$WORK_DIR/mtls-nonadmin.crt" \
+            --client-key  "$WORK_DIR/mtls-nonadmin_key.pem" \
+            list --all 2>&1) && _mtls_deny_rc=$? || _mtls_deny_rc=$?
+        [ "$_mtls_deny_rc" -ne 0 ] \
+            && pass "puppet-ca-ctl non-admin cert denied on admin endpoint (non-zero exit)" \
+            || fail "puppet-ca-ctl non-admin cert denied on admin endpoint (non-zero exit)" \
+                   "exit=$_mtls_deny_rc"
+        echo "$_mtls_deny_out" | grep -qiE '403|forbidden|denied|HTTP [45]' \
+            && pass "puppet-ca-ctl non-admin cert reports 403/forbidden" \
+            || fail "puppet-ca-ctl non-admin cert reports 403/forbidden" "output: $_mtls_deny_out"
+    else
+        fail "mTLS CLI: Phase 2 CA started (TLS)" "timed out waiting for health"
+    fi
+else
+    fail "mTLS CLI: Phase 1 CA started" "timed out waiting for health"
+fi
+
+kill "$_MTLS_PID" 2>/dev/null; wait "$_MTLS_PID" 2>/dev/null || true
+rm -rf "$_MTLS_DIR"
+
+# --- 18h: puppet-ca-ctl against unreachable server ---
+_dead_out=$(puppet-ca-ctl --server-url "http://127.0.0.1:19999" list 2>&1) \
+    && _dead_rc=$? || _dead_rc=$?
+[ "$_dead_rc" -ne 0 ] \
+    && pass "puppet-ca-ctl exits non-zero when server is unreachable" \
+    || fail "puppet-ca-ctl exits non-zero when server is unreachable" "exit=$_dead_rc"
+echo "$_dead_out" | grep -qiE 'error|refused|connect|fail|dial' \
+    && pass "puppet-ca-ctl reports connection error when server is unreachable" \
+    || fail "puppet-ca-ctl reports connection error when server is unreachable" "output: $_dead_out"
+
+# --- 18i: required flag validation (Cobra MarkFlagRequired) ---
+# Each subcommand that requires --certname (or other flags) must fail clearly.
+_rf_out=$(puppet-ca-ctl revoke 2>&1) && _rf_rc=$? || _rf_rc=$?
+[ "$_rf_rc" -ne 0 ] \
+    && pass "puppet-ca-ctl revoke without --certname exits non-zero" \
+    || fail "puppet-ca-ctl revoke without --certname exits non-zero" "exit=$_rf_rc"
+echo "$_rf_out" | grep -qiE 'required|certname' \
+    && pass "puppet-ca-ctl revoke without --certname mentions required flag" \
+    || fail "puppet-ca-ctl revoke without --certname mentions required flag" "output: $_rf_out"
+
+_cf_out=$(puppet-ca-ctl clean 2>&1) && _cf_rc=$? || _cf_rc=$?
+[ "$_cf_rc" -ne 0 ] \
+    && pass "puppet-ca-ctl clean without --certname exits non-zero" \
+    || fail "puppet-ca-ctl clean without --certname exits non-zero" "exit=$_cf_rc"
+
+_gf_out=$(puppet-ca-ctl generate 2>&1) && _gf_rc=$? || _gf_rc=$?
+[ "$_gf_rc" -ne 0 ] \
+    && pass "puppet-ca-ctl generate without --certname exits non-zero" \
+    || fail "puppet-ca-ctl generate without --certname exits non-zero" "exit=$_gf_rc"
+
+_if_out=$(puppet-ca-ctl import --cadir /tmp 2>&1) && _if_rc=$? || _if_rc=$?
+[ "$_if_rc" -ne 0 ] \
+    && pass "puppet-ca-ctl import without --cert-bundle/--private-key exits non-zero" \
+    || fail "puppet-ca-ctl import without --cert-bundle/--private-key exits non-zero" "exit=$_if_rc"
+
+# --- 18j: import with non-existent file paths ---
+_inx_out=$(puppet-ca-ctl import \
+    --cadir /tmp \
+    --cert-bundle /no/such/cert.pem \
+    --private-key /no/such/key.pem \
+    2>&1) && _inx_rc=$? || _inx_rc=$?
+[ "$_inx_rc" -ne 0 ] \
+    && pass "puppet-ca-ctl import with non-existent files exits non-zero" \
+    || fail "puppet-ca-ctl import with non-existent files exits non-zero" "exit=$_inx_rc"
+echo "$_inx_out" | grep -qiE 'no such file|not found|reading' \
+    && pass "puppet-ca-ctl import with non-existent files reports file error" \
+    || fail "puppet-ca-ctl import with non-existent files reports file error" "output: $_inx_out"
+
+# --- 18k: import with garbage (non-PEM) content ---
+_IMP_GARBAGE_DIR=$(mktemp -d)
+echo "NOT A CERTIFICATE" > "$WORK_DIR/garbage-cert.pem"
+echo "NOT A PRIVATE KEY" > "$WORK_DIR/garbage-key.pem"
+_ig_out=$(puppet-ca-ctl import \
+    --cadir "$_IMP_GARBAGE_DIR" \
+    --cert-bundle "$WORK_DIR/garbage-cert.pem" \
+    --private-key "$WORK_DIR/garbage-key.pem" \
+    2>&1) && _ig_rc=$? || _ig_rc=$?
+[ "$_ig_rc" -ne 0 ] \
+    && pass "puppet-ca-ctl import with garbage PEM exits non-zero" \
+    || fail "puppet-ca-ctl import with garbage PEM exits non-zero" "exit=$_ig_rc"
+echo "$_ig_out" | grep -qiE 'decode|parse|invalid|failed|PEM' \
+    && pass "puppet-ca-ctl import with garbage PEM reports parse error" \
+    || fail "puppet-ca-ctl import with garbage PEM reports parse error" "output: $_ig_out"
+rm -rf "$_IMP_GARBAGE_DIR"
+
+# --- 18l: generate --out-dir to non-existent directory ---
+_go_out=$($CTL generate --certname "gen-baddir-${RUN_ID}" \
+    --out-dir "/no/such/directory" 2>&1) && _go_rc=$? || _go_rc=$?
+[ "$_go_rc" -ne 0 ] \
+    && pass "puppet-ca-ctl generate with non-existent --out-dir exits non-zero" \
+    || fail "puppet-ca-ctl generate with non-existent --out-dir exits non-zero" "exit=$_go_rc"
+echo "$_go_out" | grep -qiE 'no such file|not found|failed|directory' \
+    && pass "puppet-ca-ctl generate with non-existent --out-dir reports file error" \
+    || fail "puppet-ca-ctl generate with non-existent --out-dir reports file error" "output: $_go_out"
+
+# --- 18m: setup on a read-only path ---
+_ro_out=$(puppet-ca-ctl setup --cadir /proc/fakedir 2>&1) && _ro_rc=$? || _ro_rc=$?
+[ "$_ro_rc" -ne 0 ] \
+    && pass "puppet-ca-ctl setup on unwritable path exits non-zero" \
+    || fail "puppet-ca-ctl setup on unwritable path exits non-zero" "exit=$_ro_rc"
+echo "$_ro_out" | grep -qiE 'permission|denied|read.only|mkdir|failed' \
+    && pass "puppet-ca-ctl setup on unwritable path reports error" \
+    || fail "puppet-ca-ctl setup on unwritable path reports error" "output: $_ro_out"
+
+# ═════════════════════════════════════════════════════════════════════════════
+# Group 19 — Migration from Puppet Server CA (lightweight / synthetic)
+#
+# Simulates migrating an existing Puppet-style CA directory into puppet-ca
+# using `puppet-ca-ctl import`, then verifies the migrated CA can sign new
+# certs, serve existing ones, and revoke certificates.
+#
+# This is a lightweight smoke test using openssl-generated certs.  For a
+# full migration test against a real VoxPupuli Puppet Server, see
+# `mage test:migration` (compose-migration.yml).
+# ═════════════════════════════════════════════════════════════════════════════
+printf '\n# Group 19 — Migration from Puppet Server CA\n'
+
+_MIG_DIR=$(mktemp -d)
+_MIG_OLD=$(mktemp -d)   # simulates old Puppet Server CA directory
+_MIG_PORT=8144
+_MIG_PID=""
+
+# --- 19a: Build a fake "old Puppet CA" directory with openssl ---
+# Create a CA cert + key the way Puppet Server would have them.
+openssl genrsa -out "$_MIG_OLD/ca_key.pem" 2048 2>/dev/null
+openssl req -x509 -new \
+    -key "$_MIG_OLD/ca_key.pem" \
+    -subj "/CN=Puppet CA: migration-test" \
+    -days 3650 \
+    -out "$_MIG_OLD/ca_crt.pem" 2>/dev/null
+
+# Create a CRL signed by the old CA.
+touch "$_MIG_OLD/index.txt"
+echo "01" > "$_MIG_OLD/crlnumber"
+cat > "$_MIG_OLD/crl.cnf" <<CRLEOF
+[ ca ]
+default_ca = CA_default
+[ CA_default ]
+database         = $_MIG_OLD/index.txt
+crlnumber        = $_MIG_OLD/crlnumber
+default_crl_days = 30
+default_md       = sha256
+CRLEOF
+openssl ca -gencrl \
+    -keyfile "$_MIG_OLD/ca_key.pem" \
+    -cert    "$_MIG_OLD/ca_crt.pem" \
+    -config  "$_MIG_OLD/crl.cnf" \
+    -out     "$_MIG_OLD/ca_crl.pem" 2>/dev/null || true
+
+# Sign a "pre-existing" node cert the way Puppet Server would.
+# This cert must survive the migration and be fetchable from the new CA.
+_MIG_EXISTING="mig-existing-${RUN_ID}"
+openssl genrsa -out "$_MIG_OLD/${_MIG_EXISTING}.key" 2048 2>/dev/null
+openssl req -new \
+    -key "$_MIG_OLD/${_MIG_EXISTING}.key" \
+    -subj "/CN=${_MIG_EXISTING}" \
+    -out "$_MIG_OLD/${_MIG_EXISTING}.csr" 2>/dev/null
+openssl x509 -req \
+    -in      "$_MIG_OLD/${_MIG_EXISTING}.csr" \
+    -CA      "$_MIG_OLD/ca_crt.pem" \
+    -CAkey   "$_MIG_OLD/ca_key.pem" \
+    -CAcreateserial \
+    -days    365 \
+    -out     "$_MIG_OLD/${_MIG_EXISTING}.pem" 2>/dev/null
+
+# Verify the pre-existing cert was created
+[ -s "$_MIG_OLD/${_MIG_EXISTING}.pem" ] \
+    && pass "Migration: pre-existing node cert created with openssl" \
+    || fail "Migration: pre-existing node cert created with openssl"
+
+# --- 19b: Import the old CA into a new puppet-ca directory ---
+_mig_import_args=(puppet-ca-ctl import
+    --cadir       "$_MIG_DIR"
+    --cert-bundle "$_MIG_OLD/ca_crt.pem"
+    --private-key "$_MIG_OLD/ca_key.pem")
+[ -s "$_MIG_OLD/ca_crl.pem" ] && _mig_import_args+=(--crl-chain "$_MIG_OLD/ca_crl.pem")
+_mig_import_out=$("${_mig_import_args[@]}" 2>&1) && _mig_import_rc=$? || _mig_import_rc=$?
+[ "$_mig_import_rc" -eq 0 ] \
+    && pass "Migration: puppet-ca-ctl import succeeds" \
+    || fail "Migration: puppet-ca-ctl import succeeds" "exit=$_mig_import_rc output=$_mig_import_out"
+
+# Verify the imported files exist
+[ -f "$_MIG_DIR/ca_crt.pem" ] \
+    && pass "Migration: CA cert exists after import" \
+    || fail "Migration: CA cert exists after import"
+[ -f "$_MIG_DIR/private/ca_key.pem" ] \
+    && pass "Migration: CA key exists after import (in private/)" \
+    || fail "Migration: CA key exists after import (in private/)"
+[ -f "$_MIG_DIR/ca_crl.pem" ] \
+    && pass "Migration: CRL exists after import" \
+    || fail "Migration: CRL exists after import"
+
+# --- 19c: Copy pre-existing signed cert into the migrated CA ---
+# This simulates Step 4 of the migration guide.
+mkdir -p "$_MIG_DIR/signed"
+cp "$_MIG_OLD/${_MIG_EXISTING}.pem" "$_MIG_DIR/signed/${_MIG_EXISTING}.pem"
+
+# Rebuild inventory from the copied cert (simulates Step 5 of migration guide).
+# puppet-ca inventory format: SERIAL NOT_BEFORE NOT_AFTER /SUBJECT
+# Dates must be in Go's 2006-01-02T15:04:05UTC format (no spaces).
+_mig_serial=$(openssl x509 -noout -serial -in "$_MIG_DIR/signed/${_MIG_EXISTING}.pem" \
+    | cut -d= -f2)
+_mig_nb=$(date -u -d "$(openssl x509 -noout -startdate -in "$_MIG_DIR/signed/${_MIG_EXISTING}.pem" \
+    | sed 's/notBefore=//')" '+%Y-%m-%dT%H:%M:%SUTC')
+_mig_na=$(date -u -d "$(openssl x509 -noout -enddate -in "$_MIG_DIR/signed/${_MIG_EXISTING}.pem" \
+    | sed 's/notAfter=//')" '+%Y-%m-%dT%H:%M:%SUTC')
+echo "$_mig_serial $_mig_nb $_mig_na /${_MIG_EXISTING}" >> "$_MIG_DIR/inventory.txt"
+
+[ -s "$_MIG_DIR/signed/${_MIG_EXISTING}.pem" ] \
+    && pass "Migration: pre-existing cert copied to signed/" \
+    || fail "Migration: pre-existing cert copied to signed/"
+
+# --- 19d: Start puppet-ca with the migrated directory ---
+puppet-ca --cadir "$_MIG_DIR" \
+    --host 127.0.0.1 --port "$_MIG_PORT" \
+    --no-tls-required \
+    --autosign-config=true \
+    >/dev/null 2>&1 &
+_MIG_PID=$!
+
+_mig_url="http://127.0.0.1:${_MIG_PORT}"
+_mig_ready=false
+for _i in $(seq 1 60); do
+    if curl -sf "${_mig_url}/healthz/ready" -o /dev/null 2>/dev/null; then
+        _mig_ready=true; break
+    fi
+    sleep 0.3
+done
+
+if [ "$_mig_ready" = "true" ]; then
+    pass "Migration: puppet-ca starts successfully with imported CA"
+
+    # --- 19e: Fetch the CA cert from the migrated server ---
+    _mig_ca_pem=$(curl -sf "${_mig_url}/puppet-ca/v1/certificate/ca" 2>/dev/null) || true
+    echo "$_mig_ca_pem" | grep -qF "BEGIN CERTIFICATE" \
+        && pass "Migration: CA cert fetchable from migrated server" \
+        || fail "Migration: CA cert fetchable from migrated server"
+
+    # --- 19f: Fetch the pre-existing cert by subject name ---
+    _mig_cert_pem=$(curl -sf "${_mig_url}/puppet-ca/v1/certificate/${_MIG_EXISTING}" 2>/dev/null) || true
+    echo "$_mig_cert_pem" | grep -qF "BEGIN CERTIFICATE" \
+        && pass "Migration: pre-existing cert fetchable by subject" \
+        || fail "Migration: pre-existing cert fetchable by subject"
+
+    # Verify the fetched cert matches the original
+    _mig_orig_fp=$(openssl x509 -noout -fingerprint -sha256 \
+        -in "$_MIG_OLD/${_MIG_EXISTING}.pem" 2>/dev/null) || true
+    _mig_fetched_fp=$(echo "$_mig_cert_pem" | openssl x509 -noout -fingerprint -sha256 2>/dev/null) || true
+    [ "$_mig_orig_fp" = "$_mig_fetched_fp" ] \
+        && pass "Migration: fetched cert fingerprint matches original" \
+        || fail "Migration: fetched cert fingerprint matches original" \
+               "orig=$_mig_orig_fp fetched=$_mig_fetched_fp"
+
+    # --- 19g: Sign a new CSR on the migrated CA ---
+    _MIG_NEW="mig-new-${RUN_ID}"
+    make_csr "$_MIG_NEW" "$WORK_DIR/mig-new.csr"
+    curl -s -o /dev/null \
+        -X PUT -H "Content-Type: text/plain" \
+        --data-binary @"$WORK_DIR/mig-new.csr" \
+        "${_mig_url}/puppet-ca/v1/certificate_request/${_MIG_NEW}" 2>/dev/null || true
+
+    # autosign=true → should be signed immediately
+    _mig_new_cert=$(curl -sf "${_mig_url}/puppet-ca/v1/certificate/${_MIG_NEW}" 2>/dev/null) || true
+    echo "$_mig_new_cert" | grep -qF "BEGIN CERTIFICATE" \
+        && pass "Migration: new cert signed by migrated CA" \
+        || fail "Migration: new cert signed by migrated CA"
+
+    # Verify the new cert chains to the imported CA
+    echo "$_mig_new_cert" > "$WORK_DIR/mig-new.crt"
+    openssl verify -CAfile "$_MIG_DIR/ca_crt.pem" "$WORK_DIR/mig-new.crt" >/dev/null 2>&1 \
+        && pass "Migration: new cert verifies against imported CA cert" \
+        || fail "Migration: new cert verifies against imported CA cert"
+
+    # --- 19h: Revoke the pre-existing cert on the migrated CA ---
+    _mig_rev_st=$(curl -s -o /dev/null -w '%{http_code}' \
+        -X PUT -H "Content-Type: application/json" \
+        -d '{"desired_state":"revoked"}' \
+        "${_mig_url}/puppet-ca/v1/certificate_status/${_MIG_EXISTING}" 2>/dev/null) || true
+    [[ "$_mig_rev_st" =~ ^2 ]] \
+        && pass "Migration: revoke pre-existing cert returns 2xx" \
+        || fail "Migration: revoke pre-existing cert returns 2xx" "got HTTP $_mig_rev_st"
+
+    # Verify the CRL now contains the revoked serial
+    _mig_crl=$(curl -sf "${_mig_url}/puppet-ca/v1/certificate_revocation_list/ca" 2>/dev/null) || true
+    _mig_crl_text=$(echo "$_mig_crl" | openssl crl -text -noout 2>/dev/null) || true
+    echo "$_mig_crl_text" | grep -qi "Revoked Certificates" \
+        && pass "Migration: CRL contains revoked certificates after revocation" \
+        || fail "Migration: CRL contains revoked certificates after revocation"
+
+    # --- 19i: Certificate status of the migrated cert ---
+    _mig_status=$(curl -sf "${_mig_url}/puppet-ca/v1/certificate_status/${_MIG_EXISTING}" 2>/dev/null) || true
+    echo "$_mig_status" | grep -qF '"revoked"' \
+        && pass "Migration: revoked cert status shows 'revoked'" \
+        || fail "Migration: revoked cert status shows 'revoked'" "status: $_mig_status"
+
+    # --- 19j: puppet-ca-ctl list against migrated CA shows both certs ---
+    _mig_list=$(puppet-ca-ctl --server-url "$_mig_url" list --all 2>/dev/null) || true
+    echo "$_mig_list" | grep -qF "${_MIG_EXISTING}" \
+        && pass "Migration: puppet-ca-ctl list shows pre-existing cert" \
+        || fail "Migration: puppet-ca-ctl list shows pre-existing cert" "output: $_mig_list"
+    echo "$_mig_list" | grep -qF "${_MIG_NEW}" \
+        && pass "Migration: puppet-ca-ctl list shows newly signed cert" \
+        || fail "Migration: puppet-ca-ctl list shows newly signed cert" "output: $_mig_list"
+
+else
+    fail "Migration: puppet-ca starts successfully with imported CA" \
+        "timed out waiting for health"
+    for _skip in \
+        "Migration: CA cert fetchable from migrated server" \
+        "Migration: pre-existing cert fetchable by subject" \
+        "Migration: fetched cert fingerprint matches original" \
+        "Migration: new cert signed by migrated CA" \
+        "Migration: new cert verifies against imported CA cert" \
+        "Migration: revoke pre-existing cert returns 2xx" \
+        "Migration: CRL contains revoked certificates after revocation" \
+        "Migration: revoked cert status shows 'revoked'" \
+        "Migration: puppet-ca-ctl list shows pre-existing cert" \
+        "Migration: puppet-ca-ctl list shows newly signed cert"
+    do
+        fail "$_skip" "SKIP: CA did not start"
+    done
+fi
+
+kill "$_MIG_PID" 2>/dev/null; wait "$_MIG_PID" 2>/dev/null || true
+rm -rf "$_MIG_DIR" "$_MIG_OLD"
 
 # ═════════════════════════════════════════════════════════════════════════════
 # Results
