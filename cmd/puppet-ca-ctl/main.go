@@ -531,7 +531,7 @@ Global flags must be specified before the subcommand.`,
 	pf := rootCmd.PersistentFlags()
 	pf.StringVar(&globalConfigFile, "config", "", "Path to YAML config file (default: /etc/puppet-ca/ctl.yaml if it exists)")
 	pf.StringVar(&globalServerURL, "server-url", "https://localhost:8140", "puppet-ca server URL")
-	pf.StringVar(&globalCACert, "ca-cert", "", "Path to CA cert PEM for TLS verification (omit to skip verify)")
+	pf.StringVar(&globalCACert, "ca-cert", "", "Path to CA cert PEM for TLS verification (omit to use system trust store)")
 	pf.StringVar(&globalClientCert, "client-cert", "", "Path to client certificate PEM for mTLS")
 	pf.StringVar(&globalClientKey, "client-key", "", "Path to client private key PEM for mTLS")
 	pf.BoolVar(&globalVerbose, "verbose", false, "Enable verbose logging")

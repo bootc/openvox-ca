@@ -1543,13 +1543,12 @@ if [ "$_mtls_ready" = "true" ]; then
             "${_mtls_tls_url}/puppet-ca/v1/certificate_request/${_MTLS_SIGN}" 2>/dev/null || true
 
         # puppet-ca-ctl list --all over mTLS
-        # Note: --ca-cert is intentionally omitted so InsecureSkipVerify is
-        # used for server cert verification. The server cert CN=mtls-ctl-test
-        # doesn't match 127.0.0.1 and Go's TLS verifier would reject it.
-        # This test focuses on *client* cert presentation, not server cert
-        # hostname verification.
+        # --insecure skips server cert hostname verification (the server cert
+        # CN=mtls-ctl-test doesn't match 127.0.0.1). This test focuses on
+        # *client* cert presentation, not server cert verification.
         _mtls_list=$(puppet-ca-ctl \
             --server-url "$_mtls_tls_url" \
+            --insecure \
             --client-cert "$WORK_DIR/mtls-client.crt" \
             --client-key  "$WORK_DIR/mtls-client_key.pem" \
             list --all 2>/dev/null) && _mtls_list_rc=$? || _mtls_list_rc=$?
@@ -1560,6 +1559,7 @@ if [ "$_mtls_ready" = "true" ]; then
         # puppet-ca-ctl sign over mTLS
         _mtls_sign_out=$(puppet-ca-ctl \
             --server-url "$_mtls_tls_url" \
+            --insecure \
             --client-cert "$WORK_DIR/mtls-client.crt" \
             --client-key  "$WORK_DIR/mtls-client_key.pem" \
             sign --certname "$_MTLS_SIGN" 2>/dev/null) && _mtls_sign_rc=$? || _mtls_sign_rc=$?
@@ -1570,6 +1570,7 @@ if [ "$_mtls_ready" = "true" ]; then
         # puppet-ca-ctl revoke over mTLS
         _mtls_rev_out=$(puppet-ca-ctl \
             --server-url "$_mtls_tls_url" \
+            --insecure \
             --client-cert "$WORK_DIR/mtls-client.crt" \
             --client-key  "$WORK_DIR/mtls-client_key.pem" \
             revoke --certname "$_MTLS_SIGN" 2>/dev/null) && _mtls_rev_rc=$? || _mtls_rev_rc=$?
@@ -1580,6 +1581,7 @@ if [ "$_mtls_ready" = "true" ]; then
         # Non-admin cert must be denied on admin-only endpoint
         _mtls_deny_out=$(puppet-ca-ctl \
             --server-url "$_mtls_tls_url" \
+            --insecure \
             --client-cert "$WORK_DIR/mtls-nonadmin.crt" \
             --client-key  "$WORK_DIR/mtls-nonadmin_key.pem" \
             list --all 2>&1) && _mtls_deny_rc=$? || _mtls_deny_rc=$?
