@@ -1704,11 +1704,23 @@ _MIG_PID=""
 
 # --- 19a: Build a fake "old Puppet CA" directory with openssl ---
 # Create a CA cert + key the way Puppet Server would have them.
+# The cert must include keyCertSign + cRLSign key usage so that Go's
+# x509.CreateRevocationList accepts it as a valid CRL issuer.
 openssl genrsa -out "$_MIG_OLD/ca_key.pem" 2048 2>/dev/null
+cat > "$_MIG_OLD/ca_ext.cnf" <<CAEXTEOF
+[req]
+distinguished_name = dn
+x509_extensions    = v3_ca
+[dn]
+[v3_ca]
+basicConstraints = critical, CA:TRUE
+keyUsage         = critical, keyCertSign, cRLSign
+CAEXTEOF
 openssl req -x509 -new \
     -key "$_MIG_OLD/ca_key.pem" \
     -subj "/CN=Puppet CA: migration-test" \
     -days 3650 \
+    -config "$_MIG_OLD/ca_ext.cnf" \
     -out "$_MIG_OLD/ca_crt.pem" 2>/dev/null
 
 # Create a CRL signed by the old CA.
