@@ -69,6 +69,34 @@ func setupLogger(cfg *serverConfig) (*os.File, error) {
 	return nil, nil
 }
 
+// buildBackendSpec derives a storage.BackendSpec from the server config. The
+// spec is used to construct the StorageService in every mode (frontend,
+// signer, single-process), ensuring backend selection happens in one place.
+func buildBackendSpec(cfg *serverConfig, absCADir string) (storage.BackendSpec, error) {
+	kind, err := storage.ParseBackendKind(cfg.StorageBackend)
+	if err != nil {
+		return storage.BackendSpec{}, err
+	}
+	spec := storage.BackendSpec{
+		Kind:     kind,
+		LocalDir: absCADir,
+	}
+	if kind == storage.BackendEtcd {
+		spec.Etcd = storage.EtcdSpec{
+			Endpoints:         cfg.EtcdEndpoints,
+			KeyPrefix:         cfg.EtcdKeyPrefix,
+			Username:          cfg.EtcdUsername,
+			Password:          cfg.EtcdPassword,
+			DialTimeoutSec:    cfg.EtcdDialTimeoutSec,
+			RequestTimeoutSec: cfg.EtcdRequestTimeoutSec,
+			TLSCAFile:         cfg.EtcdTLSCAFile,
+			TLSCertFile:       cfg.EtcdTLSCertFile,
+			TLSKeyFile:        cfg.EtcdTLSKeyFile,
+		}
+	}
+	return spec, nil
+}
+
 // applyCAConfig applies the common CA configuration fields from serverConfig
 // to a CA instance. Used by both frontend and signer modes.
 func applyCAConfig(myCA *ca.CA, cfg *serverConfig) error {
@@ -348,7 +376,17 @@ func main() {
 			}
 
 			// --- Storage & Directories ---
-			store := storage.New(absCADir)
+			backendSpec, err := buildBackendSpec(cfg, absCADir)
+			if err != nil {
+				slog.Error("Invalid storage backend config", "error", err)
+				os.Exit(1)
+			}
+			store, err := storage.NewServiceFromSpec(backendSpec)
+			if err != nil {
+				slog.Error("Failed to initialise storage backend", "error", err)
+				os.Exit(1)
+			}
+			defer func() { _ = store.Backend().Close() }()
 			if err := store.EnsureDirs(); err != nil {
 				slog.Error("Failed to create CA directories", "error", err)
 				os.Exit(1)
@@ -587,7 +625,15 @@ func runSignerMode(cfg *serverConfig, absCADir string) error {
 		"pid", os.Getpid(),
 	)
 
-	store := storage.New(absCADir)
+	backendSpec, err := buildBackendSpec(cfg, absCADir)
+	if err != nil {
+		return fmt.Errorf("invalid storage backend config: %w", err)
+	}
+	store, err := storage.NewServiceFromSpec(backendSpec)
+	if err != nil {
+		return fmt.Errorf("initialising storage backend: %w", err)
+	}
+	defer func() { _ = store.Backend().Close() }()
 
 	// Full CA initialization: handles bootstrap on first run, loads existing
 	// CA on subsequent runs. This writes ca_crt.pem, CRL, inventory, etc.
