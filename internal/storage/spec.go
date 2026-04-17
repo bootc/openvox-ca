@@ -48,6 +48,16 @@ type BackendSpec struct {
 
 	// Etcd configures the etcd backend. Only consulted when Kind == BackendEtcd.
 	Etcd EtcdSpec
+
+	// CACertFile, when non-empty, keeps the CA certificate on local disk at
+	// this path regardless of the selected backend. Useful when operators
+	// want to supply the cert as a file or mount it from a secret volume.
+	CACertFile string
+
+	// CAKeyFile, when non-empty, keeps the CA private key on local disk at
+	// this path regardless of the selected backend. Combine with a remote
+	// backend to keep the key out of shared storage.
+	CAKeyFile string
 }
 
 // EtcdSpec is the config-friendly form of EtcdConfig with TLS expressed as
@@ -72,12 +82,19 @@ func NewServiceFromSpec(spec BackendSpec) (*StorageService, error) {
 	if kind == "" {
 		kind = BackendFilesystem
 	}
+
+	var (
+		backend          Backend
+		localPrivKeyDir  string
+	)
+
 	switch kind {
 	case BackendFilesystem:
 		if spec.LocalDir == "" {
 			return nil, fmt.Errorf("filesystem backend requires LocalDir")
 		}
-		return New(spec.LocalDir), nil
+		backend = NewFilesystemBackend(spec.LocalDir)
+		localPrivKeyDir = filepath.Join(spec.LocalDir, "private")
 
 	case BackendEtcd:
 		if len(spec.Etcd.Endpoints) == 0 {
@@ -103,15 +120,40 @@ func NewServiceFromSpec(spec BackendSpec) (*StorageService, error) {
 		if spec.Etcd.RequestTimeoutSec > 0 {
 			cfg.RequestTimeout = time.Duration(spec.Etcd.RequestTimeoutSec) * time.Second
 		}
-		backend, err := NewEtcdBackend(cfg)
+		b, err := NewEtcdBackend(cfg)
 		if err != nil {
 			return nil, err
 		}
-		return NewWithBackend(backend, filepath.Join(spec.LocalDir, "private")), nil
+		backend = b
+		localPrivKeyDir = filepath.Join(spec.LocalDir, "private")
 
 	default:
 		return nil, fmt.Errorf("unknown storage backend kind %q", spec.Kind)
 	}
+
+	if overrides := collectOverrides(spec); len(overrides) > 0 {
+		ov, err := NewOverlayBackend(backend, overrides)
+		if err != nil {
+			_ = backend.Close()
+			return nil, err
+		}
+		backend = ov
+	}
+
+	return NewWithBackend(backend, localPrivKeyDir), nil
+}
+
+// collectOverrides builds the logical-key → local-path map from the spec's
+// optional override fields. Empty paths are dropped.
+func collectOverrides(spec BackendSpec) map[string]string {
+	out := map[string]string{}
+	if spec.CACertFile != "" {
+		out[KeyCACert] = spec.CACertFile
+	}
+	if spec.CAKeyFile != "" {
+		out[KeyCAKey] = spec.CAKeyFile
+	}
+	return out
 }
 
 func loadEtcdTLS(spec EtcdSpec) (*tls.Config, error) {

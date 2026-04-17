@@ -78,8 +78,10 @@ func buildBackendSpec(cfg *serverConfig, absCADir string) (storage.BackendSpec, 
 		return storage.BackendSpec{}, err
 	}
 	spec := storage.BackendSpec{
-		Kind:     kind,
-		LocalDir: absCADir,
+		Kind:       kind,
+		LocalDir:   absCADir,
+		CACertFile: absIfSet(cfg.CACertFile),
+		CAKeyFile:  absIfSet(cfg.CAKeyFile),
 	}
 	if kind == storage.BackendEtcd {
 		spec.Etcd = storage.EtcdSpec{
@@ -95,6 +97,19 @@ func buildBackendSpec(cfg *serverConfig, absCADir string) (storage.BackendSpec, 
 		}
 	}
 	return spec, nil
+}
+
+// absIfSet returns filepath.Abs(p) when p is non-empty, otherwise "".
+// Resolving at config time lets error messages and logs show canonical paths.
+func absIfSet(p string) string {
+	if p == "" {
+		return ""
+	}
+	abs, err := filepath.Abs(p)
+	if err != nil {
+		return p
+	}
+	return abs
 }
 
 // applyCAConfig applies the common CA configuration fields from serverConfig
@@ -177,6 +192,11 @@ func main() {
 		encryptCAKey        bool
 		caKeyPassphraseFile string
 		singleProcess       bool
+		storageBackend      string
+		etcdEndpoints       []string
+		etcdKeyPrefix       string
+		caCertFile          string
+		caKeyFile           string
 	)
 
 	cmd := &cobra.Command{
@@ -248,6 +268,21 @@ func main() {
 			}
 			if cmd.Flags().Changed("ca-key-passphrase-file") {
 				cfg.CAKeyPassphraseFile = caKeyPassphraseFile
+			}
+			if cmd.Flags().Changed("storage-backend") {
+				cfg.StorageBackend = storageBackend
+			}
+			if cmd.Flags().Changed("etcd-endpoints") {
+				cfg.EtcdEndpoints = etcdEndpoints
+			}
+			if cmd.Flags().Changed("etcd-key-prefix") {
+				cfg.EtcdKeyPrefix = etcdKeyPrefix
+			}
+			if cmd.Flags().Changed("ca-cert-file") {
+				cfg.CACertFile = caCertFile
+			}
+			if cmd.Flags().Changed("ca-key-file") {
+				cfg.CAKeyFile = caKeyFile
 			}
 			// --- Validation ---
 			if cfg.CADir == "" {
@@ -595,6 +630,11 @@ func main() {
 	f.BoolVar(&encryptCAKey, "encrypt-ca-key", false, "Encrypt the CA private key at rest (AES-256-GCM + Argon2id); a passphrase is auto-generated if not provided")
 	f.StringVar(&caKeyPassphraseFile, "ca-key-passphrase-file", "", "Path to file containing the CA key passphrase (first line used)")
 	f.BoolVar(&singleProcess, "single-process", false, "Disable CA key isolation (run signer and frontend in a single process)")
+	f.StringVar(&storageBackend, "storage-backend", "", "Storage backend: 'filesystem' (default) or 'etcd'")
+	f.StringSliceVar(&etcdEndpoints, "etcd-endpoints", nil, "Comma-separated etcd cluster endpoints (e.g. https://etcd1:2379,https://etcd2:2379)")
+	f.StringVar(&etcdKeyPrefix, "etcd-key-prefix", "", "etcd key namespace for this CA (default: /puppet-ca)")
+	f.StringVar(&caCertFile, "ca-cert-file", "", "Keep the CA certificate at this local path regardless of storage backend")
+	f.StringVar(&caKeyFile, "ca-key-file", "", "Keep the CA private key at this local path regardless of storage backend")
 
 	if err := cmd.Execute(); err != nil {
 		os.Exit(1)

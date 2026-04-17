@@ -89,6 +89,13 @@ type serverConfig struct {
 	EtcdTLSCAFile        string   `yaml:"etcd_tls_ca_file"`
 	EtcdTLSCertFile      string   `yaml:"etcd_tls_cert_file"`
 	EtcdTLSKeyFile       string   `yaml:"etcd_tls_key_file"`
+
+	// Local-file overrides. When set, the named asset is read/written via
+	// this filesystem path regardless of the selected backend. Typical use:
+	// keep the CA cert and/or key on local disk (or a mounted secret volume)
+	// while storing CSRs, signed certs, CRL and inventory in etcd.
+	CACertFile string `yaml:"ca_cert_file"`
+	CAKeyFile  string `yaml:"ca_key_file"`
 }
 
 // loadServerConfig applies built-in defaults, optionally loads a YAML config
@@ -272,6 +279,12 @@ func applyServerEnv(cfg *serverConfig) {
 	}
 	if v := os.Getenv("PUPPET_CA_ETCD_TLS_KEY_FILE"); v != "" {
 		cfg.EtcdTLSKeyFile = v
+	}
+	if v := os.Getenv("PUPPET_CA_CA_CERT_FILE"); v != "" {
+		cfg.CACertFile = v
+	}
+	if v := os.Getenv("PUPPET_CA_CA_KEY_FILE"); v != "" {
+		cfg.CAKeyFile = v
 	}
 }
 
