@@ -1,4 +1,5 @@
 // Copyright (C) 2026 Trevor Vaughan
+// Copyright (C) 2026 Chris Boot
 //
 // This program is free software; you can redistribute it and/or modify
 // it under the terms of the GNU General Public License as published by
@@ -20,58 +21,95 @@ import (
 	"crypto/hmac"
 	"crypto/rand"
 	"crypto/sha256"
+	"errors"
 	"fmt"
+	"io/fs"
 	"log/slog"
 	"os"
 	"path/filepath"
 	"strings"
 	"sync"
+	"time"
 )
 
-const (
-	FilePermPrivate = 0600
-	FilePermPublic  = 0644
-	DirPerm         = 0750
-)
-
+// StorageService provides the higher-level storage API used by the CA and
+// API layers. It delegates all blob I/O to a pluggable Backend and handles
+// inventory HMAC sequencing, append/read locks, and the per-subject private
+// key directory (always local).
 type StorageService struct {
-	baseDir     string
+	backend     Backend
 	serialMu    sync.Mutex
 	inventoryMu sync.RWMutex
 	crlMu       sync.RWMutex
-	fileMu      sync.RWMutex // General file system lock for certs/csrs
-	hmacKey     []byte       // HMAC-SHA256 key for inventory integrity; nil disables
+	fileMu      sync.RWMutex
+	hmacKey     []byte // set by InitHMAC; nil disables integrity checks
+
+	// localPrivateKeyDir holds server-generated per-subject private keys.
+	// These are kept on the local filesystem regardless of the configured
+	// backend: they are client material that operators don't want exposed
+	// through a shared remote store.
+	localPrivateKeyDir string
 }
 
+// New constructs a StorageService backed by a filesystem rooted at baseDir.
+// Per-subject generated private keys are stored in baseDir/private alongside
+// the filesystem backend's other private files.
 func New(baseDir string) *StorageService {
+	return NewWithBackend(NewFilesystemBackend(baseDir), filepath.Join(baseDir, "private"))
+}
+
+// NewWithBackend constructs a StorageService with an explicit backend and a
+// local directory for per-subject private keys. The private key directory is
+// always on the local filesystem regardless of the chosen backend.
+func NewWithBackend(backend Backend, localPrivateKeyDir string) *StorageService {
 	return &StorageService{
-		baseDir: baseDir,
+		backend:            backend,
+		localPrivateKeyDir: localPrivateKeyDir,
 	}
 }
 
+// Backend returns the underlying Backend. Exposed for advanced use cases
+// (diagnostic output, backend-specific tuning). Most callers should prefer
+// the higher-level methods on StorageService.
+func (s *StorageService) Backend() Backend { return s.backend }
+
+// EnsureDirs prepares the backend and the local private-key directory for use.
 func (s *StorageService) EnsureDirs() error {
-	dirs := []string{
-		s.baseDir,
-		filepath.Join(s.baseDir, "signed"),
-		filepath.Join(s.baseDir, "requests"),
-		filepath.Join(s.baseDir, "private"), // For CA key
+	if err := s.backend.EnsureReady(); err != nil {
+		return err
 	}
-	for _, d := range dirs {
-		if err := os.MkdirAll(d, DirPerm); err != nil {
+	if s.localPrivateKeyDir != "" {
+		if err := os.MkdirAll(s.localPrivateKeyDir, DirPerm); err != nil {
 			return err
 		}
 	}
 	return nil
 }
 
+// --- Serial ---
+
 func (s *StorageService) WriteSerial(val string) error {
 	s.serialMu.Lock()
 	defer s.serialMu.Unlock()
-	return os.WriteFile(filepath.Join(s.baseDir, "serial"), []byte(val), FilePermPublic)
+	return s.backend.Put(KeySerial, []byte(val), BlobPublic)
 }
 
+func (s *StorageService) GetSerial() ([]byte, error) {
+	s.serialMu.Lock()
+	defer s.serialMu.Unlock()
+	return s.backend.Get(KeySerial)
+}
+
+func (s *StorageService) HasSerial() (bool, error) {
+	s.serialMu.Lock()
+	defer s.serialMu.Unlock()
+	return s.backend.Exists(KeySerial)
+}
+
+// --- Inventory ---
+
 // InitHMAC loads or generates the inventory HMAC key and verifies the
-// existing inventory. Call this once during CA initialization.
+// existing inventory. Call this once during CA initialisation.
 func (s *StorageService) InitHMAC() error {
 	key, err := s.EnsureHMACKey()
 	if err != nil {
@@ -85,19 +123,12 @@ func (s *StorageService) AppendInventory(entry string) error {
 	s.inventoryMu.Lock()
 	defer s.inventoryMu.Unlock()
 
-	f, err := os.OpenFile(filepath.Join(s.baseDir, "inventory.txt"), os.O_APPEND|os.O_CREATE|os.O_WRONLY, FilePermPrivate)
-	if err != nil {
-		return err
-	}
-	defer f.Close()
-
-	if _, err := f.WriteString(entry + "\n"); err != nil {
+	if err := s.backend.AppendLine(KeyInventory, []byte(entry+"\n"), BlobPrivate); err != nil {
 		return err
 	}
 
-	// Update HMAC after successful write.
 	if s.hmacKey != nil {
-		if err := s.UpdateInventoryHMAC(s.hmacKey); err != nil {
+		if err := s.updateInventoryHMACLocked(s.hmacKey); err != nil {
 			slog.Warn("Failed to update inventory HMAC", "error", err)
 		}
 	}
@@ -108,174 +139,228 @@ func (s *StorageService) ReadInventory() ([]byte, error) {
 	s.inventoryMu.RLock()
 	defer s.inventoryMu.RUnlock()
 
-	// Verify HMAC integrity before returning inventory contents.
 	if s.hmacKey != nil {
-		if err := s.VerifyInventoryHMAC(s.hmacKey); err != nil {
+		if err := s.verifyInventoryHMACLocked(s.hmacKey); err != nil {
 			return nil, err
 		}
 	}
-	return os.ReadFile(s.InventoryPath())
+	return s.backend.Get(KeyInventory)
 }
 
-func (s *StorageService) CRLPath() string {
-	return filepath.Join(s.baseDir, "ca_crl.pem")
+// TouchInventory creates an empty inventory blob if one does not already
+// exist. Called during CA bootstrap and import to seed the inventory.
+func (s *StorageService) TouchInventory() error {
+	s.inventoryMu.Lock()
+	defer s.inventoryMu.Unlock()
+	ok, err := s.backend.Exists(KeyInventory)
+	if err != nil {
+		return err
+	}
+	if ok {
+		return nil
+	}
+	return s.backend.Put(KeyInventory, []byte{}, BlobPrivate)
 }
+
+func (s *StorageService) HasInventory() (bool, error) {
+	s.inventoryMu.RLock()
+	defer s.inventoryMu.RUnlock()
+	return s.backend.Exists(KeyInventory)
+}
+
+// readInventoryForHMAC returns the inventory bytes, treating an absent blob
+// as empty so that a missing inventory hashes the same as an empty one.
+// Caller must hold inventoryMu (read or write).
+func (s *StorageService) readInventoryForHMAC() ([]byte, error) {
+	data, err := s.backend.Get(KeyInventory)
+	if err != nil {
+		if errors.Is(err, fs.ErrNotExist) {
+			return []byte{}, nil
+		}
+		return nil, err
+	}
+	return data, nil
+}
+
+// --- CRL ---
 
 func (s *StorageService) UpdateCRL(pemData []byte) error {
 	s.crlMu.Lock()
 	defer s.crlMu.Unlock()
-	return atomicWriteFile(s.CRLPath(), pemData, FilePermPrivate)
-}
-
-// atomicWriteFile writes data to a temporary file in the same directory as
-// target, then renames it into place. This prevents partial writes from
-// leaving a corrupt file on disk (e.g. during a crash or power loss).
-func atomicWriteFile(target string, data []byte, perm os.FileMode) error {
-	dir := filepath.Dir(target)
-	tmp, err := os.CreateTemp(dir, ".tmp-*")
-	if err != nil {
-		return err
-	}
-	tmpName := tmp.Name()
-
-	if _, err := tmp.Write(data); err != nil {
-		tmp.Close()
-		os.Remove(tmpName)
-		return err
-	}
-	if err := tmp.Chmod(perm); err != nil {
-		tmp.Close()
-		os.Remove(tmpName)
-		return err
-	}
-	if err := tmp.Close(); err != nil {
-		os.Remove(tmpName)
-		return err
-	}
-	return os.Rename(tmpName, target)
+	return s.backend.Put(KeyCRL, pemData, BlobPrivate)
 }
 
 func (s *StorageService) GetCRL() ([]byte, error) {
 	s.crlMu.RLock()
 	defer s.crlMu.RUnlock()
-	return os.ReadFile(s.CRLPath())
+	return s.backend.Get(KeyCRL)
 }
 
-func (s *StorageService) CADir() string {
-	return s.baseDir
+// CRLModTime returns the last-modified time of the CRL blob, for
+// If-Modified-Since handling. Backends that don't track mtime return zero.
+func (s *StorageService) CRLModTime() (time.Time, error) {
+	s.crlMu.RLock()
+	defer s.crlMu.RUnlock()
+	return s.backend.ModTime(KeyCRL)
 }
 
-func (s *StorageService) CAKeyPath() string {
-	return filepath.Join(s.baseDir, "private", "ca_key.pem")
+// --- CA material ---
+
+func (s *StorageService) GetCACert() ([]byte, error) {
+	s.fileMu.RLock()
+	defer s.fileMu.RUnlock()
+	return s.backend.Get(KeyCACert)
 }
 
-func (s *StorageService) CACertPath() string {
-	return filepath.Join(s.baseDir, "ca_crt.pem")
+func (s *StorageService) SaveCACert(data []byte) error {
+	s.fileMu.Lock()
+	defer s.fileMu.Unlock()
+	return s.backend.Put(KeyCACert, data, BlobPublic)
 }
 
-func (s *StorageService) CAPubKeyPath() string {
-	return filepath.Join(s.baseDir, "ca_pub.pem")
+func (s *StorageService) HasCACert() (bool, error) {
+	s.fileMu.RLock()
+	defer s.fileMu.RUnlock()
+	return s.backend.Exists(KeyCACert)
 }
 
-// Helpers for paths. Subject is pre-validated as ^[a-z0-9._-]+$ by the CA layer.
-func (s *StorageService) reqPath(subject string) string {
-	return filepath.Join(s.baseDir, "requests", subject+".pem")
+func (s *StorageService) GetCAKey() ([]byte, error) {
+	s.fileMu.RLock()
+	defer s.fileMu.RUnlock()
+	return s.backend.Get(KeyCAKey)
 }
 
-func (s *StorageService) signedPath(subject string) string {
-	return filepath.Join(s.baseDir, "signed", subject+".pem")
+func (s *StorageService) SaveCAKey(data []byte) error {
+	s.fileMu.Lock()
+	defer s.fileMu.Unlock()
+	return s.backend.Put(KeyCAKey, data, BlobPrivate)
 }
 
-// CSRDir returns the directory where pending CSRs are stored.
-func (s *StorageService) CSRDir() string {
-	return filepath.Join(s.baseDir, "requests")
+func (s *StorageService) HasCAKey() (bool, error) {
+	s.fileMu.RLock()
+	defer s.fileMu.RUnlock()
+	return s.backend.Exists(KeyCAKey)
 }
 
-// SignedDir returns the directory where signed certificates are stored.
-func (s *StorageService) SignedDir() string {
-	return filepath.Join(s.baseDir, "signed")
+func (s *StorageService) SaveCAPubKey(data []byte) error {
+	s.fileMu.Lock()
+	defer s.fileMu.Unlock()
+	return s.backend.Put(KeyCAPubKey, data, BlobPublic)
 }
+
+// --- CSR / Cert per subject ---
 
 func (s *StorageService) SaveCSR(subject string, pemData []byte) error {
 	s.fileMu.Lock()
 	defer s.fileMu.Unlock()
-	return os.WriteFile(s.reqPath(subject), pemData, FilePermPublic)
+	return s.backend.Put(CSRKey(subject), pemData, BlobPublic)
 }
 
 func (s *StorageService) GetCSR(subject string) ([]byte, error) {
 	s.fileMu.RLock()
 	defer s.fileMu.RUnlock()
-	return os.ReadFile(s.reqPath(subject))
+	return s.backend.Get(CSRKey(subject))
 }
 
 func (s *StorageService) SaveCert(subject string, pemData []byte) error {
 	s.fileMu.Lock()
 	defer s.fileMu.Unlock()
-	return os.WriteFile(s.signedPath(subject), pemData, FilePermPublic)
+	return s.backend.Put(CertKey(subject), pemData, BlobPublic)
 }
 
 func (s *StorageService) GetCert(subject string) ([]byte, error) {
 	s.fileMu.RLock()
 	defer s.fileMu.RUnlock()
-	return os.ReadFile(s.signedPath(subject))
+	return s.backend.Get(CertKey(subject))
 }
 
 func (s *StorageService) DeleteCSR(subject string) error {
 	s.fileMu.Lock()
 	defer s.fileMu.Unlock()
-	return os.Remove(s.reqPath(subject))
+	return s.backend.Delete(CSRKey(subject))
 }
 
 func (s *StorageService) DeleteCert(subject string) error {
 	s.fileMu.Lock()
 	defer s.fileMu.Unlock()
-	return os.Remove(s.signedPath(subject))
+	return s.backend.Delete(CertKey(subject))
 }
 
 // HasCert reports whether a signed certificate exists for subject.
 func (s *StorageService) HasCert(subject string) bool {
 	s.fileMu.RLock()
 	defer s.fileMu.RUnlock()
-	_, err := os.Stat(s.signedPath(subject))
-	return err == nil
+	ok, _ := s.backend.Exists(CertKey(subject))
+	return ok
 }
 
 // HasCSR reports whether a pending CSR exists for subject.
 func (s *StorageService) HasCSR(subject string) bool {
 	s.fileMu.RLock()
 	defer s.fileMu.RUnlock()
-	_, err := os.Stat(s.reqPath(subject))
-	return err == nil
+	ok, _ := s.backend.Exists(CSRKey(subject))
+	return ok
 }
 
-func (s *StorageService) InventoryPath() string {
-	return filepath.Join(s.baseDir, "inventory.txt")
-}
-
-func (s *StorageService) SerialPath() string {
-	return filepath.Join(s.baseDir, "serial")
-}
-
-func (s *StorageService) PrivateKeyPath(subject string) string {
-	return filepath.Join(s.baseDir, "private", subject+"_key.pem")
-}
-
-// KeyPermWarning describes a private key file whose permissions are more
-// permissive than expected.
-type KeyPermWarning struct {
-	Path string
-	Mode os.FileMode
-}
-
-// CheckKeyPermissions checks that private key files have the expected
-// permissions (FilePermPrivate). Returns a list of warnings for any files
-// whose permissions are more permissive than expected.
-// An empty return means all files are OK (or no key files exist yet).
-func (s *StorageService) CheckKeyPermissions() []KeyPermWarning {
-	privateDir := filepath.Join(s.baseDir, "private")
-	entries, err := os.ReadDir(privateDir)
+// ListCSRs returns the subject names of all pending certificate requests.
+func (s *StorageService) ListCSRs() ([]string, error) {
+	s.fileMu.RLock()
+	defer s.fileMu.RUnlock()
+	keys, err := s.backend.List(csrPrefix)
 	if err != nil {
-		return nil // directory may not exist yet
+		return nil, err
+	}
+	out := make([]string, 0, len(keys))
+	for _, k := range keys {
+		out = append(out, strings.TrimPrefix(k, csrPrefix))
+	}
+	return out, nil
+}
+
+// ListCerts returns the subject names of all signed certificates.
+func (s *StorageService) ListCerts() ([]string, error) {
+	s.fileMu.RLock()
+	defer s.fileMu.RUnlock()
+	keys, err := s.backend.List(certPrefix)
+	if err != nil {
+		return nil, err
+	}
+	out := make([]string, 0, len(keys))
+	for _, k := range keys {
+		out = append(out, strings.TrimPrefix(k, certPrefix))
+	}
+	return out, nil
+}
+
+// --- Per-subject private keys (always local) ---
+
+// PrivateKeyPath returns the filesystem path to subject's server-generated
+// private key. Private keys are always stored on the local filesystem.
+func (s *StorageService) PrivateKeyPath(subject string) string {
+	return filepath.Join(s.localPrivateKeyDir, subject+"_key.pem")
+}
+
+// SavePrivateKey persists a server-generated private key for subject. The
+// key is always written to the local filesystem, never the configured backend.
+func (s *StorageService) SavePrivateKey(subject string, pemData []byte) error {
+	s.fileMu.Lock()
+	defer s.fileMu.Unlock()
+	if err := os.MkdirAll(s.localPrivateKeyDir, DirPerm); err != nil {
+		return err
+	}
+	return os.WriteFile(s.PrivateKeyPath(subject), pemData, FilePermPrivate)
+}
+
+// CheckKeyPermissions reports private key files whose permissions are more
+// permissive than expected (0600). Scans the local private-key directory,
+// which for the filesystem backend also contains the CA key.
+func (s *StorageService) CheckKeyPermissions() []KeyPermWarning {
+	if s.localPrivateKeyDir == "" {
+		return nil
+	}
+	entries, err := os.ReadDir(s.localPrivateKeyDir)
+	if err != nil {
+		return nil
 	}
 	var warnings []KeyPermWarning
 	for _, e := range entries {
@@ -287,9 +372,9 @@ func (s *StorageService) CheckKeyPermissions() []KeyPermWarning {
 			continue
 		}
 		perm := info.Mode().Perm()
-		if perm&^os.FileMode(FilePermPrivate) != 0 { // any bit set beyond FilePermPrivate (0600)
+		if perm&^os.FileMode(FilePermPrivate) != 0 {
 			warnings = append(warnings, KeyPermWarning{
-				Path: filepath.Join(privateDir, e.Name()),
+				Path: filepath.Join(s.localPrivateKeyDir, e.Name()),
 				Mode: perm,
 			})
 		}
@@ -297,88 +382,77 @@ func (s *StorageService) CheckKeyPermissions() []KeyPermWarning {
 	return warnings
 }
 
-func (s *StorageService) SavePrivateKey(subject string, pemData []byte) error {
-	s.fileMu.Lock()
-	defer s.fileMu.Unlock()
-	return os.WriteFile(s.PrivateKeyPath(subject), pemData, FilePermPrivate)
-}
+// --- Legacy path accessors (filesystem-backend only) ---
+//
+// These return empty strings when the backend is not filesystem-rooted.
+// They exist for diagnostic logging and test fixtures; core code should
+// use the content-oriented methods above.
 
-// ListCSRs returns the subject names of all pending certificate requests.
-func (s *StorageService) ListCSRs() ([]string, error) {
-	s.fileMu.RLock()
-	defer s.fileMu.RUnlock()
-	return listSubjectsInDir(s.CSRDir())
-}
-
-// ListCerts returns the subject names of all signed certificates.
-func (s *StorageService) ListCerts() ([]string, error) {
-	s.fileMu.RLock()
-	defer s.fileMu.RUnlock()
-	return listSubjectsInDir(s.SignedDir())
-}
-
-func listSubjectsInDir(dir string) ([]string, error) {
-	entries, err := os.ReadDir(dir)
-	if err != nil {
-		if os.IsNotExist(err) {
-			return []string{}, nil
-		}
-		return nil, err
+// CADir returns the filesystem root of the backend, or "" for non-filesystem backends.
+func (s *StorageService) CADir() string {
+	if p, ok := s.backend.(PathProvider); ok {
+		return p.BaseDir()
 	}
-	subjects := make([]string, 0, len(entries))
-	for _, e := range entries {
-		if e.IsDir() || filepath.Ext(e.Name()) != ".pem" {
-			continue
-		}
-		subjects = append(subjects, strings.TrimSuffix(e.Name(), ".pem"))
+	return ""
+}
+
+func (s *StorageService) fsPath(key string) string {
+	if p, ok := s.backend.(PathProvider); ok {
+		return p.Path(key)
 	}
-	return subjects, nil
+	return ""
+}
+
+func (s *StorageService) CACertPath() string    { return s.fsPath(KeyCACert) }
+func (s *StorageService) CAKeyPath() string     { return s.fsPath(KeyCAKey) }
+func (s *StorageService) CAPubKeyPath() string  { return s.fsPath(KeyCAPubKey) }
+func (s *StorageService) CRLPath() string       { return s.fsPath(KeyCRL) }
+func (s *StorageService) SerialPath() string    { return s.fsPath(KeySerial) }
+func (s *StorageService) InventoryPath() string { return s.fsPath(KeyInventory) }
+func (s *StorageService) HMACKeyPath() string   { return s.fsPath(KeyHMACKey) }
+
+// CSRDir returns the directory where pending CSRs are stored (filesystem backend only).
+func (s *StorageService) CSRDir() string {
+	if p, ok := s.backend.(PathProvider); ok {
+		return filepath.Join(p.BaseDir(), "requests")
+	}
+	return ""
+}
+
+// SignedDir returns the directory where signed certificates are stored (filesystem backend only).
+func (s *StorageService) SignedDir() string {
+	if p, ok := s.backend.(PathProvider); ok {
+		return filepath.Join(p.BaseDir(), "signed")
+	}
+	return ""
 }
 
 // --- Inventory HMAC integrity ---
 
 const hmacKeyLen = 32
 
-// HMACKeyPath returns the path to the inventory HMAC key file.
-func (s *StorageService) HMACKeyPath() string {
-	return filepath.Join(s.baseDir, "private", ".inventory_hmac_key")
-}
-
-// inventoryHMACPath returns the path to the inventory HMAC file.
-func (s *StorageService) inventoryHMACPath() string {
-	return filepath.Join(s.baseDir, ".inventory.hmac")
-}
-
 // EnsureHMACKey loads or generates the HMAC key used for inventory integrity.
-// Returns the key bytes. The key is stored in private/.inventory_hmac_key with 0600.
+// The key is stored via the backend under KeyHMACKey.
 func (s *StorageService) EnsureHMACKey() ([]byte, error) {
-	keyPath := s.HMACKeyPath()
-	if data, err := os.ReadFile(keyPath); err == nil && len(data) == hmacKeyLen {
+	if data, err := s.backend.Get(KeyHMACKey); err == nil && len(data) == hmacKeyLen {
 		return data, nil
 	}
-
 	key := make([]byte, hmacKeyLen)
 	if _, err := rand.Read(key); err != nil {
 		return nil, fmt.Errorf("generating HMAC key: %w", err)
 	}
-	if err := os.MkdirAll(filepath.Dir(keyPath), DirPerm); err != nil {
-		return nil, fmt.Errorf("creating HMAC key directory: %w", err)
-	}
-	if err := os.WriteFile(keyPath, key, FilePermPrivate); err != nil {
+	if err := s.backend.Put(KeyHMACKey, key, BlobPrivate); err != nil {
 		return nil, fmt.Errorf("writing HMAC key: %w", err)
 	}
 	return key, nil
 }
 
-// computeInventoryHMAC computes HMAC-SHA256 of the inventory file contents.
+// computeInventoryHMAC computes HMAC-SHA256 of the inventory contents.
+// Caller must hold inventoryMu.
 func (s *StorageService) computeInventoryHMAC(hmacKey []byte) ([]byte, error) {
-	data, err := os.ReadFile(s.InventoryPath())
+	data, err := s.readInventoryForHMAC()
 	if err != nil {
-		if os.IsNotExist(err) {
-			data = []byte{}
-		} else {
-			return nil, err
-		}
+		return nil, err
 	}
 	mac := hmac.New(sha256.New, hmacKey)
 	mac.Write(data)
@@ -386,23 +460,35 @@ func (s *StorageService) computeInventoryHMAC(hmacKey []byte) ([]byte, error) {
 }
 
 // UpdateInventoryHMAC recomputes and writes the HMAC for the current inventory.
+// It is safe to call externally (e.g. after migrating an existing inventory).
 func (s *StorageService) UpdateInventoryHMAC(hmacKey []byte) error {
+	s.inventoryMu.Lock()
+	defer s.inventoryMu.Unlock()
+	return s.updateInventoryHMACLocked(hmacKey)
+}
+
+func (s *StorageService) updateInventoryHMACLocked(hmacKey []byte) error {
 	sum, err := s.computeInventoryHMAC(hmacKey)
 	if err != nil {
 		return fmt.Errorf("computing inventory HMAC: %w", err)
 	}
-	return os.WriteFile(s.inventoryHMACPath(), sum, FilePermPrivate)
+	return s.backend.Put(KeyInventoryHMAC, sum, BlobPrivate)
 }
 
-// VerifyInventoryHMAC checks the inventory file against its stored HMAC.
-// Returns nil if valid, ErrInventoryTampered if tampered, or another error.
+// VerifyInventoryHMAC checks the inventory against its stored HMAC. Returns
+// ErrInventoryTampered on mismatch, or initialises a baseline HMAC on first run.
 func (s *StorageService) VerifyInventoryHMAC(hmacKey []byte) error {
-	storedMAC, err := os.ReadFile(s.inventoryHMACPath())
+	s.inventoryMu.Lock()
+	defer s.inventoryMu.Unlock()
+	return s.verifyInventoryHMACLocked(hmacKey)
+}
+
+func (s *StorageService) verifyInventoryHMACLocked(hmacKey []byte) error {
+	storedMAC, err := s.backend.Get(KeyInventoryHMAC)
 	if err != nil {
-		if os.IsNotExist(err) {
-			// No HMAC file yet (first run or migration). Compute and store it.
+		if errors.Is(err, fs.ErrNotExist) {
 			slog.Info("No inventory HMAC found; initializing integrity baseline")
-			return s.UpdateInventoryHMAC(hmacKey)
+			return s.updateInventoryHMACLocked(hmacKey)
 		}
 		return fmt.Errorf("reading inventory HMAC: %w", err)
 	}

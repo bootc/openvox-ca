@@ -86,9 +86,9 @@ var _ = Describe("StorageService", func() {
 			Expect(store.EnsureDirs()).To(Succeed())
 		})
 
-		It("WriteSerial persists the value to the serial file", func() {
+		It("WriteSerial persists the value and GetSerial reads it back", func() {
 			Expect(store.WriteSerial("DEADBEEF")).To(Succeed())
-			data, err := os.ReadFile(filepath.Join(tmpDir, "serial"))
+			data, err := store.GetSerial()
 			Expect(err).NotTo(HaveOccurred())
 			Expect(string(data)).To(Equal("DEADBEEF"))
 		})
@@ -99,9 +99,7 @@ var _ = Describe("StorageService", func() {
 	Describe("Inventory", func() {
 		BeforeEach(func() {
 			Expect(store.EnsureDirs()).To(Succeed())
-			f, err := os.Create(store.InventoryPath())
-			Expect(err).NotTo(HaveOccurred())
-			f.Close()
+			Expect(store.TouchInventory()).To(Succeed())
 		})
 
 		It("AppendInventory and ReadInventory roundtrip", func() {
