@@ -32,6 +32,7 @@ type BackendKind string
 const (
 	BackendFilesystem BackendKind = "filesystem"
 	BackendEtcd       BackendKind = "etcd"
+	BackendRedis      BackendKind = "redis"
 )
 
 // BackendSpec describes how to construct a StorageService from configuration.
@@ -48,6 +49,10 @@ type BackendSpec struct {
 
 	// Etcd configures the etcd backend. Only consulted when Kind == BackendEtcd.
 	Etcd EtcdSpec
+
+	// Redis configures the Redis/Valkey backend. Only consulted when
+	// Kind == BackendRedis.
+	Redis RedisSpec
 
 	// CACertFile, when non-empty, keeps the CA certificate on local disk at
 	// this path regardless of the selected backend. Useful when operators
@@ -72,6 +77,31 @@ type EtcdSpec struct {
 	TLSCAFile      string
 	TLSCertFile    string
 	TLSKeyFile     string
+}
+
+// RedisSpec is the config-friendly form of RedisConfig with TLS expressed
+// as file paths rather than a preloaded tls.Config.
+type RedisSpec struct {
+	Addrs []string
+
+	SentinelMasterName string
+	SentinelAddrs      []string
+	SentinelUsername   string
+	SentinelPassword   string
+
+	DB       int
+	Username string
+	Password string
+
+	DialTimeoutSec    int
+	RequestTimeoutSec int
+	LockTTLSec        int
+
+	KeyPrefix string
+
+	TLSCAFile   string
+	TLSCertFile string
+	TLSKeyFile  string
 }
 
 // NewServiceFromSpec constructs a StorageService according to spec. Returns
@@ -127,6 +157,48 @@ func NewServiceFromSpec(spec BackendSpec) (*StorageService, error) {
 		backend = b
 		localPrivKeyDir = filepath.Join(spec.LocalDir, "private")
 
+	case BackendRedis:
+		if spec.LocalDir == "" {
+			return nil, fmt.Errorf("redis backend still needs LocalDir for local private keys")
+		}
+		if spec.Redis.SentinelMasterName == "" && len(spec.Redis.Addrs) == 0 {
+			return nil, fmt.Errorf("redis backend requires redis_addrs or redis_sentinel_master_name+redis_sentinel_addrs")
+		}
+		if spec.Redis.SentinelMasterName != "" && len(spec.Redis.SentinelAddrs) == 0 {
+			return nil, fmt.Errorf("redis backend: redis_sentinel_master_name requires redis_sentinel_addrs")
+		}
+		tlsCfg, err := loadRedisTLS(spec.Redis)
+		if err != nil {
+			return nil, err
+		}
+		cfg := RedisConfig{
+			Addrs:              spec.Redis.Addrs,
+			SentinelMasterName: spec.Redis.SentinelMasterName,
+			SentinelAddrs:      spec.Redis.SentinelAddrs,
+			SentinelUsername:   spec.Redis.SentinelUsername,
+			SentinelPassword:   spec.Redis.SentinelPassword,
+			DB:                 spec.Redis.DB,
+			Username:           spec.Redis.Username,
+			Password:           spec.Redis.Password,
+			TLS:                tlsCfg,
+			KeyPrefix:          spec.Redis.KeyPrefix,
+		}
+		if spec.Redis.DialTimeoutSec > 0 {
+			cfg.DialTimeout = time.Duration(spec.Redis.DialTimeoutSec) * time.Second
+		}
+		if spec.Redis.RequestTimeoutSec > 0 {
+			cfg.RequestTimeout = time.Duration(spec.Redis.RequestTimeoutSec) * time.Second
+		}
+		if spec.Redis.LockTTLSec > 0 {
+			cfg.LockTTL = time.Duration(spec.Redis.LockTTLSec) * time.Second
+		}
+		rb, err := NewRedisBackend(cfg)
+		if err != nil {
+			return nil, err
+		}
+		backend = rb
+		localPrivKeyDir = filepath.Join(spec.LocalDir, "private")
+
 	default:
 		return nil, fmt.Errorf("unknown storage backend kind %q", spec.Kind)
 	}
@@ -157,28 +229,39 @@ func collectOverrides(spec BackendSpec) map[string]string {
 }
 
 func loadEtcdTLS(spec EtcdSpec) (*tls.Config, error) {
-	if spec.TLSCAFile == "" && spec.TLSCertFile == "" && spec.TLSKeyFile == "" {
+	return loadBackendTLS(spec.TLSCAFile, spec.TLSCertFile, spec.TLSKeyFile, "etcd")
+}
+
+func loadRedisTLS(spec RedisSpec) (*tls.Config, error) {
+	return loadBackendTLS(spec.TLSCAFile, spec.TLSCertFile, spec.TLSKeyFile, "redis")
+}
+
+// loadBackendTLS reads CA/cert/key PEMs into a tls.Config shared by backends.
+// label appears in error messages to disambiguate which backend's config is
+// malformed. Returns (nil, nil) when all three fields are empty.
+func loadBackendTLS(caFile, certFile, keyFile, label string) (*tls.Config, error) {
+	if caFile == "" && certFile == "" && keyFile == "" {
 		return nil, nil
 	}
 	cfg := &tls.Config{MinVersion: tls.VersionTLS12}
-	if spec.TLSCAFile != "" {
-		caPEM, err := os.ReadFile(spec.TLSCAFile)
+	if caFile != "" {
+		caPEM, err := os.ReadFile(caFile)
 		if err != nil {
-			return nil, fmt.Errorf("reading etcd TLS CA: %w", err)
+			return nil, fmt.Errorf("reading %s TLS CA: %w", label, err)
 		}
 		pool := x509.NewCertPool()
 		if !pool.AppendCertsFromPEM(caPEM) {
-			return nil, fmt.Errorf("etcd TLS CA file %s contains no usable certificates", spec.TLSCAFile)
+			return nil, fmt.Errorf("%s TLS CA file %s contains no usable certificates", label, caFile)
 		}
 		cfg.RootCAs = pool
 	}
-	if spec.TLSCertFile != "" || spec.TLSKeyFile != "" {
-		if spec.TLSCertFile == "" || spec.TLSKeyFile == "" {
-			return nil, fmt.Errorf("etcd TLS client cert and key must both be set")
+	if certFile != "" || keyFile != "" {
+		if certFile == "" || keyFile == "" {
+			return nil, fmt.Errorf("%s TLS client cert and key must both be set", label)
 		}
-		cert, err := tls.LoadX509KeyPair(spec.TLSCertFile, spec.TLSKeyFile)
+		cert, err := tls.LoadX509KeyPair(certFile, keyFile)
 		if err != nil {
-			return nil, fmt.Errorf("loading etcd client cert/key: %w", err)
+			return nil, fmt.Errorf("loading %s client cert/key: %w", label, err)
 		}
 		cfg.Certificates = []tls.Certificate{cert}
 	}
@@ -193,7 +276,9 @@ func ParseBackendKind(s string) (BackendKind, error) {
 		return BackendFilesystem, nil
 	case "etcd":
 		return BackendEtcd, nil
+	case "redis", "valkey":
+		return BackendRedis, nil
 	default:
-		return "", fmt.Errorf("unknown storage backend %q (supported: filesystem, etcd)", s)
+		return "", fmt.Errorf("unknown storage backend %q (supported: filesystem, etcd, redis)", s)
 	}
 }

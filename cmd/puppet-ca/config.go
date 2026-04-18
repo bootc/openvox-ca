@@ -77,8 +77,10 @@ type serverConfig struct {
 
 	// Storage backend selection. "filesystem" (default) stores all CA data
 	// under CADir; "etcd" keeps CA cert, key, CRL, inventory, serial, CSRs
-	// and signed certs in an etcd cluster (per-subject generated private
-	// keys always remain on local disk under CADir).
+	// and signed certs in an etcd cluster; "redis" (alias "valkey") keeps
+	// the same state in a Redis/Valkey instance or Sentinel-managed primary
+	// (per-subject generated private keys always remain on local disk under
+	// CADir, regardless of backend).
 	StorageBackend       string   `yaml:"storage_backend"`
 	EtcdEndpoints        []string `yaml:"etcd_endpoints"`
 	EtcdKeyPrefix        string   `yaml:"etcd_key_prefix"`
@@ -89,6 +91,25 @@ type serverConfig struct {
 	EtcdTLSCAFile        string   `yaml:"etcd_tls_ca_file"`
 	EtcdTLSCertFile      string   `yaml:"etcd_tls_cert_file"`
 	EtcdTLSKeyFile       string   `yaml:"etcd_tls_key_file"`
+
+	// Redis/Valkey backend. RedisAddrs is used in direct mode; when
+	// RedisSentinelMasterName is set, the client resolves the primary via
+	// RedisSentinelAddrs and follows failovers automatically.
+	RedisAddrs              []string `yaml:"redis_addrs"`
+	RedisSentinelMasterName string   `yaml:"redis_sentinel_master_name"`
+	RedisSentinelAddrs      []string `yaml:"redis_sentinel_addrs"`
+	RedisSentinelUsername   string   `yaml:"redis_sentinel_username"`
+	RedisSentinelPassword   string   `yaml:"redis_sentinel_password"`
+	RedisDB                 int      `yaml:"redis_db"`
+	RedisUsername           string   `yaml:"redis_username"`
+	RedisPassword           string   `yaml:"redis_password"`
+	RedisKeyPrefix          string   `yaml:"redis_key_prefix"`
+	RedisDialTimeoutSec     int      `yaml:"redis_dial_timeout_sec"`
+	RedisRequestTimeoutSec  int      `yaml:"redis_request_timeout_sec"`
+	RedisLockTTLSec         int      `yaml:"redis_lock_ttl_sec"`
+	RedisTLSCAFile          string   `yaml:"redis_tls_ca_file"`
+	RedisTLSCertFile        string   `yaml:"redis_tls_cert_file"`
+	RedisTLSKeyFile         string   `yaml:"redis_tls_key_file"`
 
 	// Local-file overrides. When set, the named asset is read/written via
 	// this filesystem path regardless of the selected backend. Typical use:
@@ -279,6 +300,59 @@ func applyServerEnv(cfg *serverConfig) {
 	}
 	if v := os.Getenv("PUPPET_CA_ETCD_TLS_KEY_FILE"); v != "" {
 		cfg.EtcdTLSKeyFile = v
+	}
+	if v := os.Getenv("PUPPET_CA_REDIS_ADDRS"); v != "" {
+		cfg.RedisAddrs = splitAndTrim(v, ",")
+	}
+	if v := os.Getenv("PUPPET_CA_REDIS_SENTINEL_MASTER_NAME"); v != "" {
+		cfg.RedisSentinelMasterName = v
+	}
+	if v := os.Getenv("PUPPET_CA_REDIS_SENTINEL_ADDRS"); v != "" {
+		cfg.RedisSentinelAddrs = splitAndTrim(v, ",")
+	}
+	if v := os.Getenv("PUPPET_CA_REDIS_SENTINEL_USERNAME"); v != "" {
+		cfg.RedisSentinelUsername = v
+	}
+	if v := os.Getenv("PUPPET_CA_REDIS_SENTINEL_PASSWORD"); v != "" {
+		cfg.RedisSentinelPassword = v
+	}
+	if v := os.Getenv("PUPPET_CA_REDIS_DB"); v != "" {
+		if n, err := strconv.Atoi(v); err == nil && n >= 0 {
+			cfg.RedisDB = n
+		}
+	}
+	if v := os.Getenv("PUPPET_CA_REDIS_USERNAME"); v != "" {
+		cfg.RedisUsername = v
+	}
+	if v := os.Getenv("PUPPET_CA_REDIS_PASSWORD"); v != "" {
+		cfg.RedisPassword = v
+	}
+	if v := os.Getenv("PUPPET_CA_REDIS_KEY_PREFIX"); v != "" {
+		cfg.RedisKeyPrefix = v
+	}
+	if v := os.Getenv("PUPPET_CA_REDIS_DIAL_TIMEOUT_SEC"); v != "" {
+		if n, err := strconv.Atoi(v); err == nil && n > 0 {
+			cfg.RedisDialTimeoutSec = n
+		}
+	}
+	if v := os.Getenv("PUPPET_CA_REDIS_REQUEST_TIMEOUT_SEC"); v != "" {
+		if n, err := strconv.Atoi(v); err == nil && n > 0 {
+			cfg.RedisRequestTimeoutSec = n
+		}
+	}
+	if v := os.Getenv("PUPPET_CA_REDIS_LOCK_TTL_SEC"); v != "" {
+		if n, err := strconv.Atoi(v); err == nil && n > 0 {
+			cfg.RedisLockTTLSec = n
+		}
+	}
+	if v := os.Getenv("PUPPET_CA_REDIS_TLS_CA_FILE"); v != "" {
+		cfg.RedisTLSCAFile = v
+	}
+	if v := os.Getenv("PUPPET_CA_REDIS_TLS_CERT_FILE"); v != "" {
+		cfg.RedisTLSCertFile = v
+	}
+	if v := os.Getenv("PUPPET_CA_REDIS_TLS_KEY_FILE"); v != "" {
+		cfg.RedisTLSKeyFile = v
 	}
 	if v := os.Getenv("PUPPET_CA_CA_CERT_FILE"); v != "" {
 		cfg.CACertFile = v

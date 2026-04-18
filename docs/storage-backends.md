@@ -1,12 +1,13 @@
 # Storage backends
 
 `puppet-ca` abstracts its persistent state behind a pluggable **Backend**
-interface. Two backends ship today:
+interface. Three backends ship today:
 
-| Kind           | Status  | Best for                                                                   |
-|----------------|---------|----------------------------------------------------------------------------|
-| `filesystem`   | default | single-node installs; drop-in compatibility with Puppet Server's CA layout |
-| `etcd`         | stable  | HA clusters where multiple `puppet-ca` replicas share a single CA          |
+| Kind                   | Status  | Best for                                                                   |
+|------------------------|---------|----------------------------------------------------------------------------|
+| `filesystem`           | default | single-node installs; drop-in compatibility with Puppet Server's CA layout |
+| `etcd`                 | stable  | HA clusters where multiple `puppet-ca` replicas share a single CA          |
+| `redis` (incl. Valkey) | stable  | clusters that already run Redis/Valkey (direct or Sentinel-managed)        |
 
 Regardless of backend, **server-generated per-subject private keys always
 live on local disk**. They are issued once, handed back to the requester, and
@@ -14,8 +15,9 @@ retained locally for operator convenience only; they are never written to a
 remote store.
 
 The CA certificate and/or the CA private key can optionally be pinned to a
-local file (e.g. a mounted secret volume) independent of the chosen backend —
-see [CA cert/key as local files](#ca-certkey-as-local-files).
+local file (e.g. a mounted secret volume) independent of the chosen backend
+(filesystem, etcd, or redis/valkey) — see
+[CA cert/key as local files](#ca-certkey-as-local-files).
 
 ---
 
@@ -214,6 +216,178 @@ go test -tags=etcd_integration ./internal/storage/...
 
 ---
 
+## Redis / Valkey backend
+
+Stores every logical key except the local private-key directory in a Redis
+instance, a Valkey instance (wire-compatible fork of Redis), or a
+Sentinel-managed primary. Multiple `puppet-ca` replicas can point at the
+same Redis/Valkey (and the same `redis_key_prefix`) to share CA state.
+
+`redis` and `valkey` are accepted as aliases for this backend.
+
+### Key layout
+
+With the default prefix `puppet-ca` (Redis convention uses `:` as a
+separator):
+
+| Logical key         | Redis key                          |
+|---------------------|------------------------------------|
+| `ca_cert`           | `puppet-ca:ca:cert`                |
+| `ca_pubkey`         | `puppet-ca:ca:pubkey`              |
+| `ca_key`            | `puppet-ca:ca:key`                 |
+| `crl`               | `puppet-ca:ca:crl`                 |
+| `serial`            | `puppet-ca:serial`                 |
+| `inventory`         | `puppet-ca:inventory:data`         |
+| `inventory_hmac`    | `puppet-ca:inventory:hmac`         |
+| `hmac_key`          | `puppet-ca:private:hmac_key`       |
+| `csr/<subject>`     | `puppet-ca:requests:<subject>`     |
+| `cert/<subject>`    | `puppet-ca:signed:<subject>`       |
+
+Stored values carry an 8-byte big-endian `time.UnixNano` mtime prefix so
+`ModTime` is answered from the same round-trip as the value. Inventory
+appends are performed by a Lua script on the server, making a
+read-modify-write single-step atomic across all replicas.
+
+### Cross-node coordination
+
+Cross-replica locks are implemented with `SET NX PX` using a per-acquisition
+random token. A background heartbeat extends the TTL (default 30s) while the
+lock is held; `Unlock` runs a Lua script that deletes the key only when the
+stored value still matches the caller's token. Lock names mirror the etcd
+backend (`bootstrap`, `crl`, `subject:<subject>`). If a replica holding a
+lock crashes, the lock releases automatically when the TTL elapses.
+
+Redis replication under Sentinel is asynchronous, which means an in-flight
+failover could in theory hand a lock to a new holder while the old primary
+briefly keeps the prior entry. For `puppet-ca`'s workloads the resulting
+window is narrow and bounded by the lock TTL; operators who need strict
+cross-node linearizability should prefer the etcd backend.
+
+For the filesystem backend (single-node), the same call path falls back to
+a process-local `sync.Mutex` per lock name.
+
+### Configuration — direct connection
+
+```yaml
+# /etc/puppet-ca/config.yaml
+storage_backend: redis                   # or "valkey"
+cadir: /var/lib/puppet-ca                # still needed for per-subject keys
+                                         # and ancillary local state
+
+redis_addrs:
+  - redis-0.example.com:6379             # first address is used in direct mode
+
+redis_key_prefix: puppet-ca              # default shown; override to share
+                                         # an instance between CAs
+redis_db: 0                              # logical database (default 0)
+
+redis_dial_timeout_sec: 5
+redis_request_timeout_sec: 5
+redis_lock_ttl_sec: 30                   # heartbeat runs every ttl/3
+
+# Optional auth (ACL user + password; use PUPPET_CA_REDIS_PASSWORD for secrets).
+redis_username: puppet-ca
+redis_password: "..."
+
+# Optional TLS to the Redis primary.
+redis_tls_ca_file:   /etc/puppet-ca/redis-ca.pem
+redis_tls_cert_file: /etc/puppet-ca/redis-client.pem
+redis_tls_key_file:  /etc/puppet-ca/redis-client-key.pem
+```
+
+### Configuration — Sentinel-managed failover
+
+Set `redis_sentinel_master_name` (and leave `redis_addrs` empty) to route
+through Sentinels. The client discovers the current primary and follows
+failovers automatically.
+
+```yaml
+storage_backend: redis
+cadir: /var/lib/puppet-ca
+
+redis_sentinel_master_name: mymaster
+redis_sentinel_addrs:
+  - sentinel-0.example.com:26379
+  - sentinel-1.example.com:26379
+  - sentinel-2.example.com:26379
+
+# Optional auth against the Sentinels themselves (distinct from Redis auth).
+redis_sentinel_username: puppet-ca
+redis_sentinel_password: "..."
+
+# Auth / TLS against the primary — same fields as direct mode.
+redis_username: puppet-ca
+redis_password: "..."
+redis_tls_ca_file:   /etc/puppet-ca/redis-ca.pem
+redis_tls_cert_file: /etc/puppet-ca/redis-client.pem
+redis_tls_key_file:  /etc/puppet-ca/redis-client-key.pem
+```
+
+### CLI flags
+
+```
+--storage-backend           redis
+--redis-addrs               redis-0:6379,redis-1:6379
+--redis-sentinel-master-name mymaster
+--redis-sentinel-addrs      sentinel-0:26379,sentinel-1:26379
+--redis-key-prefix          puppet-ca
+```
+
+### Environment variables
+
+| Config key                     | Env var                                   |
+|--------------------------------|-------------------------------------------|
+| `storage_backend`              | `PUPPET_CA_STORAGE_BACKEND`               |
+| `redis_addrs`                  | `PUPPET_CA_REDIS_ADDRS` (comma-separated) |
+| `redis_sentinel_master_name`   | `PUPPET_CA_REDIS_SENTINEL_MASTER_NAME`    |
+| `redis_sentinel_addrs`         | `PUPPET_CA_REDIS_SENTINEL_ADDRS` (comma-separated) |
+| `redis_sentinel_username`      | `PUPPET_CA_REDIS_SENTINEL_USERNAME`       |
+| `redis_sentinel_password`      | `PUPPET_CA_REDIS_SENTINEL_PASSWORD`       |
+| `redis_db`                     | `PUPPET_CA_REDIS_DB`                      |
+| `redis_username`               | `PUPPET_CA_REDIS_USERNAME`                |
+| `redis_password`               | `PUPPET_CA_REDIS_PASSWORD`                |
+| `redis_key_prefix`             | `PUPPET_CA_REDIS_KEY_PREFIX`              |
+| `redis_dial_timeout_sec`       | `PUPPET_CA_REDIS_DIAL_TIMEOUT_SEC`        |
+| `redis_request_timeout_sec`    | `PUPPET_CA_REDIS_REQUEST_TIMEOUT_SEC`     |
+| `redis_lock_ttl_sec`           | `PUPPET_CA_REDIS_LOCK_TTL_SEC`            |
+| `redis_tls_ca_file`            | `PUPPET_CA_REDIS_TLS_CA_FILE`             |
+| `redis_tls_cert_file`          | `PUPPET_CA_REDIS_TLS_CERT_FILE`           |
+| `redis_tls_key_file`           | `PUPPET_CA_REDIS_TLS_KEY_FILE`            |
+
+### Operational notes
+
+- **Persistence.** Redis/Valkey RDB snapshots and AOF both apply here; make
+  sure the deployment is durable enough for the CA state you're storing. A
+  pure in-memory instance with no persistence will lose the CA on restart.
+- **CA cert and key.** As with the etcd backend, the CA private key lives
+  in Redis by default. Restrict ACLs on `puppet-ca:ca:key`, enable
+  `encrypt_ca_key` so the key is AES-256-GCM wrapped before it leaves the
+  process, or pin the key to a local file via `ca_key_file` (see below).
+- **Inventory HMAC.** The integrity key lives under
+  `puppet-ca:private:hmac_key`. Back it up alongside the CA key.
+- **Puppet-ca-ctl.** `puppet-ca-ctl setup` and `puppet-ca-ctl import` operate
+  on the local filesystem only. To import a CA into a Redis-backed cluster,
+  run these commands first against a scratch directory, then point
+  `puppet-ca` at a cadir containing the output.
+
+### Unit / integration tests
+
+Unit tests run against an in-process miniredis (no external service):
+
+```bash
+go test ./internal/storage/
+```
+
+An integration suite that talks to a real Redis/Valkey lives behind a build
+tag and is opt-in via `PUPPET_CA_TEST_REDIS_ADDR`:
+
+```bash
+PUPPET_CA_TEST_REDIS_ADDR=127.0.0.1:6379 \
+    go test -tags=redis_integration ./internal/storage/...
+```
+
+---
+
 ## CA cert/key as local files
 
 Sometimes you want the benefits of a shared backend (agents, CSRs, signed
@@ -275,17 +449,21 @@ key out of the cadir tree and onto a separately-mounted volume.
 
 ## Choosing a backend
 
-|                              | `filesystem`            | `etcd`                            |
-|------------------------------|-------------------------|-----------------------------------|
-| Replicas                     | one active              | many (A/A)                        |
-| Operational dependencies     | none                    | healthy etcd cluster              |
-| Bootstrap                    | writes `<cadir>/`       | writes etcd keyspace              |
-| CA key exposure              | local file              | in etcd unless `ca_key_file` set  |
-| Backup/restore               | tar `<cadir>/`          | etcd snapshot + local dirs        |
-| Drop-in for Puppet Server CA | yes                     | no (key paths change)             |
+|                              | `filesystem`       | `etcd`                            | `redis` / `valkey`                |
+|------------------------------|--------------------|-----------------------------------|-----------------------------------|
+| Replicas                     | one active         | many (A/A)                        | many (A/A)                        |
+| Operational dependencies     | none               | healthy etcd cluster              | Redis/Valkey primary (+ Sentinel) |
+| Bootstrap                    | writes `<cadir>/`  | writes etcd keyspace              | writes Redis keyspace             |
+| CA key exposure              | local file         | in etcd unless `ca_key_file` set  | in Redis unless `ca_key_file` set |
+| Backup/restore               | tar `<cadir>/`     | etcd snapshot + local dirs        | RDB/AOF + local dirs              |
+| Cross-node lock guarantees   | n/a (single node)  | lease-backed `concurrency.Mutex`  | `SET NX PX` + token + heartbeat   |
+| Drop-in for Puppet Server CA | yes                | no (key paths change)             | no (key paths change)             |
 
 Use `filesystem` for single-node or migration-from-Puppet-Server installs.
-Use `etcd` when you need multiple `puppet-ca` replicas to serve the same CA.
+Use `etcd` when you need multiple `puppet-ca` replicas and want the
+strongest cross-node lock guarantees. Use `redis`/`valkey` when you already
+run Redis/Valkey (direct or Sentinel-managed) and are willing to accept the
+narrower failover window in exchange for reusing existing infrastructure.
 
 ---
 

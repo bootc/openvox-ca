@@ -96,6 +96,25 @@ func buildBackendSpec(cfg *serverConfig, absCADir string) (storage.BackendSpec, 
 			TLSKeyFile:        cfg.EtcdTLSKeyFile,
 		}
 	}
+	if kind == storage.BackendRedis {
+		spec.Redis = storage.RedisSpec{
+			Addrs:              cfg.RedisAddrs,
+			SentinelMasterName: cfg.RedisSentinelMasterName,
+			SentinelAddrs:      cfg.RedisSentinelAddrs,
+			SentinelUsername:   cfg.RedisSentinelUsername,
+			SentinelPassword:   cfg.RedisSentinelPassword,
+			DB:                 cfg.RedisDB,
+			Username:           cfg.RedisUsername,
+			Password:           cfg.RedisPassword,
+			KeyPrefix:          cfg.RedisKeyPrefix,
+			DialTimeoutSec:     cfg.RedisDialTimeoutSec,
+			RequestTimeoutSec:  cfg.RedisRequestTimeoutSec,
+			LockTTLSec:         cfg.RedisLockTTLSec,
+			TLSCAFile:          cfg.RedisTLSCAFile,
+			TLSCertFile:        cfg.RedisTLSCertFile,
+			TLSKeyFile:         cfg.RedisTLSKeyFile,
+		}
+	}
 	return spec, nil
 }
 
@@ -192,11 +211,15 @@ func main() {
 		encryptCAKey        bool
 		caKeyPassphraseFile string
 		singleProcess       bool
-		storageBackend      string
-		etcdEndpoints       []string
-		etcdKeyPrefix       string
-		caCertFile          string
-		caKeyFile           string
+		storageBackend           string
+		etcdEndpoints            []string
+		etcdKeyPrefix            string
+		redisAddrs               []string
+		redisSentinelMasterName  string
+		redisSentinelAddrs       []string
+		redisKeyPrefix           string
+		caCertFile               string
+		caKeyFile                string
 	)
 
 	cmd := &cobra.Command{
@@ -277,6 +300,18 @@ func main() {
 			}
 			if cmd.Flags().Changed("etcd-key-prefix") {
 				cfg.EtcdKeyPrefix = etcdKeyPrefix
+			}
+			if cmd.Flags().Changed("redis-addrs") {
+				cfg.RedisAddrs = redisAddrs
+			}
+			if cmd.Flags().Changed("redis-sentinel-master-name") {
+				cfg.RedisSentinelMasterName = redisSentinelMasterName
+			}
+			if cmd.Flags().Changed("redis-sentinel-addrs") {
+				cfg.RedisSentinelAddrs = redisSentinelAddrs
+			}
+			if cmd.Flags().Changed("redis-key-prefix") {
+				cfg.RedisKeyPrefix = redisKeyPrefix
 			}
 			if cmd.Flags().Changed("ca-cert-file") {
 				cfg.CACertFile = caCertFile
@@ -631,9 +666,13 @@ func main() {
 	f.BoolVar(&encryptCAKey, "encrypt-ca-key", false, "Encrypt the CA private key at rest (AES-256-GCM + Argon2id); a passphrase is auto-generated if not provided")
 	f.StringVar(&caKeyPassphraseFile, "ca-key-passphrase-file", "", "Path to file containing the CA key passphrase (first line used)")
 	f.BoolVar(&singleProcess, "single-process", false, "Disable CA key isolation (run signer and frontend in a single process)")
-	f.StringVar(&storageBackend, "storage-backend", "", "Storage backend: 'filesystem' (default) or 'etcd'")
+	f.StringVar(&storageBackend, "storage-backend", "", "Storage backend: 'filesystem' (default), 'etcd', or 'redis' (alias 'valkey')")
 	f.StringSliceVar(&etcdEndpoints, "etcd-endpoints", nil, "Comma-separated etcd cluster endpoints (e.g. https://etcd1:2379,https://etcd2:2379)")
 	f.StringVar(&etcdKeyPrefix, "etcd-key-prefix", "", "etcd key namespace for this CA (default: /puppet-ca)")
+	f.StringSliceVar(&redisAddrs, "redis-addrs", nil, "Comma-separated Redis/Valkey addresses for direct connections (e.g. redis-0:6379)")
+	f.StringVar(&redisSentinelMasterName, "redis-sentinel-master-name", "", "Redis Sentinel primary name; set to enable Sentinel-managed failover")
+	f.StringSliceVar(&redisSentinelAddrs, "redis-sentinel-addrs", nil, "Comma-separated Redis Sentinel addresses (e.g. sentinel-0:26379,sentinel-1:26379)")
+	f.StringVar(&redisKeyPrefix, "redis-key-prefix", "", "Redis key namespace for this CA (default: puppet-ca)")
 	f.StringVar(&caCertFile, "ca-cert-file", "", "Keep the CA certificate at this local path regardless of storage backend")
 	f.StringVar(&caKeyFile, "ca-key-file", "", "Keep the CA private key at this local path regardless of storage backend")
 
