@@ -260,6 +260,58 @@ var _ = Describe("CA Lifecycle", func() {
 		})
 	})
 
+	Context("CN to SAN promotion", func() {
+		BeforeEach(func() {
+			err := myCA.Init(context.Background())
+			Expect(err).NotTo(HaveOccurred())
+		})
+
+		parseCert := func(certPEM []byte) *x509.Certificate {
+			block, _ := pem.Decode(certPEM)
+			Expect(block).NotTo(BeNil())
+			cert, err := x509.ParseCertificate(block.Bytes)
+			Expect(err).NotTo(HaveOccurred())
+			return cert
+		}
+
+		It("promotes CN to SAN when no SANs are present (default on)", func() {
+			csrPEM, err := testutil.GenerateCSR("test-node")
+			Expect(err).NotTo(HaveOccurred())
+			_, err = myCA.SaveRequest(context.Background(), "test-node", csrPEM)
+			Expect(err).NotTo(HaveOccurred())
+			certPEM, err := myCA.Sign(context.Background(), "test-node")
+			Expect(err).NotTo(HaveOccurred())
+			Expect(parseCert(certPEM).DNSNames).To(ConsistOf("test-node"))
+		})
+
+		It("does not promote CN when the CSR already carries SANs", func() {
+			key, _ := rsa.GenerateKey(rand.Reader, 2048)
+			tmpl := &x509.CertificateRequest{
+				Subject:  pkix.Name{CommonName: "test-node"},
+				DNSNames: []string{"alt.test-node"},
+			}
+			csrDER, _ := x509.CreateCertificateRequest(rand.Reader, tmpl, key)
+			csrPEM := pem.EncodeToMemory(&pem.Block{Type: "CERTIFICATE REQUEST", Bytes: csrDER})
+
+			_, err := myCA.SaveRequest(context.Background(), "test-node", csrPEM)
+			Expect(err).NotTo(HaveOccurred())
+			certPEM, err := myCA.Sign(context.Background(), "test-node")
+			Expect(err).NotTo(HaveOccurred())
+			Expect(parseCert(certPEM).DNSNames).To(ConsistOf("alt.test-node"))
+		})
+
+		It("does not promote CN when PromoteCNToSAN is false", func() {
+			myCA.PromoteCNToSAN = false
+			csrPEM, err := testutil.GenerateCSR("test-node")
+			Expect(err).NotTo(HaveOccurred())
+			_, err = myCA.SaveRequest(context.Background(), "test-node", csrPEM)
+			Expect(err).NotTo(HaveOccurred())
+			certPEM, err := myCA.Sign(context.Background(), "test-node")
+			Expect(err).NotTo(HaveOccurred())
+			Expect(parseCert(certPEM).DNSNames).To(BeEmpty())
+		})
+	})
+
 	Context("Negative Tests", func() {
 		BeforeEach(func() {
 			err := myCA.Init(context.Background())

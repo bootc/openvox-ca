@@ -97,6 +97,14 @@ type CA struct {
 	// When true, the key is encrypted using the resolved passphrase.
 	EncryptCAKey bool
 
+	// PromoteCNToSAN, when true (the default), adds the CSR's Common Name as a
+	// DNS Subject Alternative Name when the CSR carries no SANs. RFC 2818 §3.1
+	// deprecated CN-based hostname verification in favour of the SAN extension;
+	// modern TLS clients (Go stdlib, Chrome, etc.) ignore the CN entirely. Set
+	// to false only when issuing certificates to legacy clients that cannot
+	// handle the SAN extension.
+	PromoteCNToSAN bool
+
 	// ExternalSigner, when non-nil, is used instead of loading the CA private
 	// key from disk. This enables key isolation: the private key lives in a
 	// separate process and signing requests are proxied over IPC.
@@ -114,7 +122,8 @@ func New(s *storage.StorageService, autosignCfg AutosignConfig, hostname string)
 		Storage:        s,
 		AutosignConfig: autosignCfg,
 		Hostname:       hostname,
-		CAPathLength:   -1, // unconstrained by default
+		CAPathLength:   -1,   // unconstrained by default
+		PromoteCNToSAN: true, // on by default; RFC 2818 deprecates CN-only certs
 		serialIndex:    make(map[string]string),
 		ocspCache:      make(map[string]ocspCacheEntry),
 	}

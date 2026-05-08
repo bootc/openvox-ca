@@ -285,6 +285,13 @@ func (c *CA) signWithDuration(ctx context.Context, subject string, ttl time.Dura
 		DNSNames: csr.DNSNames,
 	}
 
+	// RFC 2818 §3.1: TLS clients match the server name against SANs, not the
+	// CN. When the CSR carries no SANs and promotion is enabled, add the CN as
+	// a DNS SAN so that the issued certificate works with modern TLS stacks.
+	if c.PromoteCNToSAN && len(template.DNSNames) == 0 && csr.Subject.CommonName != "" {
+		template.DNSNames = []string{csr.Subject.CommonName}
+	}
+
 	// CRL Distribution Points: embed CRL URL(s) when configured so that
 	// verifiers can automatically fetch the CRL (RFC 5280 §4.2.1.13).
 	if len(c.CRLURLs) > 0 {

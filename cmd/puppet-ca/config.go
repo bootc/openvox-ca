@@ -75,6 +75,9 @@ type serverConfig struct {
 	EncryptCAKey        bool   `yaml:"encrypt_ca_key"`         // encrypt the CA private key at rest (AES-256-GCM + Argon2id)
 	CAKeyPassphraseFile string `yaml:"ca_key_passphrase_file"` // path to file containing the CA key passphrase
 
+	// PromoteCNToSAN adds the CN as a DNS SAN when the CSR has no SANs (default: true).
+	PromoteCNToSAN bool `yaml:"promote_cn_to_san"`
+
 	// Storage backend selection. "filesystem" (default) stores all CA data
 	// under CADir; "etcd" keeps CA cert, key, CRL, inventory, serial, CSRs
 	// and signed certs in an etcd cluster; "redis" (alias "valkey") keeps
@@ -124,9 +127,10 @@ type serverConfig struct {
 // loading.
 func loadServerConfig(configFile string) (*serverConfig, error) {
 	cfg := &serverConfig{
-		Host:         "0.0.0.0",
-		Port:         8140,
-		CAPathLength: -1, // unconstrained; 0 = leaf-only, N = N levels of intermediates
+		Host:           "0.0.0.0",
+		Port:           8140,
+		CAPathLength:   -1,   // unconstrained; 0 = leaf-only, N = N levels of intermediates
+		PromoteCNToSAN: true, // RFC 2818: add CN as SAN when CSR has no SANs
 	}
 
 	if configFile != "" {
@@ -262,6 +266,11 @@ func applyServerEnv(cfg *serverConfig) {
 	if v := os.Getenv("PUPPET_CA_ENCRYPT_CA_KEY"); v != "" {
 		if b, err := strconv.ParseBool(v); err == nil {
 			cfg.EncryptCAKey = b
+		}
+	}
+	if v := os.Getenv("PUPPET_CA_PROMOTE_CN_TO_SAN"); v != "" {
+		if b, err := strconv.ParseBool(v); err == nil {
+			cfg.PromoteCNToSAN = b
 		}
 	}
 	if v := os.Getenv("PUPPET_CA_KEY_PASSPHRASE_FILE"); v != "" {

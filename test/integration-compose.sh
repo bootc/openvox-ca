@@ -507,13 +507,16 @@ assert_json_field "$_san_body" '"dns_alt_names"' \
 assert_json_field "$_san_body" '"subject_alt_names"' \
     "Status response includes subject_alt_names field"
 
-# Both fields must exist and both should be empty arrays [] for a plain CSR
+# CN promotion is on by default: plain CSR should have the CN added as a DNS SAN.
+grep -qF "\"${_SAN}\"" <<< "$_san_body" \
+    && pass "dns_alt_names contains promoted CN for plain cert" \
+    || fail "dns_alt_names contains promoted CN for plain cert" "body: $_san_body"
 grep -qF '"dns_alt_names":[]' <<< "$_san_body" \
-    && pass "dns_alt_names is [] for plain cert (no SANs)" \
-    || fail "dns_alt_names is [] for plain cert (no SANs)" "body: $_san_body"
+    && fail "dns_alt_names must not be empty (CN should be promoted to SAN)" "body: $_san_body" \
+    || pass "dns_alt_names is non-empty (CN promoted)"
 grep -qF '"subject_alt_names":[]' <<< "$_san_body" \
-    && pass "subject_alt_names is [] for plain cert (matches dns_alt_names)" \
-    || fail "subject_alt_names is [] for plain cert (matches dns_alt_names)" "body: $_san_body"
+    && fail "subject_alt_names must not be empty (mirrors dns_alt_names)" "body: $_san_body" \
+    || pass "subject_alt_names is non-empty (mirrors dns_alt_names)"
 
 # GET /certificate_statuses must also have subject_alt_names
 _sts_body=$(curl -s "${CA_URL}/puppet-ca/v1/certificate_statuses/all?state=signed" 2>/dev/null) || true
