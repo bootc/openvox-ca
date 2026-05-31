@@ -437,7 +437,7 @@ indexed by subject:
 | Column                    | Purpose                                              |
 |---------------------------|------------------------------------------------------|
 | `id`                      | autoincrement key; also defines issuance order       |
-| `serial`                  | certificate serial                                   |
+| `serial`                  | certificate serial (unique)                          |
 | `subject`                 | certificate subject (indexed)                        |
 | `not_before` / `not_after`| validity window, stored as the inventory.txt strings |
 

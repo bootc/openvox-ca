@@ -73,6 +73,18 @@ func TestSQLiteInventoryLatestSerialForSubject(t *testing.T) {
 	}
 }
 
+func TestSQLiteInventorySerialUnique(t *testing.T) {
+	ctx := context.Background()
+	svc, _ := newInventoryService(t)
+
+	// sampleInventoryLines already issued serial 0001 to node1. Re-using it for
+	// a different subject must be rejected by the unique index on serial.
+	dup := "0001 2024-02-01T00:00:00UTC 2029-02-01T00:00:00UTC /someother"
+	if err := svc.AppendInventory(ctx, dup); err == nil {
+		t.Fatal("AppendInventory with duplicate serial succeeded; want a unique-constraint error")
+	}
+}
+
 func TestSQLiteInventoryRenderByteIdentical(t *testing.T) {
 	ctx := context.Background()
 	svc, _ := newInventoryService(t)

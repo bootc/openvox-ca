@@ -46,6 +46,18 @@ func init() {
 			Exec(ctx); err != nil {
 			return err
 		}
+		// Serials are unique per issuance (random 128-bit, fresh on every
+		// (re-)issuance), so enforce it: a duplicate signals a serial collision
+		// or a double insert, which AppendEntry should fail on rather than
+		// silently record two certs under one serial.
+		if _, err := db.NewCreateIndex().
+			Model((*sqlInventoryRow)(nil)).
+			Unique().
+			Index("idx_puppet_ca_inventory_serial").
+			Column("serial").
+			Exec(ctx); err != nil {
+			return err
+		}
 		return nil
 	}, func(ctx context.Context, db *bun.DB) error {
 		_, err := db.NewDropTable().

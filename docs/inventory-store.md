@@ -140,8 +140,9 @@ recomputes the destination's integrity head from its entries
 ## Scope
 
 - **SQL backend** (sqlite/postgres/mysql) implements `InventoryStore` with a
-  dedicated `puppet_ca_inventory` table indexed on `subject` and `serial`, plus
-  the render/parse shim. This is where decomposition pays off.
+  dedicated `puppet_ca_inventory` table indexed on `subject` (and a unique index
+  on `serial`, since serials never repeat), plus the render/parse shim. This is
+  where decomposition pays off.
 - **Filesystem, etcd, redis/valkey keep the blob.** They do not implement the
   interface; the type assertion fails and they behave exactly as before. Adding
   the capability to etcd/redis later is possible but not currently motivated.
