@@ -31,6 +31,30 @@ jobs:
       - name: Check formatting, vet, and module tidy
         run: mage dev:check
 
+  # -- Dockerfile lint (hadolint) ----------------------------------------------
+  # Lints every Dockerfile in the repo. hadolint has no auto-fix mode (it only
+  # reports), so this job fails the build on violations and the developer fixes
+  # them -- the same fail-and-fix contract as `mage dev:check` above. One matrix
+  # leg per Dockerfile so annotations stay attributed to the right file.
+  hadolint:
+    name: Dockerfile lint (${{ matrix.dockerfile }})
+    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        dockerfile:
+          - Dockerfile
+          - Dockerfile.alpine
+          - Dockerfile.run
+          - docker/puppet/Dockerfile
+          - docker/puppet/Dockerfile.client
+    steps:
+      - uses: actions/checkout@v4
+      - name: Run hadolint
+        uses: hadolint/hadolint-action@v3.1.0
+        with:
+          dockerfile: ${{ matrix.dockerfile }}
+
   # -- Unit tests --------------------------------------------------------------─
   unit:
     name: Unit tests
