@@ -1,0 +1,17 @@
+# hadolint configuration (https://github.com/hadolint/hadolint)
+#
+# Ignored rules:
+#   DL3041 - "Specify version with dnf install -y <package>-<version>"
+#   DL3018 - "Pin versions in apk add"
+#
+# We intentionally do not pin dnf/apk package versions: the images build
+# against rolling distro repositories (CentOS Stream, Alpine), where pinning
+# exact versions breaks builds as soon as upstream rebuilds a package.
+#
+# These are global defaults. Individual rules can still be re-enabled or
+# further suppressed per Dockerfile with inline comments, e.g.:
+#   # hadolint ignore=DL3008,DL3009
+#   RUN ...
+ignored:
+  - DL3041
+  - DL3018
