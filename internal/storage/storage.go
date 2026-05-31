@@ -197,7 +197,11 @@ func (s *StorageService) AppendInventory(ctx context.Context, entry string) erro
 
 	if s.hmacKey != nil {
 		if err := s.updateInventoryHMACLocked(ctx, s.hmacKey); err != nil {
-			slog.Warn("Failed to update inventory HMAC", "error", err)
+			// The line is already durably appended, but the stored HMAC now
+			// lags the inventory: the next verify would falsely report
+			// tampering. Surface the failure so the caller can react (e.g.
+			// roll back the just-written cert) rather than hiding it.
+			return fmt.Errorf("updating inventory HMAC after append: %w", err)
 		}
 	}
 	return nil
