@@ -9,9 +9,10 @@ interface. The following backends ship today:
 | `etcd`                 | stable  | HA clusters where multiple `puppet-ca` replicas share a single CA          |
 | `redis` (incl. Valkey) | stable  | clusters that already run Redis/Valkey (direct or Sentinel-managed)        |
 | `sqlite`               | stable  | single-node installs that prefer a single database file over a cadir tree  |
+| `postgres`             | stable  | HA clusters that already run PostgreSQL; shared CA across replicas         |
 
-A shared SQL backend underpins `sqlite`; PostgreSQL and MySQL/MariaDB dialects
-build on the same code and are introduced in follow-up releases.
+A shared SQL backend underpins `sqlite` and `postgres`; a MySQL/MariaDB dialect
+builds on the same code and is introduced in a follow-up release.
 
 Regardless of backend, **server-generated per-subject private keys always
 live on local disk**. They are issued once, handed back to the requester, and
@@ -501,6 +502,85 @@ database file — no external service and no CGO:
 go test ./internal/storage/
 ```
 
+### PostgreSQL backend
+
+Stores the entire CA in a PostgreSQL database. Multiple `puppet-ca` replicas
+can point at the same database to share CA state. `postgres`, `postgresql`,
+and `pg` are accepted as aliases. `cadir` is still required for per-subject
+generated private keys and ancillary local state.
+
+#### Configuration
+
+```yaml
+# /etc/puppet-ca/config.yaml
+storage_backend: postgres
+cadir: /var/lib/puppet-ca                # still needed for per-subject keys
+sql_dsn: "postgres://puppetca:secret@db.example.com:5432/puppetca?sslmode=require"
+
+sql_request_timeout_sec: 10              # per-operation timeout (default 10)
+sql_max_open_conns: 0                    # 0 = database/sql default
+sql_max_idle_conns: 0                    # 0 = database/sql default
+
+# Optional mTLS to PostgreSQL (alternative to sslmode/ssl params in the DSN).
+sql_tls_ca_file:   /etc/puppet-ca/pg-ca.pem
+sql_tls_cert_file: /etc/puppet-ca/pg-client.pem
+sql_tls_key_file:  /etc/puppet-ca/pg-client-key.pem
+```
+
+TLS is driven either by the DSN (`sslmode=require`, etc.) or by the
+`sql_tls_*_file` options; when the file options are set they are compiled into
+a `*tls.Config` and handed to the driver.
+
+#### CLI flags
+
+```
+--storage-backend postgres
+--sql-dsn         postgres://puppetca:secret@db.example.com:5432/puppetca?sslmode=require
+```
+
+#### Cross-node coordination
+
+Cross-replica locks use PostgreSQL **session-level advisory locks**: the lock
+name is hashed to the `bigint` key `pg_advisory_lock` requires, taken on a
+dedicated connection, and released with `pg_advisory_unlock` on that same
+connection. `pg_advisory_lock` blocks until the lock is granted (or the
+request context is cancelled), giving strict cross-node mutual exclusion for
+the same lock name; distinct names never contend. A process-local mutex
+serialises in-process callers first so they do not each tie up a connection
+blocked in the database. If a replica crashes, PostgreSQL drops its session
+and releases the advisory lock automatically.
+
+#### Operational notes
+
+- **Persistence.** The database is the CA; back it up with your normal
+  PostgreSQL tooling.
+- **CA cert and key.** As with the etcd/redis backends, the CA private key
+  lives in the database by default. Enable `encrypt_ca_key`, or pin the key to
+  a local file via `ca_key_file` (see below).
+- **Schema.** The backend owns the `puppet_ca_blobs` table plus bun's
+  `bun_migrations` / `bun_migration_locks` bookkeeping tables. Grant the
+  configured role rights to create tables on first run (or pre-create the
+  schema and grant DML).
+- **Puppet-ca-ctl.** `puppet-ca-ctl setup` / `import` operate on the local
+  filesystem only; bootstrap/import against a scratch directory, then point a
+  PostgreSQL-backed `puppet-ca` at a fresh database to take over.
+
+#### Tests
+
+The PostgreSQL integration suite is behind a build tag and opt-in via
+`PUPPET_CA_TEST_POSTGRES_DSN`:
+
+```bash
+PUPPET_CA_TEST_POSTGRES_DSN="postgres://user:pass@127.0.0.1:5432/db?sslmode=disable" \
+    go test -tags=postgres_integration ./internal/storage/...
+```
+
+Or let mage manage a throwaway database end to end:
+
+```bash
+mage test:backendsPostgres
+```
+
 ---
 
 ## CA cert/key as local files
@@ -564,21 +644,22 @@ key out of the cadir tree and onto a separately-mounted volume.
 
 ## Choosing a backend
 
-|                              | `filesystem`       | `sqlite`                          | `etcd`                            | `redis` / `valkey`                |
-|------------------------------|--------------------|-----------------------------------|-----------------------------------|-----------------------------------|
-| Replicas                     | one active         | one active                        | many (A/A)                        | many (A/A)                        |
-| Operational dependencies     | none               | none (single file)                | healthy etcd cluster              | Redis/Valkey primary (+ Sentinel) |
-| Bootstrap                    | writes `<cadir>/`  | writes the database file          | writes etcd keyspace              | writes Redis keyspace             |
-| CA key exposure              | local file         | in DB unless `ca_key_file` set    | in etcd unless `ca_key_file` set  | in Redis unless `ca_key_file` set |
-| Backup/restore               | tar `<cadir>/`     | copy `.db` (+ WAL) + local dirs   | etcd snapshot + local dirs        | RDB/AOF + local dirs              |
-| Cross-node lock guarantees   | n/a (single node)  | n/a (single node)                 | lease-backed `concurrency.Mutex`  | `SET NX PX` + token + heartbeat   |
-| Drop-in for Puppet Server CA | yes                | no (key paths change)             | no (key paths change)             | no (key paths change)             |
+|                              | `filesystem`       | `sqlite`                          | `postgres`                        | `etcd`                            | `redis` / `valkey`                |
+|------------------------------|--------------------|-----------------------------------|-----------------------------------|-----------------------------------|-----------------------------------|
+| Replicas                     | one active         | one active                        | many (A/A)                        | many (A/A)                        | many (A/A)                        |
+| Operational dependencies     | none               | none (single file)                | PostgreSQL server                 | healthy etcd cluster              | Redis/Valkey primary (+ Sentinel) |
+| Bootstrap                    | writes `<cadir>/`  | writes the database file          | writes the database               | writes etcd keyspace              | writes Redis keyspace             |
+| CA key exposure              | local file         | in DB unless `ca_key_file` set    | in DB unless `ca_key_file` set    | in etcd unless `ca_key_file` set  | in Redis unless `ca_key_file` set |
+| Backup/restore               | tar `<cadir>/`     | copy `.db` (+ WAL) + local dirs   | pg_dump + local dirs              | etcd snapshot + local dirs        | RDB/AOF + local dirs              |
+| Cross-node lock guarantees   | n/a (single node)  | n/a (single node)                 | session `pg_advisory_lock`        | lease-backed `concurrency.Mutex`  | `SET NX PX` + token + heartbeat   |
+| Drop-in for Puppet Server CA | yes                | no (key paths change)             | no (key paths change)             | no (key paths change)             | no (key paths change)             |
 
 Use `filesystem` for single-node or migration-from-Puppet-Server installs.
 Use `sqlite` for a single-node install that prefers one database file over a
-cadir tree (e.g. simpler backups). Use `etcd` when you need multiple
-`puppet-ca` replicas and want the strongest cross-node lock guarantees. Use
-`redis`/`valkey` when you already run Redis/Valkey (direct or
+cadir tree (e.g. simpler backups). Use `postgres` when you want multiple
+`puppet-ca` replicas backed by a database you already operate. Use `etcd` when
+you need multiple replicas and want the strongest cross-node lock guarantees.
+Use `redis`/`valkey` when you already run Redis/Valkey (direct or
 Sentinel-managed) and are willing to accept the narrower failover window in
 exchange for reusing existing infrastructure.
 

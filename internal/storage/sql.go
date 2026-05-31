@@ -18,9 +18,11 @@ package storage
 
 import (
 	"context"
+	"crypto/tls"
 	"database/sql"
 	"errors"
 	"fmt"
+	"hash/fnv"
 	"io/fs"
 	"strings"
 	"sync"
@@ -28,7 +30,9 @@ import (
 
 	"github.com/uptrace/bun"
 	"github.com/uptrace/bun/dialect"
+	"github.com/uptrace/bun/dialect/pgdialect"
 	"github.com/uptrace/bun/dialect/sqlitedialect"
+	"github.com/uptrace/bun/driver/pgdriver"
 	"github.com/uptrace/bun/driver/sqliteshim"
 	"github.com/uptrace/bun/migrate"
 	"github.com/uptrace/bun/schema"
@@ -68,6 +72,10 @@ type SQLConfig struct {
 	// path or "file:" URI; for PostgreSQL/MySQL it is the connection string
 	// understood by the respective driver.
 	DSN string
+
+	// TLS, if non-nil, configures TLS for the networked dialects (PostgreSQL,
+	// MySQL). Ignored by SQLite.
+	TLS *tls.Config
 
 	// RequestTimeout bounds each individual operation. Zero uses 10s.
 	RequestTimeout time.Duration
@@ -116,6 +124,12 @@ type SQLBackend struct {
 	timeout time.Duration
 
 	appendMu sync.Mutex // serialises AppendLine within this process
+
+	// localLocks holds a *sync.Mutex per lock name, serialising intra-process
+	// contention before the distributed lock is taken so that goroutines in
+	// this process do not each hold a blocked connection waiting on the same
+	// lock. Same pattern as the etcd and Redis backends.
+	localLocks sync.Map
 }
 
 // NewSQLBackend opens a database connection according to cfg and returns a
@@ -172,7 +186,12 @@ func openSQLDB(cfg SQLConfig) (*sql.DB, schema.Dialect, error) {
 		}
 		return sqldb, sqlitedialect.New(), nil
 	case SQLPostgres:
-		return nil, nil, fmt.Errorf("postgres SQL backend not yet available in this build")
+		opts := []pgdriver.Option{pgdriver.WithDSN(cfg.DSN)}
+		if cfg.TLS != nil {
+			opts = append(opts, pgdriver.WithTLSConfig(cfg.TLS))
+		}
+		sqldb := sql.OpenDB(pgdriver.NewConnector(opts...))
+		return sqldb, pgdialect.New(), nil
 	case SQLMySQL:
 		return nil, nil, fmt.Errorf("mysql SQL backend not yet available in this build")
 	default:
@@ -436,12 +455,79 @@ func (b *SQLBackend) ModTime(ctx context.Context, key string) (time.Time, error)
 // process-local mutex.
 func (b *SQLBackend) AcquireLock(ctx context.Context, name string) (Unlocker, error) {
 	switch b.db.Dialect().Name() {
-	case dialect.SQLite:
-		return nil, ErrDistributedLockingUnsupported
+	case dialect.PG:
+		return b.acquirePostgresLock(ctx, name)
 	default:
-		// PostgreSQL and MySQL distributed locking are added in later changes.
+		// SQLite is single-node (process-local fallback); MySQL is added in a
+		// later change.
 		return nil, ErrDistributedLockingUnsupported
 	}
+}
+
+// acquirePostgresLock takes a session-level PostgreSQL advisory lock on a
+// dedicated connection. The lock name is hashed to the bigint key
+// pg_advisory_lock requires; lock and unlock must run on the same session, so
+// the connection is held until Unlock. A process-local mutex serialises
+// in-process callers first so they do not each tie up a connection blocked in
+// pg_advisory_lock. pg_advisory_lock itself blocks until granted or the context
+// is cancelled.
+func (b *SQLBackend) acquirePostgresLock(ctx context.Context, name string) (Unlocker, error) {
+	local := b.localLockFor(name)
+	local.Lock()
+
+	conn, err := b.db.Conn(ctx)
+	if err != nil {
+		local.Unlock()
+		return nil, fmt.Errorf("acquiring connection for lock %q: %w", name, err)
+	}
+
+	key := advisoryLockKey(name)
+	if _, err := conn.ExecContext(ctx, "SELECT pg_advisory_lock(?)", key); err != nil {
+		_ = conn.Close()
+		local.Unlock()
+		return nil, fmt.Errorf("acquiring postgres advisory lock %q: %w", name, err)
+	}
+
+	return &pgUnlocker{conn: conn, key: key, local: local, timeout: b.timeout}, nil
+}
+
+// localLockFor returns the process-local mutex for lock name, creating it on
+// first use. Mutexes are never removed; the namespace is small and bounded.
+func (b *SQLBackend) localLockFor(name string) *sync.Mutex {
+	if v, ok := b.localLocks.Load(name); ok {
+		return v.(*sync.Mutex)
+	}
+	v, _ := b.localLocks.LoadOrStore(name, &sync.Mutex{})
+	return v.(*sync.Mutex)
+}
+
+// advisoryLockKey hashes a lock name to the int64 key that PostgreSQL's
+// pg_advisory_lock family requires. FNV-1a gives a stable mapping across
+// processes and replicas, which is what matters for cross-node coordination.
+func advisoryLockKey(name string) int64 {
+	h := fnv.New64a()
+	_, _ = h.Write([]byte(name))
+	return int64(h.Sum64()) // wraps to a signed bigint; the bit pattern is stable
+}
+
+// pgUnlocker releases a PostgreSQL advisory lock on the same connection that
+// acquired it, then returns the connection to the pool and releases the
+// process-local mutex. The local mutex is always released even if the advisory
+// unlock fails, so a transient error cannot wedge later in-process callers.
+type pgUnlocker struct {
+	conn    bun.Conn
+	key     int64
+	local   *sync.Mutex
+	timeout time.Duration
+}
+
+func (u *pgUnlocker) Unlock() error {
+	ctx, cancel := context.WithTimeout(context.Background(), u.timeout)
+	defer cancel()
+	_, err := u.conn.ExecContext(ctx, "SELECT pg_advisory_unlock(?)", u.key)
+	_ = u.conn.Close()
+	u.local.Unlock()
+	return err
 }
 
 // Close releases the underlying connection pool when owned by this backend.
