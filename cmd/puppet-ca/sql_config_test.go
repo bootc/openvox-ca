@@ -74,6 +74,31 @@ func TestBuildBackendSpecSQLite(t *testing.T) {
 	}
 }
 
+func TestBuildBackendSpecPostgres(t *testing.T) {
+	for _, alias := range []string{"postgres", "postgresql", "pg"} {
+		t.Run(alias, func(t *testing.T) {
+			cfg := &serverConfig{
+				StorageBackend: alias,
+				SQLDSN:         "postgres://u:p@host:5432/db?sslmode=require",
+				SQLTLSCAFile:   "/etc/pg-ca.pem",
+			}
+			spec, err := buildBackendSpec(cfg, "/abs/cadir")
+			if err != nil {
+				t.Fatalf("buildBackendSpec: %v", err)
+			}
+			if spec.Kind != storage.BackendPostgres {
+				t.Errorf("Kind = %q, want %q", spec.Kind, storage.BackendPostgres)
+			}
+			if spec.SQL.DSN != cfg.SQLDSN {
+				t.Errorf("SQL.DSN = %q", spec.SQL.DSN)
+			}
+			if spec.SQL.TLSCAFile != "/etc/pg-ca.pem" {
+				t.Errorf("SQL.TLSCAFile = %q", spec.SQL.TLSCAFile)
+			}
+		})
+	}
+}
+
 func TestNewServiceFromSpecSQLiteRequiresDSN(t *testing.T) {
 	_, err := storage.NewServiceFromSpec(storage.BackendSpec{
 		Kind:     storage.BackendSQLite,

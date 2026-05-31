@@ -34,6 +34,7 @@ const (
 	BackendEtcd       BackendKind = "etcd"
 	BackendRedis      BackendKind = "redis"
 	BackendSQLite     BackendKind = "sqlite"
+	BackendPostgres   BackendKind = "postgres"
 )
 
 // BackendSpec describes how to construct a StorageService from configuration.
@@ -134,6 +135,8 @@ func sqlDialectForKind(kind BackendKind) (SQLDialect, bool) {
 	switch kind {
 	case BackendSQLite:
 		return SQLitePure, true
+	case BackendPostgres:
+		return SQLPostgres, true
 	default:
 		return "", false
 	}
@@ -234,7 +237,7 @@ func NewServiceFromSpec(spec BackendSpec) (*StorageService, error) {
 		backend = rb
 		localPrivKeyDir = filepath.Join(spec.LocalDir, "private")
 
-	case BackendSQLite:
+	case BackendSQLite, BackendPostgres:
 		if spec.LocalDir == "" {
 			return nil, fmt.Errorf("sql backend still needs LocalDir for local private keys")
 		}
@@ -253,6 +256,15 @@ func NewServiceFromSpec(spec BackendSpec) (*StorageService, error) {
 		}
 		if spec.SQL.RequestTimeoutSec > 0 {
 			cfg.RequestTimeout = time.Duration(spec.SQL.RequestTimeoutSec) * time.Second
+		}
+		// SQLite is a local file with no transport security; TLS applies only
+		// to the networked dialects.
+		if dialect != SQLitePure {
+			tlsCfg, err := loadSQLTLS(spec.SQL)
+			if err != nil {
+				return nil, err
+			}
+			cfg.TLS = tlsCfg
 		}
 		sb, err := NewSQLBackend(cfg)
 		if err != nil {
@@ -296,6 +308,10 @@ func loadEtcdTLS(spec EtcdSpec) (*tls.Config, error) {
 
 func loadRedisTLS(spec RedisSpec) (*tls.Config, error) {
 	return loadBackendTLS(spec.TLSCAFile, spec.TLSCertFile, spec.TLSKeyFile, "redis")
+}
+
+func loadSQLTLS(spec SQLSpec) (*tls.Config, error) {
+	return loadBackendTLS(spec.TLSCAFile, spec.TLSCertFile, spec.TLSKeyFile, "sql")
 }
 
 // loadBackendTLS reads CA/cert/key PEMs into a tls.Config shared by backends.
@@ -342,7 +358,9 @@ func ParseBackendKind(s string) (BackendKind, error) {
 		return BackendRedis, nil
 	case "sqlite", "sqlite3":
 		return BackendSQLite, nil
+	case "postgres", "postgresql", "pg":
+		return BackendPostgres, nil
 	default:
-		return "", fmt.Errorf("unknown storage backend %q (supported: filesystem, etcd, redis, sqlite)", s)
+		return "", fmt.Errorf("unknown storage backend %q (supported: filesystem, etcd, redis, sqlite, postgres)", s)
 	}
 }

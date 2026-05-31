@@ -1,0 +1,31 @@
+# PostgreSQL service for the SQL-backend Go integration suite
+# (internal/storage, build tag `postgres_integration`).
+#
+# Unlike compose-backends-redis.yml — which stands up a full Puppet stack — this
+# file only provides the database the integration tests need. Bring it up,
+# point PUPPET_CA_TEST_POSTGRES_DSN at it, and run:
+#
+#   go test -tags postgres_integration ./internal/storage/...
+#
+# The `mage test:backendsPostgres` target automates the up / test / down cycle.
+
+name: puppet-ca-backends-postgres
+
+services:
+  postgres:
+    image: docker.io/postgres:16-alpine
+    environment:
+      POSTGRES_USER: puppetca
+      POSTGRES_PASSWORD: puppetca
+      POSTGRES_DB: puppetca
+    ports:
+      # Host 55432 -> container 5432, matching the DSN used by the mage target.
+      - "55432:5432"
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U puppetca -d puppetca"]
+      interval: 2s
+      timeout: 5s
+      retries: 30
+    tmpfs:
+      # Ephemeral storage: the test database never needs to survive a restart.
+      - /var/lib/postgresql/data

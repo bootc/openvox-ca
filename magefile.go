@@ -1,6 +1,7 @@
 //go:build mage
 
 // Copyright (C) 2026 Trevor Vaughan
+// Copyright (C) 2026 Chris Boot
 //
 // This program is free software; you can redistribute it and/or modify
 // it under the terms of the GNU General Public License as published by
@@ -441,6 +442,34 @@ func (Test) BackendsRedis() error {
 
 	fmt.Println("Running Redis-backend integration tests...")
 	return sh.RunV("bash", "test/backends/redis-stack.sh", "--up")
+}
+
+// BackendsPostgres brings up a throwaway PostgreSQL via
+// compose-backends-postgres.yml and runs the SQL-backend Go integration suite
+// (internal/storage, build tag `postgres_integration`) against it, then tears
+// the database down. Validates the PostgreSQL dialect: upsert, FOR UPDATE
+// AppendLine atomicity across two backends, and pg_advisory_lock mutual
+// exclusion.
+//
+// Requires podman-compose (or docker compose) and network access to pull
+// docker.io/postgres:16-alpine.
+func (Test) BackendsPostgres() error {
+	const dsn = "postgres://puppetca:puppetca@127.0.0.1:55432/puppetca?sslmode=disable"
+
+	fmt.Println("Starting PostgreSQL backend service...")
+	if err := runCompose(nil, "-f", "compose-backends-postgres.yml", "up", "-d", "--wait"); err != nil {
+		return err
+	}
+	defer func() {
+		fmt.Println("Tearing down PostgreSQL backend service...")
+		_ = runCompose(nil, "-f", "compose-backends-postgres.yml", "down", "--volumes")
+	}()
+
+	fmt.Println("Running PostgreSQL-backend integration tests...")
+	return sh.RunWithV(
+		map[string]string{"PUPPET_CA_TEST_POSTGRES_DSN": dsn},
+		"go", "test", "-tags", "postgres_integration", "-count=1", "./internal/storage/...",
+	)
 }
 
 // PuppetFIPS is like Puppet but compiles with GOEXPERIMENT=boringcrypto so the
