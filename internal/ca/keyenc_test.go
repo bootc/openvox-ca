@@ -2,6 +2,7 @@ package ca
 
 import (
 	"context"
+	"crypto/aes"
 	"crypto/ecdsa"
 	"crypto/elliptic"
 	"crypto/rand"
@@ -18,6 +19,10 @@ import (
 
 	"github.com/tvaughan/puppet-ca/internal/storage"
 )
+
+// gcmTagLen is the AES-GCM authentication tag length appended to every
+// ciphertext (crypto/cipher uses the standard 16-byte tag).
+const gcmTagLen = 16
 
 var _ = Describe("Key encryption", func() {
 	Describe("encryptKeyPEM / decryptKeyDER round-trip", func() {
@@ -77,6 +82,38 @@ var _ = Describe("Key encryption", func() {
 			_, err = decryptKeyDER(block.Bytes, []byte("wrong"))
 			Expect(err).To(HaveOccurred())
 			Expect(err.Error()).To(ContainSubstring("wrong passphrase"))
+		})
+
+		It("fails decryption when a ciphertext byte is tampered (GCM integrity)", func() {
+			// Encrypt a real key to a valid envelope.
+			key, err := ecdsa.GenerateKey(elliptic.P256(), rand.Reader)
+			Expect(err).NotTo(HaveOccurred())
+
+			passphrase := []byte("integrity-passphrase")
+			encPEM, err := encryptAndMarshalKey(key, passphrase)
+			Expect(err).NotTo(HaveOccurred())
+
+			block, _ := pem.Decode(encPEM)
+			Expect(block).NotTo(BeNil())
+
+			// Sanity-check the envelope decrypts cleanly before tampering.
+			_, err = decryptKeyDER(block.Bytes, passphrase)
+			Expect(err).NotTo(HaveOccurred())
+
+			// Flip one bit in the ciphertext region. The header occupies
+			// keyEncMinLen-aes.BlockSize bytes (version+salt+nonce); the GCM
+			// tag is the final 16 bytes. Target a byte well past the header and
+			// before the tag so we mutate ciphertext, not the tag or header.
+			headerLen := keyEncMinLen - aes.BlockSize // 1 + salt + nonce
+			Expect(len(block.Bytes)).To(BeNumerically(">", headerLen+gcmTagLen),
+				"envelope must have ciphertext between header and GCM tag")
+			tamperOffset := len(block.Bytes) - gcmTagLen - 1 // last ciphertext byte before the tag
+			Expect(tamperOffset).To(BeNumerically(">=", headerLen))
+			block.Bytes[tamperOffset] ^= 0x01
+
+			// GCM must fail closed: authentication detects the tamper.
+			_, err = decryptKeyDER(block.Bytes, passphrase)
+			Expect(err).To(HaveOccurred())
 		})
 
 		It("fails on truncated envelope", func() {

@@ -906,3 +906,146 @@ var _ = Describe("Auth Middleware", func() {
 		})
 	})
 })
+
+// --- lookupTier classification table ---
+//
+// lookupTier is unexported, so its (method, path) -> tier mapping is pinned
+// here through the observable behaviour of the auth middleware. Each tier is
+// uniquely identified by a probe matrix run against a CA-signed, non-revoked
+// client identity:
+//
+//	tier            no-cert    self-cert (CN==subject)   other-cert (CN!=subject)
+//	tierPublic      allow      -                         -
+//	tierAnyClient   deny       allow                     allow
+//	tierSelfOrAdmin deny       allow                     deny
+//	tierAdminOnly   deny       deny                      deny
+//
+// "deny" is HTTP 403; "allow" is anything-but-403 (the request reaches the
+// handler). This table documents existing-correct behaviour, including the
+// /puppet-ca/v1 prefix stripping and the default-deny tierAdminOnly fallthrough
+// for unrecognised paths. A case classifying LESS restrictively than expected
+// would surface here as a probe mismatch.
+var _ = Describe("lookupTier classification", func() {
+	var (
+		tmpDir         string
+		myCA           *ca.CA
+		store          *storage.StorageService
+		caCert         *x509.Certificate
+		caKey          *rsa.PrivateKey
+		muxDefault     http.Handler // AllowPublicStatus=false
+		muxPublicState http.Handler // AllowPublicStatus=true
+	)
+
+	BeforeEach(func() {
+		var err error
+		tmpDir, err = os.MkdirTemp("", "puppet-ca-tier-test")
+		Expect(err).NotTo(HaveOccurred())
+
+		store = storage.New(tmpDir)
+		myCA = ca.New(store, ca.AutosignConfig{Mode: "off"}, "puppet.test")
+		Expect(store.EnsureDirs(context.Background())).To(Succeed())
+		Expect(store.SaveCAKey(context.Background(), cachedKeyPEM)).To(Succeed())
+		Expect(store.SaveCACert(context.Background(), cachedCrtPEM)).To(Succeed())
+		Expect(store.UpdateCRL(context.Background(), cachedCrlPEM)).To(Succeed())
+		Expect(store.WriteSerial(context.Background(), "0001")).To(Succeed())
+		Expect(store.TouchInventory(context.Background())).To(Succeed())
+		Expect(myCA.Init(context.Background())).To(Succeed())
+
+		block, _ := pem.Decode(cachedCrtPEM)
+		caCert, err = x509.ParseCertificate(block.Bytes)
+		Expect(err).NotTo(HaveOccurred())
+		block, _ = pem.Decode(cachedKeyPEM)
+		caKey, err = x509.ParsePKCS1PrivateKey(block.Bytes)
+		Expect(err).NotTo(HaveOccurred())
+
+		srv := api.New(myCA)
+		srv.AuthConfig = &api.AuthConfig{
+			CACert:    caCert,
+			AllowList: map[string]bool{"puppet-server": true},
+		}
+		muxDefault = srv.Routes()
+
+		srvPub := api.New(myCA)
+		srvPub.AuthConfig = &api.AuthConfig{
+			CACert:            caCert,
+			AllowList:         map[string]bool{"puppet-server": true},
+			AllowPublicStatus: true,
+		}
+		muxPublicState = srvPub.Routes()
+	})
+
+	AfterEach(func() { os.RemoveAll(tmpDir) })
+
+	// observedTier probes the middleware and returns the canonical tier name.
+	// subject is the {subject} path segment the self-cert's CN must equal for
+	// the self-or-admin probe; pass "" for paths without a subject segment.
+	observedTier := func(mux http.Handler, method, path, subject string) string {
+		code := func(r *http.Request) int {
+			rr := httptest.NewRecorder()
+			mux.ServeHTTP(rr, r)
+			return rr.Code
+		}
+
+		// Probe 1: no client cert presented over TLS.
+		noCert := httptest.NewRequest(method, path, nil)
+		noCert.TLS = &tls.ConnectionState{}
+		if code(noCert) != http.StatusForbidden {
+			return "public"
+		}
+
+		// Probe 2: self cert (CN == subject). Use a non-admin CN that matches
+		// the path subject so the self-or-admin branch can succeed.
+		selfCN := subject
+		if selfCN == "" {
+			selfCN = "no-such-self"
+		}
+		selfReq := httptest.NewRequest(method, path, nil)
+		selfReq = withClientCert(selfReq, issueClientCert(selfCN, caCert, caKey))
+		selfAllowed := code(selfReq) != http.StatusForbidden
+
+		// Probe 3: a different non-admin cert (CN != subject).
+		otherReq := httptest.NewRequest(method, path, nil)
+		otherReq = withClientCert(otherReq, issueClientCert("unrelated-node", caCert, caKey))
+		otherAllowed := code(otherReq) != http.StatusForbidden
+
+		switch {
+		case selfAllowed && otherAllowed:
+			return "anyClient"
+		case selfAllowed && !otherAllowed:
+			return "selfOrAdmin"
+		default:
+			return "adminOnly"
+		}
+	}
+
+	DescribeTable("default config (AllowPublicStatus=false)",
+		func(method, path, subject, expected string) {
+			Expect(observedTier(muxDefault, method, path, subject)).To(Equal(expected))
+		},
+		// Prefix stripping: the /puppet-ca/v1 form classifies identically.
+		Entry("public certificate fetch (bare)", "GET", "/certificate/node1", "node1", "public"),
+		Entry("public certificate fetch (prefixed)", "GET", "/puppet-ca/v1/certificate/node1", "node1", "public"),
+		Entry("public CSR submission", "PUT", "/certificate_request/node1", "node1", "public"),
+		Entry("public CRL fetch", "GET", "/certificate_revocation_list/ca", "", "public"),
+		// certificate_status defaults to any-CA-signed-client when not public.
+		Entry("status read requires any client", "GET", "/certificate_status/node1", "node1", "anyClient"),
+		// Self-or-admin read of a pending CSR.
+		Entry("CSR read is self-or-admin", "GET", "/certificate_request/node1", "node1", "selfOrAdmin"),
+		// Default-deny: signing, mutation, and unknown paths are admin-only.
+		Entry("sign all is admin-only", "POST", "/sign/all", "", "adminOnly"),
+		Entry("status mutation is admin-only", "PUT", "/certificate_status/node1", "node1", "adminOnly"),
+		Entry("status delete is admin-only", "DELETE", "/certificate_status/node1", "node1", "adminOnly"),
+		Entry("unknown path falls through to admin-only", "GET", "/totally/unknown/path", "", "adminOnly"),
+		Entry("unknown method on public path is admin-only", "POST", "/certificate/node1", "node1", "adminOnly"),
+	)
+
+	DescribeTable("with AllowPublicStatus=true",
+		func(method, path, subject, expected string) {
+			Expect(observedTier(muxPublicState, method, path, subject)).To(Equal(expected))
+		},
+		// The opt-in flips GET certificate_status to public; mutations stay admin-only.
+		Entry("status read becomes public", "GET", "/certificate_status/node1", "node1", "public"),
+		Entry("status read becomes public (prefixed)", "GET", "/puppet-ca/v1/certificate_status/node1", "node1", "public"),
+		Entry("status mutation stays admin-only", "PUT", "/certificate_status/node1", "node1", "adminOnly"),
+	)
+})

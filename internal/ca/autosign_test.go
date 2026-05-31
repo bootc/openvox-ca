@@ -17,11 +17,13 @@
 package ca_test
 
 import (
+	"bytes"
 	"crypto/rand"
 	"crypto/rsa"
 	"crypto/x509"
 	"crypto/x509/pkix"
 	"encoding/pem"
+	"log/slog"
 	"os"
 	"path/filepath"
 	"time"
@@ -167,6 +169,25 @@ var _ = Describe("CheckAutosign", func() {
 				csr, csrPEM)
 			Expect(err).NotTo(HaveOccurred())
 			Expect(ok).To(BeFalse())
+		})
+
+		It("denies (no error) and warns when the executable exits 127 (crash/misconfig)", func() {
+			// Capture the default slog output for the duration of this spec.
+			var buf bytes.Buffer
+			orig := slog.Default()
+			slog.SetDefault(slog.New(slog.NewTextHandler(&buf, &slog.HandlerOptions{Level: slog.LevelWarn})))
+			defer slog.SetDefault(orig)
+
+			// An exit code >=126 (here 127, "command not found") signals the
+			// script crashed or is misconfigured rather than a deliberate policy
+			// deny. Behaviour must stay fail-closed (deny, no error), but a
+			// warning should be emitted to aid the operator.
+			ok, err := ca.CheckAutosign(
+				ca.AutosignConfig{Mode: "executable", FileOrPath: writeScript("#!/bin/sh\nexit 127\n")},
+				csr, csrPEM)
+			Expect(err).NotTo(HaveOccurred())
+			Expect(ok).To(BeFalse())
+			Expect(buf.String()).To(ContainSubstring("misconfigured"))
 		})
 
 		It("passes the subject CN as argv[1]", func() {

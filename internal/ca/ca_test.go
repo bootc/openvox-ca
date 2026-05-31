@@ -803,9 +803,13 @@ var _ = Describe("ValidateSubject", func() {
 	DescribeTable("valid subjects",
 		func(s string) { Expect(ca.ValidateSubject(s)).To(Succeed()) },
 		Entry("simple hostname", "puppet"),
-		Entry("FQDN", "node.example.com"),
+		Entry("FQDN", "foo.example.com"),
+		Entry("with interior hyphens", "a-b"),
 		Entry("with hyphens", "my-node-01"),
 		Entry("with underscores", "my_node"),
+		Entry("starts with digit", "node1"),
+		Entry("starts with underscore", "_node"),
+		Entry("starts with dot", ".node"),
 	)
 
 	DescribeTable("invalid subjects",
@@ -815,6 +819,11 @@ var _ = Describe("ValidateSubject", func() {
 		Entry("double-dot only", ".."),
 		Entry("uppercase letters", "BadNode"),
 		Entry("empty string", ""),
+		// SECURITY: a leading '-' could be misread as a flag by an operator's
+		// autosign script, enabling argv flag injection. ValidateSubject must
+		// reject it.
+		Entry("leading hyphen (argv flag injection)", "-foo"),
+		Entry("leading hyphen only", "-"),
 	)
 })
 

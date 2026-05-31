@@ -115,7 +115,10 @@ func (c *CA) evictRevokedLocked(ctx context.Context, subject string) error {
 	return nil
 }
 
-var subjectRegex = regexp.MustCompile(`^[a-z0-9._-]+$`)
+// subjectRegex forbids a leading '-' so a certname can never be misread as a
+// flag by an operator's autosign script (argv flag injection); the first
+// character must be a letter, digit, underscore, or dot.
+var subjectRegex = regexp.MustCompile(`^[a-z0-9_.][a-z0-9._-]*$`)
 
 // ValidateSubject returns an error if subject contains unsafe characters.
 // It is the single source of truth for subject name validation used by both
@@ -124,7 +127,7 @@ var subjectRegex = regexp.MustCompile(`^[a-z0-9._-]+$`)
 // NIST 800-53: SI-10 (Information Input Validation)
 func ValidateSubject(subject string) error {
 	if !subjectRegex.MatchString(subject) || strings.Contains(subject, "..") {
-		return fmt.Errorf("invalid subject name %q: must match ^[a-z0-9._-]+$ and must not contain path traversal", subject)
+		return fmt.Errorf("invalid subject name %q: must match ^[a-z0-9_.][a-z0-9._-]*$ and must not contain path traversal", subject)
 	}
 	return nil
 }

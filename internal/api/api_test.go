@@ -165,6 +165,34 @@ var _ = Describe("API Workflow", func() {
 			Expect(rr.Code).To(Equal(http.StatusBadRequest))
 		})
 
+		// End-to-end path-traversal rejection: a certname carrying directory
+		// traversal must be rejected at the boundary (400), confirming that Go's
+		// PathValue URL-decoding combined with ValidateSubject fails closed before
+		// the subject ever reaches storage. Covers both percent-encoded and literal
+		// "../" forms.
+		It("should return 400 for a percent-encoded traversal certname on GET status", func() {
+			req := httptest.NewRequest("GET", "/puppet-ca/v1/certificate_status/..%2f..%2fetc%2fpasswd", nil)
+			rr := httptest.NewRecorder()
+			mux.ServeHTTP(rr, req)
+			Expect(rr.Code).To(Equal(http.StatusBadRequest))
+		})
+
+		// Literal "../" never reaches the handler: net/http.ServeMux path-cleans
+		// "/certificate_status/.." to "/" and answers with a redirect (307) BEFORE
+		// dispatching to the handler, so the traversal segment is collapsed by the
+		// standard library and never reaches ValidateSubject or storage. The
+		// security guarantee is that it is neither served as a status (200) nor
+		// triggers a server error (500) — the traversal is neutralised, not honoured.
+		It("neutralises a literal '..' traversal certname on GET status (no 200/500)", func() {
+			req := httptest.NewRequest("GET", "/certificate_status/..", nil)
+			rr := httptest.NewRecorder()
+			mux.ServeHTTP(rr, req)
+			Expect(rr.Code).NotTo(Equal(http.StatusOK))
+			Expect(rr.Code).NotTo(Equal(http.StatusInternalServerError))
+			Expect(rr.Code).To(Equal(http.StatusTemporaryRedirect))
+			Expect(rr.Header().Get("Location")).To(Equal("/"))
+		})
+
 		It("should return 400 for invalid subject on PUT status", func() {
 			body := api.PutStatusBody{DesiredState: "signed"}
 			bodyBytes, _ := json.Marshal(body)
