@@ -523,7 +523,8 @@ func (Test) PuppetFIPS() error {
 
 // -- dev:* --------------------------------------------------------------------─
 
-// Check verifies formatting, runs go vet, and checks go mod tidy.
+// Check verifies formatting, runs go vet, checks go mod tidy, and runs the
+// golangci-lint gate.
 // Unlike `go fmt`, gofmt -l prints unformatted files and exits 0 without
 // rewriting them; we treat any output as a failure so CI catches drift.
 func (Dev) Check() error {
@@ -536,7 +537,39 @@ func (Dev) Check() error {
 	if strings.TrimSpace(out) != "" {
 		return fmt.Errorf("these files need formatting (run 'go fmt ./...'):\n%s", out)
 	}
-	return sh.Run("go", "vet", "./...")
+	if err := sh.Run("go", "vet", "./..."); err != nil {
+		return err
+	}
+	return Dev{}.Lint()
+}
+
+// Lint runs golangci-lint over the whole module, teeing its output to
+// .test-output/golangci-lint.log. A missing golangci-lint binary is a
+// graceful skip (clear message, non-fatal) so dev:check still works in
+// minimal environments; only an actual lint failure returns an error.
+func (Dev) Lint() error {
+	if _, err := exec.LookPath("golangci-lint"); err != nil {
+		fmt.Println("SKIP: golangci-lint not found on PATH; skipping lint " +
+			"(install: https://golangci-lint.run/welcome/install/)")
+		return nil
+	}
+
+	fmt.Println("Running golangci-lint...")
+	if err := os.MkdirAll(".test-output", 0755); err != nil {
+		return err
+	}
+	logFile, err := os.Create(filepath.Join(".test-output", "golangci-lint.log"))
+	if err != nil {
+		return err
+	}
+	defer logFile.Close()
+
+	out := io.MultiWriter(os.Stdout, logFile)
+	errOut := io.MultiWriter(os.Stderr, logFile)
+	if _, err := sh.Exec(nil, out, errOut, "golangci-lint", "run", "./..."); err != nil {
+		return err
+	}
+	return nil
 }
 
 // Tidy runs go mod tidy and go fmt on any files that need it.

@@ -259,7 +259,7 @@ func (s *Server) handleGetCert(w http.ResponseWriter, r *http.Request) {
 			return
 		}
 		w.Header().Set("Content-Type", "text/plain")
-		w.Write(certPEM) //nolint:errcheck
+		w.Write(certPEM)
 		return
 	}
 
@@ -274,7 +274,7 @@ func (s *Server) handleGetCert(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	w.Header().Set("Content-Type", "text/plain")
-	w.Write(certPEM) //nolint:errcheck
+	w.Write(certPEM)
 }
 
 // --- CRL ---
@@ -300,7 +300,7 @@ func (s *Server) handleGetCRL(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	w.Header().Set("Content-Type", "text/plain")
-	w.Write(crlPEM) //nolint:errcheck
+	w.Write(crlPEM)
 }
 
 // --- CSR ---
@@ -319,7 +319,7 @@ func (s *Server) handleGetRequest(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	w.Header().Set("Content-Type", "text/plain")
-	w.Write(csrPEM) //nolint:errcheck
+	w.Write(csrPEM)
 }
 
 func (s *Server) handlePutRequest(w http.ResponseWriter, r *http.Request) {

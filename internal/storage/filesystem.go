@@ -228,13 +228,13 @@ func (b *FilesystemBackend) AppendLine(ctx context.Context, key string, data []b
 		return err
 	}
 	if _, err := f.Write(data); err != nil {
-		f.Close()
+		_ = f.Close()
 		return err
 	}
 	// Flush the appended bytes to stable storage so a crash cannot lose a
 	// just-written inventory or CRL line.
 	if err := f.Sync(); err != nil {
-		f.Close()
+		_ = f.Close()
 		return err
 	}
 	return f.Close()
@@ -276,25 +276,25 @@ func atomicWriteFile(target string, data []byte, perm os.FileMode) error {
 	tmpName := tmp.Name()
 
 	if _, err := tmp.Write(data); err != nil {
-		tmp.Close()
-		os.Remove(tmpName)
+		_ = tmp.Close()
+		_ = os.Remove(tmpName)
 		return err
 	}
 	if err := tmp.Chmod(perm); err != nil {
-		tmp.Close()
-		os.Remove(tmpName)
+		_ = tmp.Close()
+		_ = os.Remove(tmpName)
 		return err
 	}
 	// Flush the data to stable storage before the rename. Without this the
 	// rename can be reordered ahead of the data on a crash, leaving a
 	// zero-length or stale file in place of a CA key, cert, or CRL.
 	if err := tmp.Sync(); err != nil {
-		tmp.Close()
-		os.Remove(tmpName)
+		_ = tmp.Close()
+		_ = os.Remove(tmpName)
 		return fmt.Errorf("syncing temp file %s: %w", tmpName, err)
 	}
 	if err := tmp.Close(); err != nil {
-		os.Remove(tmpName)
+		_ = os.Remove(tmpName)
 		return err
 	}
 	if err := os.Rename(tmpName, target); err != nil {
@@ -308,7 +308,7 @@ func atomicWriteFile(target string, data []byte, perm os.FileMode) error {
 		if err := dirF.Sync(); err != nil {
 			slog.Warn("Failed to fsync parent directory after rename", "dir", dir, "error", err)
 		}
-		dirF.Close()
+		_ = dirF.Close()
 	}
 	return nil
 }

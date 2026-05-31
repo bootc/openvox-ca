@@ -74,11 +74,11 @@ func (s *Server) handleOCSP(w http.ResponseWriter, r *http.Request) {
 		if errors.Is(err, ca.ErrInternal) {
 			slog.Error("OCSP internal error", "error", err)
 			w.WriteHeader(http.StatusInternalServerError)
-			w.Write(xocsp.InternalErrorErrorResponse) //nolint:errcheck
+			w.Write(xocsp.InternalErrorErrorResponse)
 		} else {
 			slog.Warn("OCSP request error", "error", err)
 			w.WriteHeader(http.StatusBadRequest)
-			w.Write(xocsp.MalformedRequestErrorResponse) //nolint:errcheck
+			w.Write(xocsp.MalformedRequestErrorResponse)
 		}
 		return
 	}
@@ -94,5 +94,5 @@ func (s *Server) handleOCSP(w http.ResponseWriter, r *http.Request) {
 		secs = math.Max(0, math.Min(math.MaxInt32, secs))
 		w.Header().Set("Cache-Control", fmt.Sprintf("max-age=%d, public", int64(secs)))
 	}
-	w.Write(respDER) //nolint:errcheck
+	w.Write(respDER)
 }

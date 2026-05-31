@@ -309,7 +309,7 @@ func newRootCmd() *cobra.Command {
 				if err != nil {
 					return fmt.Errorf("failed to determine executable: %w", err)
 				}
-				c := exec.Command(exe, os.Args[1:]...)
+				c := exec.Command(exe, os.Args[1:]...) //nolint:gosec // G204: re-execs this same binary (os.Executable) with the operator's own os.Args to daemonize
 				// Strip internal role/PSK vars to prevent stale values from a
 				// previous run from confusing the daemon child.
 				daemonEnv := filterEnv(os.Environ(), "PUPPET_CA_ROLE", "PUPPET_CA_DAEMON", "PUPPET_CA_SIGNER_PSK")
@@ -730,7 +730,7 @@ func validateAutosignExecutable(path string) error {
 	// Check file ownership: must be owned by root or the current user.
 	stat, ok := info.Sys().(*syscall.Stat_t)
 	if ok {
-		currentUID := uint32(os.Getuid())
+		currentUID := uint32(os.Getuid()) //nolint:gosec // G115: Linux getuid() returns a valid uid_t that always fits uint32
 		if stat.Uid != 0 && stat.Uid != currentUID {
 			return fmt.Errorf("autosign executable %s is owned by uid %d (expected root or current user uid %d); "+
 				"refusing to start", realPath, stat.Uid, currentUID)

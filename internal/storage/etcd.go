@@ -491,6 +491,6 @@ func decodeBlob(raw []byte) (time.Time, []byte, error) {
 	if len(raw) < 8 {
 		return time.Time{}, nil, fmt.Errorf("blob too short: %d bytes", len(raw))
 	}
-	ns := int64(binary.BigEndian.Uint64(raw[:8]))
+	ns := int64(binary.BigEndian.Uint64(raw[:8])) //nolint:gosec // G115: internal mtime round-trip; the same value was written via int64->uint64 by encodeBlob
 	return time.Unix(0, ns), bytes.Clone(raw[8:]), nil
 }

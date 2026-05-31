@@ -93,7 +93,7 @@ func checkAutosignExecutable(cfg AutosignConfig, commonName string, csrPEM []byt
 	ctx, cancel := context.WithTimeout(context.Background(), timeout)
 	defer cancel()
 
-	cmd := exec.CommandContext(ctx, cfg.FileOrPath, commonName)
+	cmd := exec.CommandContext(ctx, cfg.FileOrPath, commonName) //nolint:gosec // G204: operator-configured executable; commonName allowlist-validated by ValidateSubject and passed as a separate argv (no shell)
 	// SECURITY: Environment sanitization: only allowlisted variables are
 	// passed to the autosign subprocess. Prevents leaking secrets (API keys,
 	// cloud tokens, DB credentials) from the CA process environment to

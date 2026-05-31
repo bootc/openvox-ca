@@ -1,0 +1,36 @@
+# lefthook git-hook configuration for github.com/tvaughan/puppet-ca.
+#
+# The repository ships .git/hooks/pre-commit and .git/hooks/pre-push shims that
+# call `lefthook run <hook>`; this file is what those shims drive. Install the
+# hooks (once lefthook is on PATH) with `lefthook install`.
+#
+# Hooks degrade gracefully: if a tool is missing the command prints a SKIP
+# notice and exits 0 rather than blocking the commit/push. Run the same checks
+# manually via `mage dev:check` (lint) and `go test ./...`.
+
+pre-commit:
+  parallel: false
+  commands:
+    gofmt:
+      # gofmt -l prints unformatted files and exits 0; treat any output as a
+      # failure so unformatted code never lands.
+      run: |
+        unformatted=$(gofmt -l .)
+        if [ -n "$unformatted" ]; then
+          echo "These files need formatting (run 'go fmt ./...'):"
+          echo "$unformatted"
+          exit 1
+        fi
+    golangci-lint:
+      run: |
+        if ! command -v golangci-lint >/dev/null 2>&1; then
+          echo "SKIP: golangci-lint not found on PATH; skipping lint"
+          exit 0
+        fi
+        golangci-lint run ./...
+
+pre-push:
+  parallel: false
+  commands:
+    go-test:
+      run: go test ./...

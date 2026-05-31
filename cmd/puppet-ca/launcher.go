@@ -77,7 +77,7 @@ func runLauncher() error {
 	baseEnv = baseEnv[:len(baseEnv):len(baseEnv)]
 
 	// Spawn signer child.
-	signerCmd := exec.Command(exe, os.Args[1:]...)
+	signerCmd := exec.Command(exe, os.Args[1:]...) //nolint:gosec // G204: re-execs this same binary (os.Executable) with the operator's own os.Args
 	signerCmd.Env = append(baseEnv,
 		"PUPPET_CA_ROLE=signer",
 		"PUPPET_CA_DAEMON=1",
@@ -93,7 +93,7 @@ func runLauncher() error {
 	signerSock.Close()
 
 	// Spawn frontend child.
-	frontendCmd := exec.Command(exe, os.Args[1:]...)
+	frontendCmd := exec.Command(exe, os.Args[1:]...) //nolint:gosec // G204: re-execs this same binary (os.Executable) with the operator's own os.Args
 	frontendCmd.Env = append(baseEnv,
 		"PUPPET_CA_ROLE=frontend",
 		"PUPPET_CA_DAEMON=1",

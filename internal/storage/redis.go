@@ -520,7 +520,7 @@ func (b *RedisBackend) AcquireLock(ctx context.Context, name string) (Unlocker, 
 		local:         local,
 		stopHeartbeat: make(chan struct{}),
 	}
-	go ul.heartbeat()
+	go ul.heartbeat() //nolint:gosec // G118: lock heartbeat must outlive the request ctx; it owns its own stopHeartbeat lifecycle
 	return ul, nil
 }
 
