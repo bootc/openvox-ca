@@ -22,6 +22,7 @@ import (
 	"errors"
 	"fmt"
 	"io/fs"
+	"log/slog"
 	"os"
 	"path/filepath"
 	"strings"
@@ -79,8 +80,8 @@ func (b *FilesystemBackend) Path(key string) string {
 }
 
 func (b *FilesystemBackend) pathFor(key string) (string, error) {
-	if strings.Contains(key, "..") {
-		return "", fmt.Errorf("invalid key %q: must not contain ..", key)
+	if err := validateKey(key); err != nil {
+		return "", err
 	}
 	if rel, ok := fsLayout[key]; ok {
 		return filepath.Join(b.baseDir, rel), nil
@@ -227,7 +228,13 @@ func (b *FilesystemBackend) AppendLine(ctx context.Context, key string, data []b
 		return err
 	}
 	if _, err := f.Write(data); err != nil {
-		f.Close()
+		_ = f.Close()
+		return err
+	}
+	// Flush the appended bytes to stable storage so a crash cannot lose a
+	// just-written inventory or CRL line.
+	if err := f.Sync(); err != nil {
+		_ = f.Close()
 		return err
 	}
 	return f.Close()
@@ -269,18 +276,39 @@ func atomicWriteFile(target string, data []byte, perm os.FileMode) error {
 	tmpName := tmp.Name()
 
 	if _, err := tmp.Write(data); err != nil {
-		tmp.Close()
-		os.Remove(tmpName)
+		_ = tmp.Close()
+		_ = os.Remove(tmpName)
 		return err
 	}
 	if err := tmp.Chmod(perm); err != nil {
-		tmp.Close()
-		os.Remove(tmpName)
+		_ = tmp.Close()
+		_ = os.Remove(tmpName)
 		return err
+	}
+	// Flush the data to stable storage before the rename. Without this the
+	// rename can be reordered ahead of the data on a crash, leaving a
+	// zero-length or stale file in place of a CA key, cert, or CRL.
+	if err := tmp.Sync(); err != nil {
+		_ = tmp.Close()
+		_ = os.Remove(tmpName)
+		return fmt.Errorf("syncing temp file %s: %w", tmpName, err)
 	}
 	if err := tmp.Close(); err != nil {
-		os.Remove(tmpName)
+		_ = os.Remove(tmpName)
 		return err
 	}
-	return os.Rename(tmpName, target)
+	if err := os.Rename(tmpName, target); err != nil {
+		return err
+	}
+	// fsync the parent directory so the rename itself survives a crash. The
+	// data is already on disk and renamed, so a failure here is best-effort.
+	if dirF, err := os.Open(dir); err != nil {
+		slog.Warn("Failed to open parent directory for fsync after rename", "dir", dir, "error", err)
+	} else {
+		if err := dirF.Sync(); err != nil {
+			slog.Warn("Failed to fsync parent directory after rename", "dir", dir, "error", err)
+		}
+		_ = dirF.Close()
+	}
+	return nil
 }

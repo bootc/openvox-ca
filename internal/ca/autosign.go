@@ -22,6 +22,7 @@ import (
 	"context"
 	"crypto/x509"
 	"fmt"
+	"log/slog"
 	"os"
 	"os/exec"
 	"path/filepath"
@@ -92,7 +93,7 @@ func checkAutosignExecutable(cfg AutosignConfig, commonName string, csrPEM []byt
 	ctx, cancel := context.WithTimeout(context.Background(), timeout)
 	defer cancel()
 
-	cmd := exec.CommandContext(ctx, cfg.FileOrPath, commonName)
+	cmd := exec.CommandContext(ctx, cfg.FileOrPath, commonName) //nolint:gosec // G204: operator-configured executable; commonName allowlist-validated by ValidateSubject and passed as a separate argv (no shell)
 	// SECURITY: Environment sanitization: only allowlisted variables are
 	// passed to the autosign subprocess. Prevents leaking secrets (API keys,
 	// cloud tokens, DB credentials) from the CA process environment to
@@ -111,8 +112,17 @@ func checkAutosignExecutable(cfg AutosignConfig, commonName string, csrPEM []byt
 		if ctx.Err() != nil {
 			return false, fmt.Errorf("autosign executable timed out after %s", timeout)
 		}
-		if _, ok := err.(*exec.ExitError); ok {
-			// Non-zero exit code means deny.
+		if exitErr, ok := err.(*exec.ExitError); ok {
+			// Non-zero exit code means deny (fail-closed). Exit codes >=126
+			// conventionally indicate the command could not execute or crashed
+			// (126 = not executable, 127 = not found, 128+n = killed by signal n)
+			// rather than a deliberate policy deny. Warn so an operator can tell a
+			// misconfigured script apart from an intentional rejection; the deny
+			// semantics are unchanged.
+			if code := exitErr.ExitCode(); code >= 126 {
+				slog.Warn("Autosign executable exited with a crash/not-executable code; the script may be misconfigured (treating as deny)",
+					"path", cfg.FileOrPath, "common_name", commonName, "exit_code", code)
+			}
 			return false, nil
 		}
 		return false, err

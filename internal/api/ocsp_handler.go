@@ -59,7 +59,8 @@ func (s *Server) handleOCSP(w http.ResponseWriter, r *http.Request) {
 	case http.MethodPost:
 		reqDER, err = io.ReadAll(io.LimitReader(r.Body, 1<<16))
 		if err != nil {
-			http.Error(w, "failed to read OCSP request body: "+err.Error(), http.StatusInternalServerError)
+			slog.Warn("read OCSP request body failed", "error", err)
+			http.Error(w, "internal server error", http.StatusInternalServerError)
 			return
 		}
 
@@ -74,11 +75,11 @@ func (s *Server) handleOCSP(w http.ResponseWriter, r *http.Request) {
 		if errors.Is(err, ca.ErrInternal) {
 			slog.Error("OCSP internal error", "error", err)
 			w.WriteHeader(http.StatusInternalServerError)
-			w.Write(xocsp.InternalErrorErrorResponse) //nolint:errcheck
+			w.Write(xocsp.InternalErrorErrorResponse)
 		} else {
 			slog.Warn("OCSP request error", "error", err)
 			w.WriteHeader(http.StatusBadRequest)
-			w.Write(xocsp.MalformedRequestErrorResponse) //nolint:errcheck
+			w.Write(xocsp.MalformedRequestErrorResponse)
 		}
 		return
 	}
@@ -94,5 +95,5 @@ func (s *Server) handleOCSP(w http.ResponseWriter, r *http.Request) {
 		secs = math.Max(0, math.Min(math.MaxInt32, secs))
 		w.Header().Set("Cache-Control", fmt.Sprintf("max-age=%d, public", int64(secs)))
 	}
-	w.Write(respDER) //nolint:errcheck
+	w.Write(respDER)
 }

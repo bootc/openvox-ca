@@ -115,16 +115,35 @@ func (c *CA) evictRevokedLocked(ctx context.Context, subject string) error {
 	return nil
 }
 
-var subjectRegex = regexp.MustCompile(`^[a-z0-9._-]+$`)
+// subjectRegex forbids a leading '-' so a certname can never be misread as a
+// flag by an operator's autosign script (argv flag injection); the first
+// character must be a letter, digit, underscore, or dot.
+//
+// COMPATIBILITY: this is deliberately broader than a strict RFC 1123 DNS
+// hostname. Puppet certnames are usually FQDNs, but Puppet permits operators
+// to configure an arbitrary certname (puppet.conf `certname`), and underscores
+// in particular appear in real-world node names even though they are not legal
+// DNS labels. Tightening to strict RFC 1123 (rejecting '_', a leading '.', a
+// trailing '-', labels >63 chars, names >253 chars) would reject certnames that
+// existing deployments may already have signed, so it is held back pending a
+// deliberate compatibility decision rather than folded into this hardening pass.
+//
+// The set permitted here is still path-safe: combined with the explicit ".."
+// rejection in ValidateSubject below, a subject can never escape its storage
+// directory or be misread as a CLI flag. A leading '.' is permitted by the
+// pattern (so an operator-chosen ".name" works) but only ever yields a dotfile
+// within the CA's own request/signed directories, never a traversal.
+var subjectRegex = regexp.MustCompile(`^[a-z0-9_.][a-z0-9._-]*$`)
 
 // ValidateSubject returns an error if subject contains unsafe characters.
 // It is the single source of truth for subject name validation used by both
 // the CA layer and the API layer. Rejects path traversal (e.g. "..") and
-// any characters outside the safe set.
+// any characters outside the safe set. See subjectRegex for the deliberate
+// compatibility tradeoff against strict RFC 1123 hostnames.
 // NIST 800-53: SI-10 (Information Input Validation)
 func ValidateSubject(subject string) error {
 	if !subjectRegex.MatchString(subject) || strings.Contains(subject, "..") {
-		return fmt.Errorf("invalid subject name %q: must match ^[a-z0-9._-]+$ and must not contain ..", subject)
+		return fmt.Errorf("invalid subject name %q: must match ^[a-z0-9_.][a-z0-9._-]*$ and must not contain path traversal", subject)
 	}
 	return nil
 }
@@ -226,7 +245,7 @@ func (c *CA) signWithDuration(ctx context.Context, subject string, ttl time.Dura
 				IsCA bool `asn1:"optional"`
 			}
 			if _, err := asn1.Unmarshal(ext.Value, &bc); err == nil && bc.IsCA {
-				return nil, fmt.Errorf("Found extensions that disallow signing: [2.5.29.19]")
+				return nil, fmt.Errorf("found extensions that disallow signing: [2.5.29.19]")
 			}
 		}
 	}
@@ -254,11 +273,9 @@ func (c *CA) signWithDuration(ctx context.Context, subject string, ttl time.Dura
 	// would appear valid after the CA cert expired, breaking chain verification.
 	caRemaining := time.Until(c.CACert.NotAfter)
 	if caRemaining <= 0 {
-		return nil, fmt.Errorf("CA certificate has expired")
+		return nil, fmt.Errorf("ca certificate has expired")
 	}
-	if validity > caRemaining {
-		validity = caRemaining
-	}
+	validity = min(validity, caRemaining)
 
 	// SubjectKeyIdentifier: SHA1 of the SubjectPublicKeyInfo DER (RFC 5280 §4.2.1.2).
 	pubKeyDER, err := x509.MarshalPKIXPublicKey(csr.PublicKey)
@@ -528,7 +545,7 @@ func (c *CA) SaveRequest(ctx context.Context, subject string, csrPEM []byte) (bo
 	// for "node1.example.com", obtaining a certificate for a different identity.
 	// NIST 800-53: IA-5(2) (PKI-Based Authentication), SI-10 (Information Input Validation)
 	if csr.Subject.CommonName != subject {
-		return false, fmt.Errorf("Instance name %s does not match requested key %s",
+		return false, fmt.Errorf("instance name %s does not match requested key %s",
 			csr.Subject.CommonName, subject)
 	}
 

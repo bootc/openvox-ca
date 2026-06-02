@@ -9,6 +9,7 @@ dist/
 *.test
 *.out
 coverage.html
+.test-output/
 
 # Local CA runtime data (used during development with --cadir=tmp)
 tmp/
@@ -28,6 +29,7 @@ Thumbs.db
 
 # Claude Code session data
 .claude/
+docs/superpowers/
 
 # Threat model output
 Threat_Model/

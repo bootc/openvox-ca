@@ -78,11 +78,11 @@ type RedisConfig struct {
 }
 
 const (
-	redisDefaultTimeout  = 5 * time.Second
-	redisDefaultPrefix   = "puppet-ca"
-	redisDefaultLockTTL  = 30 * time.Second
-	redisHeartbeatDenom  = 3 // heartbeat every LockTTL / redisHeartbeatDenom
-	redisLockTokenBytes  = 16
+	redisDefaultTimeout = 5 * time.Second
+	redisDefaultPrefix  = "puppet-ca"
+	redisDefaultLockTTL = 30 * time.Second
+	redisHeartbeatDenom = 3 // heartbeat every LockTTL / redisHeartbeatDenom
+	redisLockTokenBytes = 16
 )
 
 func (c *RedisConfig) applyDefaults() {
@@ -254,8 +254,8 @@ func newRedisBackendFromClient(client redis.UniversalClient, owned bool, prefix 
 // physicalKey translates a logical key into its Redis key. Returns an error
 // for unknown logical keys or obviously unsafe components (e.g. "..").
 func (b *RedisBackend) physicalKey(logical string) (string, error) {
-	if strings.Contains(logical, "..") {
-		return "", fmt.Errorf("invalid key %q: must not contain ..", logical)
+	if err := validateKey(logical); err != nil {
+		return "", err
 	}
 	if sub, ok := redisLayout[logical]; ok {
 		return b.prefix + ":" + sub, nil
@@ -509,23 +509,18 @@ func (b *RedisBackend) AcquireLock(ctx context.Context, name string) (Unlocker, 
 			return nil, fmt.Errorf("acquiring redis lock %q: %w", name, ctx.Err())
 		case <-timer.C:
 		}
-		if backoff < maxBackoff {
-			backoff *= 2
-			if backoff > maxBackoff {
-				backoff = maxBackoff
-			}
-		}
+		backoff = min(backoff*2, maxBackoff)
 		timer.Reset(backoff)
 	}
 
 	ul := &redisUnlocker{
-		backend:  b,
-		lockKey:  lockKey,
-		token:    token,
-		local:    local,
+		backend:       b,
+		lockKey:       lockKey,
+		token:         token,
+		local:         local,
 		stopHeartbeat: make(chan struct{}),
 	}
-	go ul.heartbeat()
+	go ul.heartbeat() //nolint:gosec // G118: lock heartbeat must outlive the request ctx; it owns its own stopHeartbeat lifecycle
 	return ul, nil
 }
 

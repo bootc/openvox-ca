@@ -152,8 +152,8 @@ func NewEtcdBackendFromClient(cli *clientv3.Client, keyPrefix string, requestTim
 // physicalKey translates a logical key into its etcd key. Returns an error
 // for unknown logical keys or obviously unsafe components (e.g. "..").
 func (b *EtcdBackend) physicalKey(logical string) (string, error) {
-	if strings.Contains(logical, "..") {
-		return "", fmt.Errorf("invalid key %q: must not contain ..", logical)
+	if err := validateKey(logical); err != nil {
+		return "", err
 	}
 	if sub, ok := etcdLayout[logical]; ok {
 		return b.prefix + "/" + sub, nil
@@ -491,6 +491,6 @@ func decodeBlob(raw []byte) (time.Time, []byte, error) {
 	if len(raw) < 8 {
 		return time.Time{}, nil, fmt.Errorf("blob too short: %d bytes", len(raw))
 	}
-	ns := int64(binary.BigEndian.Uint64(raw[:8]))
+	ns := int64(binary.BigEndian.Uint64(raw[:8])) //nolint:gosec // G115: internal mtime round-trip; the same value was written via int64->uint64 by encodeBlob
 	return time.Unix(0, ns), bytes.Clone(raw[8:]), nil
 }

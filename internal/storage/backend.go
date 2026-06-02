@@ -20,7 +20,9 @@ package storage
 import (
 	"context"
 	"errors"
+	"fmt"
 	"os"
+	"strings"
 	"time"
 )
 
@@ -68,6 +70,23 @@ func CSRKey(subject string) string { return csrPrefix + subject }
 
 // CertKey returns the logical key addressing subject's signed certificate.
 func CertKey(subject string) string { return certPrefix + subject }
+
+// validateKey is the shared defense-in-depth guard every backend runs on a
+// logical key before translating it to a physical key/path. Per-subject keys
+// are built from a subject that ca.ValidateSubject has already vetted, so in
+// normal operation an unsafe key is impossible; this is the storage layer's
+// own boundary check against a caller that constructs a key by another route,
+// keeping the four backends from each duplicating the same "..", empty-key
+// logic. It rejects an empty key and any key containing ".." (path traversal).
+func validateKey(key string) error {
+	if key == "" {
+		return fmt.Errorf("empty key")
+	}
+	if strings.Contains(key, "..") {
+		return fmt.Errorf("invalid key %q: contains '..'", key)
+	}
+	return nil
+}
 
 // KeyPermWarning describes a stored blob whose on-disk permissions are
 // looser than expected. Only the filesystem backend produces warnings.

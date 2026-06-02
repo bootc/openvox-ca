@@ -85,7 +85,7 @@ func newClient() (*Client, error) {
 		// NIST 800-53: SC-8 (Transmission Confidentiality and Integrity)
 		fmt.Fprintln(os.Stderr, "WARNING: --insecure specified; TLS server certificate will NOT be verified (vulnerable to MITM)")
 		slog.Warn("TLS server verification disabled", "server", globalServerURL)
-		tlsCfg.InsecureSkipVerify = true //nolint:gosec
+		tlsCfg.InsecureSkipVerify = true
 	} else {
 		// SECURITY: Neither --ca-cert nor --insecure provided. Use the system
 		// trust store (tlsCfg.RootCAs = nil). If the CA uses a self-signed cert

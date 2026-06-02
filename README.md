@@ -29,7 +29,7 @@ A drop-in replacement for Puppet Server's built-in CA, written in Go. It impleme
 - **Configurable CRL validity:** control how long each published CRL is valid (`crl_validity_days`)
 - **OCSP responder:** built-in RFC 6960 OCSP responder; AIA extension embedded in issued certs when `--ocsp-url` is set; in-memory cache with nonce bypass
 - **Health probes:** `/healthz/live`, `/healthz/ready`, and `/healthz/startup` endpoints for Kubernetes-style liveness/readiness checks
-- **Graceful shutdown:** `SIGTERM`/`SIGINT` drains in-flight requests with a 30-second window before exiting; deferred storage and signer cleanup always runs
+- **Graceful shutdown:** `SIGTERM`/`SIGINT` drains in-flight requests with a configurable window (25s default) before exiting; deferred storage and signer cleanup always runs
 - **FIPS-compatible:** standard library only (`crypto/x509`, `net/http`); no CGO by default; FIPS build available via `GOEXPERIMENT=boringcrypto`
 - **`puppet-ca-ctl`:** operator CLI matching `tvaughan-server-ca` subcommands
 
@@ -120,6 +120,7 @@ logfile: ""
 verbosity: 0
 ocsp_url: ""
 crl_url: ""
+shutdown_timeout_sec: 0  # graceful HTTP-drain budget on SIGTERM; 0 = built-in default (25s)
 # Key generation options (applied only when bootstrapping a new CA or generating leaf certs).
 ca_key_algo: ""       # "rsa" (default) or "ecdsa"
 ca_key_size: 0        # RSA: 2048/3072/4096 (default 4096); ECDSA: 256/384/521 (default 256)
@@ -194,6 +195,7 @@ The CA key passphrase can also be provided via `PUPPET_CA_KEY_PASSPHRASE` (env v
 | `ca_validity_days` | `PUPPET_CA_CA_VALIDITY_DAYS` |
 | `leaf_validity_days` | `PUPPET_CA_LEAF_VALIDITY_DAYS` |
 | `crl_validity_days` | `PUPPET_CA_CRL_VALIDITY_DAYS` |
+| `shutdown_timeout_sec` | `PUPPET_CA_SHUTDOWN_TIMEOUT_SEC` |
 | `etcd_username` | `PUPPET_CA_ETCD_USERNAME` |
 | `etcd_password` | `PUPPET_CA_ETCD_PASSWORD` |
 | `etcd_dial_timeout_sec` | `PUPPET_CA_ETCD_DIAL_TIMEOUT_SEC` |
@@ -235,9 +237,13 @@ When `--tls-cert` and `--tls-key` are both set, the server:
 
 ### Signal handling
 
-On `SIGTERM` or `SIGINT`, the server calls `http.Server.Shutdown()` with a 30-second context so in-flight requests (signing, CRL, OCSP) drain cleanly before the process exits. The main goroutine waits for shutdown to complete before returning, ensuring deferred storage and signer cleanup runs after all connections are done.
+On `SIGTERM` or `SIGINT`, the frontend HTTP server calls `http.Server.Shutdown()` with a drain context (wired via `signal.NotifyContext`) so in-flight requests (signing, CRL, OCSP) drain cleanly before the process exits. The request context is cancelled on signal, and the command returns normally rather than calling `os.Exit` on its error paths, so deferred storage and signer cleanup always runs after all connections are done.
 
-This is particularly important for **Kubernetes rolling updates**: pods receive `SIGTERM` with a configurable grace period (typically 30 seconds). The server will drain in-flight requests within that window and exit cleanly, preventing connection resets during rollouts.
+The drain budget defaults to **25 seconds** and is configurable via `shutdown_timeout_sec` (config file) or `PUPPET_CA_SHUTDOWN_TIMEOUT_SEC` (environment); a non-positive value falls back to the default.
+
+In the default isolated-process deployment, the launcher supervisor forwards the signal to both the signer and frontend children and waits the drain budget **plus a 3-second headroom** (28 seconds by default) before hard-killing any child that has not exited. Because the launcher's timer starts when it forwards `SIGTERM` — strictly before the frontend begins its own `Shutdown()` — this headroom guarantees the supervisor always outlasts the frontend's drain rather than truncating it.
+
+This is particularly important for **Kubernetes rolling updates**: pods receive `SIGTERM` with a configurable grace period (`terminationGracePeriodSeconds`, default 30 seconds). The defaults (25s drain, 28s supervisor) nest under that 30-second grace so the server drains and exits cleanly before the platform `SIGKILL`s the pod. If you raise `shutdown_timeout_sec`, raise `terminationGracePeriodSeconds` to at least the drain budget plus 3 seconds.
 
 ## Autosigning
 

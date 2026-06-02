@@ -253,18 +253,6 @@ func sqliteDSNWithDefaults(dsn string) string {
 	return dsn
 }
 
-// validateKey rejects obviously unsafe logical keys. The key is stored verbatim
-// as the primary key, so this mostly guards against caller bugs.
-func validateKey(key string) error {
-	if key == "" {
-		return fmt.Errorf("empty key")
-	}
-	if strings.Contains(key, "..") {
-		return fmt.Errorf("invalid key %q: must not contain ..", key)
-	}
-	return nil
-}
-
 // callCtx layers the backend's per-call timeout on top of the caller's context.
 // Caller cancellation always wins; with no caller deadline b.timeout bounds the
 // call.
@@ -590,7 +578,7 @@ func (b *SQLBackend) localLockFor(name string) *sync.Mutex {
 func advisoryLockKey(name string) int64 {
 	h := fnv.New64a()
 	_, _ = h.Write([]byte(name))
-	return int64(h.Sum64()) // wraps to a signed bigint; the bit pattern is stable
+	return int64(h.Sum64()) //nolint:gosec // G115: advisory-lock hash; the bit pattern is the identity, not a magnitude, so signed wraparound is intentional and safe
 }
 
 // pgUnlocker releases a PostgreSQL advisory lock on the same connection that
@@ -661,7 +649,7 @@ func (b *SQLBackend) acquireMySQLLock(ctx context.Context, name string) (Unlocke
 // mysqlLockName maps a lock name to a stable, short identifier within MySQL's
 // 64-character GET_LOCK name limit.
 func mysqlLockName(name string) string {
-	return fmt.Sprintf("puppet-ca:%016x", uint64(advisoryLockKey(name)))
+	return fmt.Sprintf("puppet-ca:%016x", uint64(advisoryLockKey(name))) //nolint:gosec // G115: re-reads the same advisory-lock bit pattern as an unsigned value for hex formatting; no magnitude semantics
 }
 
 // mysqlUnlocker releases a GET_LOCK on the same connection that acquired it,
