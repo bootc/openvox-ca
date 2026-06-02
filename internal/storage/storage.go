@@ -201,6 +201,17 @@ func (s *StorageService) AppendInventory(ctx context.Context, entry string) erro
 			// lags the inventory: the next verify would falsely report
 			// tampering. Surface the failure so the caller can react (e.g.
 			// roll back the just-written cert) rather than hiding it.
+			//
+			// We deliberately do not try to make the line-append and the
+			// HMAC-recompute a single atomic unit here (e.g. stage both in
+			// temp files and rename-swap). A rename only narrows, not closes,
+			// the window — a crash between the two renames still leaves the
+			// pair inconsistent — and the structured InventoryStore backends
+			// (see the AppendEntry path above) already advance the integrity
+			// head atomically via an O(1) hash chain, which is the durable
+			// path operators should prefer. For the whole-blob fallback the
+			// honest contract is: report the failure so the caller decides,
+			// not silently leave a mismatch behind.
 			return fmt.Errorf("updating inventory HMAC after append: %w", err)
 		}
 	}

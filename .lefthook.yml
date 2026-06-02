@@ -1,8 +1,9 @@
-# lefthook git-hook configuration for github.com/tvaughan/puppet-ca.
+# lefthook (https://lefthook.dev/) git-hook configuration for github.com/tvaughan/puppet-ca.
 #
-# The repository ships .git/hooks/pre-commit and .git/hooks/pre-push shims that
-# call `lefthook run <hook>`; this file is what those shims drive. Install the
-# hooks (once lefthook is on PATH) with `lefthook install`.
+# This file is the source of truth; the actual .git/hooks/* shims are NOT
+# committed (git never tracks .git/hooks). Run `lefthook install` once (with
+# lefthook on PATH) and it generates the pre-commit/pre-push shims that call
+# `lefthook run <hook>`, which then drives the commands below.
 #
 # Hooks degrade gracefully: if a tool is missing the command prints a SKIP
 # notice and exits 0 rather than blocking the commit/push. Run the same checks

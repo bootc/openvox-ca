@@ -334,7 +334,7 @@ func newRootCmd() *cobra.Command {
 
 			// Launcher mode (default): spawn isolated signer + frontend children.
 			if role == "" && !singleProcess {
-				return runLauncher()
+				return runLauncher(cfg.shutdownDrain())
 			}
 
 			// Frontend mode (role=frontend) or single-process mode: run HTTP server.
@@ -594,7 +594,7 @@ func newRootCmd() *cobra.Command {
 			go func() {
 				<-ctx.Done()
 				slog.Info("Shutting down")
-				shutdownCtx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
+				shutdownCtx, cancel := context.WithTimeout(context.Background(), cfg.shutdownDrain())
 				defer cancel()
 				if err := server.Shutdown(shutdownCtx); err != nil {
 					slog.Warn("HTTP server shutdown error", "error", err)

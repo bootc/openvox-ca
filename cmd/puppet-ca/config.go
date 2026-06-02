@@ -23,6 +23,7 @@ import (
 	"os"
 	"strconv"
 	"strings"
+	"time"
 
 	"github.com/tvaughan/puppet-ca/internal/config"
 	"go.yaml.in/yaml/v3"
@@ -49,6 +50,16 @@ type serverConfig struct {
 	AllowPublicStatus bool   `yaml:"allow_public_status"`
 	OCSPUrl           string `yaml:"ocsp_url"`
 	CRLUrl            string `yaml:"crl_url"`
+
+	// ShutdownTimeoutSec bounds the frontend's graceful HTTP-drain budget on
+	// SIGTERM: the time in-flight requests are given to complete before the
+	// listener is torn down. 0 selects the built-in default (defaultShutdownDrain).
+	// The launcher derives its own, slightly larger, hard-kill deadline from
+	// this value (drain + launcherShutdownHeadroom) so a child is never killed
+	// mid-drain. Operators raising this must also raise their orchestrator's
+	// termination grace period (Kubernetes terminationGracePeriodSeconds
+	// defaults to 30s) or the platform will SIGKILL the pod first.
+	ShutdownTimeoutSec int `yaml:"shutdown_timeout_sec"`
 
 	// Key generation options (apply only when bootstrapping a new CA).
 	CAKeyAlgo   string `yaml:"ca_key_algo"`
@@ -114,6 +125,16 @@ func loadServerConfig(configFile string) (*serverConfig, error) {
 	return cfg, nil
 }
 
+// shutdownDrain resolves the frontend's graceful HTTP-drain budget, falling
+// back to defaultShutdownDrain when the operator has not configured a positive
+// value. See serverConfig.ShutdownTimeoutSec.
+func (c *serverConfig) shutdownDrain() time.Duration {
+	if c.ShutdownTimeoutSec > 0 {
+		return time.Duration(c.ShutdownTimeoutSec) * time.Second
+	}
+	return defaultShutdownDrain
+}
+
 // applyServerEnv overlays PUPPET_CA_* environment variables onto cfg.
 func applyServerEnv(cfg *serverConfig) {
 	if v := os.Getenv("PUPPET_CA_CADIR"); v != "" {
@@ -173,6 +194,11 @@ func applyServerEnv(cfg *serverConfig) {
 	}
 	if v := os.Getenv("PUPPET_CA_CRL_URL"); v != "" {
 		cfg.CRLUrl = v
+	}
+	if v := os.Getenv("PUPPET_CA_SHUTDOWN_TIMEOUT_SEC"); v != "" {
+		if n, err := strconv.Atoi(v); err == nil && n > 0 {
+			cfg.ShutdownTimeoutSec = n
+		}
 	}
 	if v := os.Getenv("PUPPET_CA_CA_KEY_ALGO"); v != "" {
 		cfg.CAKeyAlgo = v

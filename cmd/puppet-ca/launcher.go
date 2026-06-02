@@ -32,13 +32,19 @@ import (
 )
 
 const (
-	// gracefulShutdownTimeout bounds how long the launcher waits for both
-	// children to drain after forwarding SIGTERM before hard-killing them. It
-	// matches the frontend's own http.Server.Shutdown budget so the documented
-	// ~30s drain (and Kubernetes' default pod grace period) is honoured
-	// end-to-end in the default isolated-process deployment, not silently
-	// truncated by the supervisor.
-	gracefulShutdownTimeout = 30 * time.Second
+	// defaultShutdownDrain is the frontend's graceful HTTP-drain budget when the
+	// operator has not set shutdown_timeout_sec / PUPPET_CA_SHUTDOWN_TIMEOUT_SEC.
+	// 25s is chosen so the launcher's derived hard-kill deadline (drain +
+	// launcherShutdownHeadroom = 28s) stays under Kubernetes' 30s default
+	// terminationGracePeriodSeconds, leaving the platform headroom before it
+	// SIGKILLs the pod.
+	defaultShutdownDrain = 25 * time.Second
+	// launcherShutdownHeadroom is added to the frontend's drain budget to form
+	// the launcher's hard-kill deadline. Because the launcher's timer starts
+	// when it forwards SIGTERM — strictly before the frontend begins its own
+	// Shutdown — this headroom guarantees the launcher always outlasts the
+	// frontend's drain so the supervisor can never truncate it.
+	launcherShutdownHeadroom = 3 * time.Second
 	// crashShutdownTimeout bounds teardown of the surviving child when the
 	// other has already exited unexpectedly. This is a failure path, not a
 	// graceful drain, so it uses a shorter budget.
@@ -57,8 +63,16 @@ const (
 // SECURITY: The socketpair is created before either child is spawned and
 // passed via inherited file descriptors (fd 3). There is no filesystem path
 // for the socket; only the two child processes hold endpoints.
+//
+// drain is the frontend's resolved graceful HTTP-drain budget (see
+// serverConfig.shutdownDrain). The launcher waits drain+launcherShutdownHeadroom
+// for both children to exit after forwarding SIGTERM before hard-killing them,
+// so the frontend always gets its full drain even though the launcher's timer
+// starts first.
 // NIST 800-53: SC-3 (Security Function Isolation), SC-4 (Information in Shared System Resources)
-func runLauncher() error {
+func runLauncher(drain time.Duration) error {
+	gracefulShutdownTimeout := drain + launcherShutdownHeadroom
+
 	// Create the socketpair for signer ↔ frontend communication.
 	signerSock, frontendSock, err := signer.Socketpair()
 	if err != nil {

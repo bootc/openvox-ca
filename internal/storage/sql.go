@@ -253,18 +253,6 @@ func sqliteDSNWithDefaults(dsn string) string {
 	return dsn
 }
 
-// validateKey rejects obviously unsafe logical keys. The key is stored verbatim
-// as the primary key, so this mostly guards against caller bugs.
-func validateKey(key string) error {
-	if key == "" {
-		return fmt.Errorf("empty key")
-	}
-	if strings.Contains(key, "..") {
-		return fmt.Errorf("invalid key %q: contains '..'", key)
-	}
-	return nil
-}
-
 // callCtx layers the backend's per-call timeout on top of the caller's context.
 // Caller cancellation always wins; with no caller deadline b.timeout bounds the
 // call.

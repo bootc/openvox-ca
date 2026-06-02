@@ -249,19 +249,52 @@ func (Build) Dist() error {
 
 // -- test:* --------------------------------------------------------------------
 
+// unitTestExcludes lists packages omitted from the unit-test run. Keep this set
+// as small as possible: every entry is a package that runs NO coverage in CI.
+//
+//	internal/testutil — test helpers only, exercised transitively by the
+//	                     packages that import them.
+var unitTestExcludes = map[string]bool{
+	"github.com/tvaughan/puppet-ca/internal/testutil": true,
+}
+
+// unitTestPackages discovers the packages to unit-test via `go list ./...`
+// rather than a hand-maintained list, then drops the explicit excludes above.
+// A hand-maintained list silently drops any newly added package from CI (this
+// is how internal/signer's tests went unrun); discovery makes the default
+// "covered" so a new package has to be deliberately excluded to escape the gate.
+func unitTestPackages() ([]string, error) {
+	out, err := exec.Command("go", "list", "./...").Output()
+	if err != nil {
+		if ee, ok := err.(*exec.ExitError); ok {
+			return nil, fmt.Errorf("listing packages: %w: %s", err, ee.Stderr)
+		}
+		return nil, fmt.Errorf("listing packages: %w", err)
+	}
+
+	var pkgs []string
+	for _, line := range strings.Split(strings.TrimSpace(string(out)), "\n") {
+		pkg := strings.TrimSpace(line)
+		if pkg == "" || unitTestExcludes[pkg] {
+			continue
+		}
+		pkgs = append(pkgs, pkg)
+	}
+	if len(pkgs) == 0 {
+		return nil, fmt.Errorf("go list ./... returned no testable packages")
+	}
+	return pkgs, nil
+}
+
 // Unit runs the unit test suite with coverage, piping output through tparse
-// for a colorful per-package summary table.
-// internal/testutil is excluded (test helpers verified transitively).
+// for a colorful per-package summary table. The package set is discovered
+// dynamically (see unitTestPackages); only unitTestExcludes is omitted.
 func (Test) Unit() error {
 	fmt.Println("Running unit tests...")
 
-	pkgs := []string{
-		"./cmd/puppet-ca/...",
-		"./cmd/puppet-ca-ctl/...",
-		"./internal/api/...",
-		"./internal/ca/...",
-		"./internal/signer/...",
-		"./internal/storage/...",
+	pkgs, err := unitTestPackages()
+	if err != nil {
+		return err
 	}
 
 	testArgs := append([]string{"test", "-json", "-cover", "-coverprofile=coverage.out"}, pkgs...)

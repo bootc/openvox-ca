@@ -20,6 +20,7 @@ import (
 	"os"
 	"path/filepath"
 	"testing"
+	"time"
 )
 
 // serverEnvVars is the full list of env vars read by applyServerEnv.
@@ -50,6 +51,7 @@ var serverEnvVars = []string{
 	"PUPPET_CA_CA_PATH_LENGTH",
 	"PUPPET_CA_CA_VALIDITY_DAYS",
 	"PUPPET_CA_LEAF_VALIDITY_DAYS",
+	"PUPPET_CA_SHUTDOWN_TIMEOUT_SEC",
 }
 
 // clearServerEnv unsets all PUPPET_CA_* vars and restores them after the test.
@@ -146,6 +148,49 @@ func TestLoadServerConfigDefaults(t *testing.T) {
 	}
 	if cfg.CAPathLength != -1 {
 		t.Errorf("CAPathLength = %d; want -1 (unconstrained)", cfg.CAPathLength)
+	}
+}
+
+// --- shutdownDrain ---
+
+func TestShutdownDrainDefault(t *testing.T) {
+	clearServerEnv(t)
+
+	cfg, err := loadServerConfig("")
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if got := cfg.shutdownDrain(); got != defaultShutdownDrain {
+		t.Errorf("shutdownDrain() = %v; want default %v", got, defaultShutdownDrain)
+	}
+}
+
+func TestShutdownDrainEnvOverride(t *testing.T) {
+	clearServerEnv(t)
+	t.Setenv("PUPPET_CA_SHUTDOWN_TIMEOUT_SEC", "45")
+
+	cfg, err := loadServerConfig("")
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if got, want := cfg.shutdownDrain(), 45*time.Second; got != want {
+		t.Errorf("shutdownDrain() = %v; want %v", got, want)
+	}
+}
+
+// A non-positive value falls back to the default rather than disabling the
+// drain budget entirely (a 0s Shutdown context would abort in-flight requests
+// immediately).
+func TestShutdownDrainRejectsNonPositive(t *testing.T) {
+	clearServerEnv(t)
+	t.Setenv("PUPPET_CA_SHUTDOWN_TIMEOUT_SEC", "0")
+
+	cfg, err := loadServerConfig("")
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if got := cfg.shutdownDrain(); got != defaultShutdownDrain {
+		t.Errorf("shutdownDrain() with 0 = %v; want default %v", got, defaultShutdownDrain)
 	}
 }
 
@@ -369,6 +414,11 @@ func TestApplyServerEnvEachVar(t *testing.T) {
 			name: "OCSP_URL", envKey: "PUPPET_CA_OCSP_URL", envVal: "http://ocsp.example.com",
 			check: func(c *serverConfig) bool { return c.OCSPUrl == "http://ocsp.example.com" },
 			desc:  "OCSPUrl",
+		},
+		{
+			name: "SHUTDOWN_TIMEOUT_SEC", envKey: "PUPPET_CA_SHUTDOWN_TIMEOUT_SEC", envVal: "45",
+			check: func(c *serverConfig) bool { return c.ShutdownTimeoutSec == 45 },
+			desc:  "ShutdownTimeoutSec",
 		},
 		{
 			name: "CA_KEY_ALGO", envKey: "PUPPET_CA_CA_KEY_ALGO", envVal: "ecdsa",

@@ -807,7 +807,8 @@ var _ = Describe("ValidateSubject", func() {
 		Entry("with interior hyphens", "a-b"),
 		Entry("with hyphens", "my-node-01"),
 		Entry("with underscores", "my_node"),
-		Entry("starts with digit", "node1"),
+		Entry("starts with digit", "1node"),
+		Entry("ends with digit", "node1"),
 		Entry("starts with underscore", "_node"),
 		Entry("starts with dot", ".node"),
 	)
@@ -818,6 +819,7 @@ var _ = Describe("ValidateSubject", func() {
 		Entry("contains double-dot", "a..b"),
 		Entry("double-dot only", ".."),
 		Entry("uppercase letters", "BadNode"),
+		Entry("contains space", "bad name"),
 		Entry("empty string", ""),
 		// SECURITY: a leading '-' could be misread as a flag by an operator's
 		// autosign script, enabling argv flag injection. ValidateSubject must

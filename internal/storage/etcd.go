@@ -152,8 +152,8 @@ func NewEtcdBackendFromClient(cli *clientv3.Client, keyPrefix string, requestTim
 // physicalKey translates a logical key into its etcd key. Returns an error
 // for unknown logical keys or obviously unsafe components (e.g. "..").
 func (b *EtcdBackend) physicalKey(logical string) (string, error) {
-	if strings.Contains(logical, "..") {
-		return "", fmt.Errorf("invalid key %q: contains '..'", logical)
+	if err := validateKey(logical); err != nil {
+		return "", err
 	}
 	if sub, ok := etcdLayout[logical]; ok {
 		return b.prefix + "/" + sub, nil

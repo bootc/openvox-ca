@@ -118,12 +118,28 @@ func (c *CA) evictRevokedLocked(ctx context.Context, subject string) error {
 // subjectRegex forbids a leading '-' so a certname can never be misread as a
 // flag by an operator's autosign script (argv flag injection); the first
 // character must be a letter, digit, underscore, or dot.
+//
+// COMPATIBILITY: this is deliberately broader than a strict RFC 1123 DNS
+// hostname. Puppet certnames are usually FQDNs, but Puppet permits operators
+// to configure an arbitrary certname (puppet.conf `certname`), and underscores
+// in particular appear in real-world node names even though they are not legal
+// DNS labels. Tightening to strict RFC 1123 (rejecting '_', a leading '.', a
+// trailing '-', labels >63 chars, names >253 chars) would reject certnames that
+// existing deployments may already have signed, so it is held back pending a
+// deliberate compatibility decision rather than folded into this hardening pass.
+//
+// The set permitted here is still path-safe: combined with the explicit ".."
+// rejection in ValidateSubject below, a subject can never escape its storage
+// directory or be misread as a CLI flag. A leading '.' is permitted by the
+// pattern (so an operator-chosen ".name" works) but only ever yields a dotfile
+// within the CA's own request/signed directories, never a traversal.
 var subjectRegex = regexp.MustCompile(`^[a-z0-9_.][a-z0-9._-]*$`)
 
 // ValidateSubject returns an error if subject contains unsafe characters.
 // It is the single source of truth for subject name validation used by both
 // the CA layer and the API layer. Rejects path traversal (e.g. "..") and
-// any characters outside the safe set.
+// any characters outside the safe set. See subjectRegex for the deliberate
+// compatibility tradeoff against strict RFC 1123 hostnames.
 // NIST 800-53: SI-10 (Information Input Validation)
 func ValidateSubject(subject string) error {
 	if !subjectRegex.MatchString(subject) || strings.Contains(subject, "..") {

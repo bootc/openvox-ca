@@ -254,8 +254,8 @@ func newRedisBackendFromClient(client redis.UniversalClient, owned bool, prefix 
 // physicalKey translates a logical key into its Redis key. Returns an error
 // for unknown logical keys or obviously unsafe components (e.g. "..").
 func (b *RedisBackend) physicalKey(logical string) (string, error) {
-	if strings.Contains(logical, "..") {
-		return "", fmt.Errorf("invalid key %q: contains '..'", logical)
+	if err := validateKey(logical); err != nil {
+		return "", err
 	}
 	if sub, ok := redisLayout[logical]; ok {
 		return b.prefix + ":" + sub, nil
