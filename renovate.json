@@ -5,5 +5,7 @@
     "config:best-practices"
   ],
 
+  "forkProcessing": "enabled",
+
   "rangeStrategy": "pin"
 }
