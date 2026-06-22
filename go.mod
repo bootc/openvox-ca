@@ -12,7 +12,7 @@ require (
 	github.com/onsi/gomega v1.42.0
 	github.com/prometheus/client_golang v1.23.2
 	github.com/prometheus/client_model v0.6.2
-	github.com/redis/go-redis/v9 v9.20.1
+	github.com/redis/go-redis/v9 v9.21.0
 	github.com/spf13/cobra v1.10.2
 	github.com/uptrace/bun v1.2.18
 	github.com/uptrace/bun/dialect/mysqldialect v1.2.18
