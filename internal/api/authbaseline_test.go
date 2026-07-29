@@ -51,11 +51,15 @@ import (
 // *before* those changes, so it says what the behaviour was rather than what
 // someone later believed it should be.
 //
-// Every row carries an expectChanged flag, currently false everywhere. A change
-// that intends to alter a row flips the flag in the same commit; a change that
-// alters a row without flipping it fails here. That distinction — deliberate
+// Rows are always asserted. A change that intends to alter one updates the
+// recorded outcome and records why in changedBy, in the same commit; a change
+// that alters one without doing so fails here. That distinction — deliberate
 // versus accidental — is the whole point, and a blanket "nothing changes"
 // assertion could not express it.
+//
+// changedBy is documentation, not an exemption. An earlier draft skipped
+// assertion for flagged rows, which quietly left exactly the rows under active
+// change as the only untested ones.
 
 // clientClass is one kind of client certificate the middleware might see.
 type clientClass struct {
@@ -71,9 +75,10 @@ type routeCase struct {
 	path   string
 	// denied maps clientClass.name to whether the middleware rejects it.
 	denied map[string]bool
-	// expectChanged marks rows a later change is permitted to alter. Flip it in
-	// the same commit that changes the behaviour, never before and never after.
-	expectChanged bool
+	// changedBy names the change that last altered this row's outcomes, empty
+	// for rows still at their original recorded values. Always asserted either
+	// way; this only says why a value differs from the first recording.
+	changedBy string
 }
 
 // deniedStatus reports whether code is the middleware's rejection.
@@ -175,15 +180,17 @@ var _ = Describe("Authorisation baseline", Ordered, func() {
 			},
 		},
 		{
-			// Any certificate that chains to our trust anchor is admitted, with
-			// no check that the subject matches the caller. Scoped to our own CA
-			// only because ours is the only issuer configured today.
-			name: "any-client: read a certificate status", method: "GET", path: "/certificate_status/somenode",
+			// Admin-only, matching Puppet Server's shipped auth.conf. An
+			// ordinary agent certificate no longer reads statuses; the routes
+			// back are the CN allowlist and pp_cli_auth, exactly as upstream.
+			name: "admin: read a certificate status", method: "GET", path: "/certificate_status/somenode",
 			denied: map[string]bool{
-				"none": true, "own-ca-plain": false, "own-ca-allowlisted": false,
+				"none": true, "own-ca-plain": true, "own-ca-allowlisted": false,
 				"own-ca-pp-cli-auth": false, "own-ca-expired": true,
 				"own-ca-revoked": true, "foreign-ca": true,
 			},
+			changedBy: "certificate_status moved from any-client to admin-only for upstream parity; " +
+				"own-ca-plain was previously allowed",
 		},
 		{
 			name: "any-client: renew own certificate", method: "POST", path: "/certificate_renewal",
@@ -253,15 +260,10 @@ var _ = Describe("Authorisation baseline", Ordered, func() {
 				mux.ServeHTTP(rec, req)
 
 				got := deniedStatus(rec.Code)
-				if route.expectChanged {
-					// A row flagged as intentionally changed is exercised but not
-					// asserted here; the commit that flips the flag owns the new
-					// expectation and asserts it directly.
-					continue
-				}
 				Expect(got).To(Equal(want),
 					"route %q, client %q: recorded denied=%v but got denied=%v (HTTP %d).\n"+
-						"If this change is intended, set expectChanged on the row in the same commit.",
+						"If this change is intended, update the recorded outcome and set changedBy "+
+						"on the row in the same commit.",
 					route.name, class.name, want, got, rec.Code)
 			}
 		}
