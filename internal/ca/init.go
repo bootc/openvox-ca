@@ -24,7 +24,6 @@ import (
 	"crypto"
 	"crypto/rand"
 	"crypto/x509"
-	"crypto/x509/pkix"
 	"encoding/pem"
 	"errors"
 	"fmt"
@@ -108,18 +107,33 @@ func (c *CA) Init(ctx context.Context) error {
 		if errKey != nil {
 			return fmt.Errorf("checking CA key: %w", errKey)
 		}
-		// Fail closed when a KeyProvider already holds a key but the CA
-		// certificate is missing (the DR case: storage/cert wiped while the
-		// provider's key persists). bootstrapCA would call KeyProvider.Generate
-		// on that populated slot, and a provider implementing Generate as
-		// create-or-rotate would silently rotate the live CA key — destroying
-		// the ability to verify every previously issued certificate. Refuse
-		// with guidance rather than regenerate. (Only for KeyProvider mode:
-		// the local-file bootstrap path keeps its long-standing behaviour.)
-		if c.KeyProvider != nil && !hasCert && hasKey {
-			return fmt.Errorf("CA key provider already holds a key but the CA certificate is missing from storage: "+
-				"refusing to bootstrap, as that would rotate the existing CA key and invalidate all previously issued "+
-				"certificates. Restore the CA certificate, or remove the orphaned provider key before bootstrapping: %w", loadErr)
+		// Fail closed when a CA key already exists but the certificate does
+		// not. Two situations produce that state and bootstrapping ruins both:
+		//
+		//   - Disaster recovery: storage or the certificate was wiped while the
+		//     key persists. bootstrapCA would call KeyProvider.Generate on a
+		//     populated slot, and a provider implementing that as
+		//     create-or-rotate would silently rotate the live CA key, destroying
+		//     the ability to verify every previously issued certificate.
+		//   - An outstanding external signing request from
+		//     "openvox-ca csr --create-key": regenerating destroys the key the
+		//     parent CA is in the middle of certifying, and the signed chain
+		//     that comes back can then never be imported.
+		//
+		// The local-key path is included deliberately. It used to bootstrap over
+		// an orphaned key, which is harmless after a half-finished bootstrap and
+		// unrecoverable mid-request — and the two are indistinguishable from
+		// here. The harmless case costs the operator one deletion.
+		if !hasCert && hasKey {
+			where := "in storage"
+			if c.KeyProvider != nil {
+				where = "at the configured key provider"
+			}
+			return fmt.Errorf("a CA key already exists %s but the CA certificate is missing: refusing to "+
+				"bootstrap, as that would replace the key and invalidate every certificate issued under it. "+
+				"If a certificate signing request is outstanding, install the signed chain with "+
+				"'openvox-ca import-ca-cert'; otherwise restore the CA certificate, or remove the orphaned "+
+				"key to bootstrap afresh: %w", where, loadErr)
 		}
 		if !hasCert || !hasKey {
 			slog.Info("No existing CA found, bootstrapping new CA")
@@ -184,7 +198,7 @@ func (c *CA) seedSupportingState(ctx context.Context) error {
 		crlTemplate := &x509.RevocationList{
 			Number:     big.NewInt(1),
 			ThisUpdate: now,
-			NextUpdate: now.Add(c.crlValidity()),
+			NextUpdate: now.Add(c.CRLValidityDuration()),
 		}
 		crlBytes, err := x509.CreateRevocationList(rand.Reader, crlTemplate, c.CACert, c.CAKey)
 		if err != nil {
@@ -355,25 +369,10 @@ func (c *CA) bootstrapCA(ctx context.Context) error {
 		return fmt.Errorf("failed to compute SubjectKeyIdentifier: %w", err)
 	}
 
-	// Build subject DN.
-	subject := pkix.Name{
-		CommonName: "Puppet CA: " + hostname,
-	}
-	if c.CASubject.Org != "" {
-		subject.Organization = []string{c.CASubject.Org}
-	}
-	if c.CASubject.OrgUnit != "" {
-		subject.OrganizationalUnit = []string{c.CASubject.OrgUnit}
-	}
-	if c.CASubject.Country != "" {
-		subject.Country = []string{c.CASubject.Country}
-	}
-	if c.CASubject.Locality != "" {
-		subject.Locality = []string{c.CASubject.Locality}
-	}
-	if c.CASubject.Province != "" {
-		subject.Province = []string{c.CASubject.Province}
-	}
+	// Build subject DN. Shared with the CSR path (see CASubjectName) so a
+	// self-signed bootstrap and a request sent to an external parent can never
+	// disagree about this CA's own name.
+	subject := CASubjectName(hostname, c.CASubject)
 
 	now := time.Now().UTC()
 
@@ -460,7 +459,7 @@ func (c *CA) bootstrapCA(ctx context.Context) error {
 	crlTemplate := &x509.RevocationList{
 		Number:     big.NewInt(1),
 		ThisUpdate: now,
-		NextUpdate: now.Add(c.crlValidity()),
+		NextUpdate: now.Add(c.CRLValidityDuration()),
 	}
 	crlBytes, err := x509.CreateRevocationList(rand.Reader, crlTemplate, c.CACert, c.CAKey)
 	if err != nil {

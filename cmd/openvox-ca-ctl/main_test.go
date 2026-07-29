@@ -77,3 +77,22 @@ var _ = Describe("Root command", func() {
 		Expect(flag.Name).To(Equal("verbose"))
 	})
 })
+
+var _ = Describe("import subcommand key requirement", func() {
+	It("points at openvox-ca import-ca-cert when no key file can exist", func() {
+		// A provider-held key has no PEM blob to pass. Failing with cobra's
+		// generic "required flag not set" would leave an operator looking for a
+		// file that will never exist, so the error names the command that can
+		// actually do the job.
+		// Exercised through the subcommand constructor rather than the root:
+		// the root is assembled inline in main() on this branch, and extracting
+		// it here would duplicate a refactor made elsewhere.
+		cmd := newImportCmd()
+		var out, errOut bytes.Buffer
+		cmd.SetOut(&out)
+		cmd.SetErr(&errOut)
+		cmd.SetArgs([]string{"--cadir", GinkgoT().TempDir(), "--cert-bundle", "/dev/null"})
+		err := cmd.Execute()
+		Expect(err).To(MatchError(ContainSubstring("openvox-ca import-ca-cert")))
+	})
+})
