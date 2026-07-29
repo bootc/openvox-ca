@@ -95,6 +95,8 @@ are not covered: this CA cannot re-sign them, so their expiry is not something a
 refresh can fix and not something these series track. Re-import the chain before
 an ancestor's own `nextUpdate` lapses.
 | `puppetca_crl_update_failures_total` | Counter of failures to amend the CRL — a revocation that could not be recorded, or a CRL that could not be re-signed or written (across the revoke, cleanup, reissue and refresh paths). A rising value means the CRL is not being maintained; for revocations it means a superseded certificate may still be a valid credential. Resets to `0` on process restart. |
+| `puppetca_serving_cert_issued_total` | Counter of serving certificates this process has issued to itself (`tls_self_provision`). A sustained rate rather than an occasional increment means replicas disagree about which CA certificate is current, each reissuing over the other; a fleet restart resolves it. Resets to `0` on process restart. |
+| `puppetca_serving_cert_renewal_failures_total` | Counter of maintenance passes that failed to renew the serving certificate. The existing certificate stays in place and the next cycle retries. **Alert on this**: a persistent rise is invisible until the certificate expires, and it breaks the bound `tls_self_provision_revoke_after_sec` relies on. Resets to `0` on process restart. |
 
 ### Leaf certificates
 

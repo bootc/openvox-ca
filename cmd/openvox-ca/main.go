@@ -34,7 +34,6 @@ import (
 	"os/exec"
 	"os/signal"
 	"path/filepath"
-	"strings"
 	"syscall"
 	"time"
 
@@ -85,6 +84,46 @@ func setupLogger(cfg *serverConfig) (*os.File, error) {
 // command via config.StorageConfig.ToBackendSpec.
 func buildBackendSpec(cfg *serverConfig, absCADir string) (storage.BackendSpec, error) {
 	return cfg.StorageConfig.ToBackendSpec(absCADir)
+}
+
+// buildAuthConfig assembles the API's authorisation configuration: the admin CN
+// allow list drawn from puppet_server and puppet_server_file, and the flags
+// governing pp_cli_auth and public status.
+//
+// Extracted from the startup path so that what the middleware is configured
+// with is separable from when it is installed. Those are different decisions —
+// the caller decides whether to authorise at all, this decides how — and having
+// them in one inline block is what made it easy to add a TLS mode that silently
+// skipped the first.
+func buildAuthConfig(cfg *serverConfig, myCA *ca.CA) (*api.AuthConfig, error) {
+	allowList := map[string]bool{}
+	for _, cn := range splitAndTrim(cfg.PuppetServer, ",") {
+		allowList[cn] = true
+	}
+	fileCNs, err := loadPuppetServerFile(cfg.PuppetServerFile)
+	if err != nil {
+		return nil, err
+	}
+	for _, cn := range fileCNs {
+		allowList[cn] = true
+	}
+
+	if !cfg.NoPpCliAuth {
+		// SECURITY: Inform the operator that pp_cli_auth OID grants admin access.
+		// Any certificate carrying this extension with value "true" will be treated
+		// as an admin. Use --no-pp-cli-auth to restrict admin access to the CN allow list only.
+		// NIST 800-53: AC-6 (Least Privilege)
+		slog.Info("pp_cli_auth extension is enabled as an admin credential (default). " +
+			"Any certificate carrying pp_cli_auth=true will have admin access. " +
+			"Use --no-pp-cli-auth to disable this and require explicit CN allow list.")
+	}
+
+	return &api.AuthConfig{
+		CACert:            myCA.CACert,
+		AllowList:         allowList,
+		NoPpCliAuth:       cfg.NoPpCliAuth,
+		AllowPublicStatus: cfg.AllowPublicStatus,
+	}, nil
 }
 
 // applyCAConfig applies the common CA configuration fields from serverConfig
@@ -185,6 +224,8 @@ func newRootCmd() *cobra.Command {
 		logFile                 string
 		tlsCert                 string
 		tlsKey                  string
+		tlsSelfProvision        bool
+		tlsSelfProvisionNames   []string
 		puppetServers           string
 		puppetServerFile        string
 		noPpCliAuth             bool
@@ -262,6 +303,12 @@ func newRootCmd() *cobra.Command {
 			}
 			if cmd.Flags().Changed("tls-key") {
 				cfg.TLSKey = tlsKey
+			}
+			if cmd.Flags().Changed("tls-self-provision") {
+				cfg.TLSSelfProvision = tlsSelfProvision
+			}
+			if cmd.Flags().Changed("tls-self-provision-names") {
+				cfg.TLSSelfProvisionNames = tlsSelfProvisionNames
 			}
 			if cmd.Flags().Changed("puppet-server") {
 				cfg.PuppetServer = puppetServers
@@ -407,14 +454,18 @@ func newRootCmd() *cobra.Command {
 			// SECURITY: TLS enforcement: plain HTTP over a non-loopback
 			// interface lets any on-path host inject forged certificates.
 			// Refuse to start unless:
-			//   (a) TLS is configured (--tls-cert + --tls-key), or
+			//   (a) TLS is configured (--tls-cert + --tls-key, or
+			//       tls_self_provision), or
 			//   (b) the bind address is loopback-only, or
 			//   (c) the operator explicitly opts out with --no-tls-required.
 			// NIST 800-53: SC-8 (Transmission Confidentiality and Integrity), SC-23 (Session Authenticity)
-			tlsConfigured := cfg.TLSCert != "" && cfg.TLSKey != ""
+			if err := cfg.validateTLS(); err != nil {
+				return err
+			}
+			tlsConfigured := cfg.tlsEnabled()
 			if !tlsConfigured {
 				if !isLoopback(cfg.Host) && !cfg.NoTLSRequired {
-					return errors.New("refusing to start: plain HTTP on a non-loopback address is vulnerable to certificate injection; enable TLS (--tls-cert/--tls-key), restrict to loopback (--host 127.0.0.1), or set --no-tls-required")
+					return errors.New("refusing to start: plain HTTP on a non-loopback address is vulnerable to certificate injection; enable TLS (--tls-cert/--tls-key), let the CA issue its own certificate (--tls-self-provision), restrict to loopback (--host 127.0.0.1), or set --no-tls-required")
 				}
 				if cfg.NoTLSRequired && !isLoopback(cfg.Host) {
 					slog.Warn("TLS is not configured on a non-loopback address; " +
@@ -536,6 +587,20 @@ func newRootCmd() *cobra.Command {
 				return fmt.Errorf("failed to initialise CA: %w", err)
 			}
 
+			// Reconcile pending serving-certificate revocations before the
+			// listener opens, and deliberately without regard to whether
+			// tls_self_provision is on.
+			//
+			// Startup is the only moment a process reliably observes a
+			// configuration change, and with self-provisioning switched off no
+			// periodic task runs at all — so entries a previous configuration
+			// recorded would otherwise sit in storage indefinitely and fire much
+			// later if the delay were re-enabled. A failure here is logged and
+			// not fatal: it is bookkeeping, and the CA can still serve.
+			if err := myCA.ReconcileSuperseded(ctx, cfg.servingRevokeAfter()); err != nil {
+				slog.Warn("Could not reconcile superseded serving certificates at startup", "error", err)
+			}
+
 			// SECURITY: Warn if any private key files have overly permissive modes.
 			// The server does not modify existing file permissions; operators should
 			// fix these manually (e.g. chmod 0640 or stricter).
@@ -557,37 +622,15 @@ func newRootCmd() *cobra.Command {
 			srv.PlainHTTP = !tlsConfigured && !isLoopback(cfg.Host) && !cfg.NoTLSRequired
 			srv.PuppetDateTimeFormat = cfg.PuppetDateTimeFormat
 
-			// Wire mTLS auth middleware when TLS is configured.
-			if cfg.TLSCert != "" && cfg.TLSKey != "" {
-				allowList := map[string]bool{}
-				for _, cn := range strings.Split(cfg.PuppetServer, ",") {
-					cn = strings.TrimSpace(cn)
-					if cn != "" {
-						allowList[cn] = true
-					}
-				}
-				fileCNs, err := loadPuppetServerFile(cfg.PuppetServerFile)
+			// Wire mTLS auth middleware when TLS is configured. Leaving
+			// srv.AuthConfig nil disables the authorisation middleware for every
+			// route, so this branch and cfg.tlsEnabled() must never disagree.
+			if tlsConfigured {
+				authCfg, err := buildAuthConfig(cfg, myCA)
 				if err != nil {
 					return err
 				}
-				for _, cn := range fileCNs {
-					allowList[cn] = true
-				}
-				srv.AuthConfig = &api.AuthConfig{
-					CACert:            myCA.CACert,
-					AllowList:         allowList,
-					NoPpCliAuth:       cfg.NoPpCliAuth,
-					AllowPublicStatus: cfg.AllowPublicStatus,
-				}
-				if !cfg.NoPpCliAuth {
-					// SECURITY: Inform the operator that pp_cli_auth OID grants admin access.
-					// Any certificate carrying this extension with value "true" will be treated
-					// as an admin. Use --no-pp-cli-auth to restrict admin access to the CN allow list only.
-					// NIST 800-53: AC-6 (Least Privilege)
-					slog.Info("pp_cli_auth extension is enabled as an admin credential (default). " +
-						"Any certificate carrying pp_cli_auth=true will have admin access. " +
-						"Use --no-pp-cli-auth to disable this and require explicit CN allow list.")
-				}
+				srv.AuthConfig = authCfg
 			}
 
 			addr := fmt.Sprintf("%s:%d", cfg.Host, cfg.Port)
@@ -599,6 +642,12 @@ func newRootCmd() *cobra.Command {
 			// request metrics. When enabled, the API handler is instrumented so
 			// puppetca_http_* counts requests to the Puppet API, while /metrics is
 			// served on a separate listener (see metricsServer below).
+			// Tasks for the shared maintenance loop. Collected as the features
+			// that need them are wired up, and the loop is started below only if
+			// something registered. Each task is gated by its own feature, never
+			// by another's — see runMaintenance.
+			var maintenanceTasks []maintenanceTask
+
 			handler := srv.Routes()
 			var exporter *metrics.Exporter
 			if cfg.MetricsListen != "" {
@@ -631,10 +680,26 @@ func newRootCmd() *cobra.Command {
 				}()
 			}
 
-			if cfg.TLSCert != "" && cfg.TLSKey != "" {
-				serverCert, err := tls.LoadX509KeyPair(cfg.TLSCert, cfg.TLSKey)
-				if err != nil {
-					return fmt.Errorf("failed to load TLS cert/key (cert %s, key %s): %w", cfg.TLSCert, cfg.TLSKey, err)
+			if tlsConfigured {
+				// The serving certificate comes either from disk or from the CA
+				// itself. Both routes end at the same holder, so GetCertificate
+				// is the only path the TLS stack ever takes and self-provisioned
+				// rotation needs no special case in the handshake.
+				servingCerts := &servingCertHolder{}
+				if cfg.TLSSelfProvision {
+					// Fatal on failure: a server with no serving certificate
+					// cannot serve, and failing fast beats a listener that never
+					// opens. On the maintenance cycle the same failure is not
+					// fatal, because there is a certificate already in place.
+					if err := ensureServingCert(ctx, myCA, cfg, servingCerts); err != nil {
+						return err
+					}
+				} else {
+					serverCert, err := tls.LoadX509KeyPair(cfg.TLSCert, cfg.TLSKey)
+					if err != nil {
+						return fmt.Errorf("failed to load TLS cert/key (cert %s, key %s): %w", cfg.TLSCert, cfg.TLSKey, err)
+					}
+					servingCerts.Set(&serverCert)
 				}
 
 				caCertPEM, err := myCA.Storage.GetCACert(ctx)
@@ -655,14 +720,25 @@ func newRootCmd() *cobra.Command {
 				// per-tier. MinVersion TLS 1.2 blocks legacy protocol downgrades.
 				// NIST 800-53: SC-8 (Transmission Confidentiality and Integrity),
 				//              SC-23 (Session Authenticity), IA-3 (Device Identification)
+				//
+				// GetCertificate rather than Certificates: it is consulted per
+				// handshake, so a renewed serving certificate takes effect on the
+				// next connection with no restart.
 				server.TLSConfig = &tls.Config{
-					Certificates: []tls.Certificate{serverCert},
-					ClientCAs:    caPool,
-					ClientAuth:   tls.RequestClientCert,
-					MinVersion:   tls.VersionTLS12,
+					GetCertificate: servingCerts.GetCertificate,
+					ClientCAs:      caPool,
+					ClientAuth:     tls.RequestClientCert,
+					MinVersion:     tls.VersionTLS12,
 				}
 
-				slog.Info("TLS enabled", "cert", cfg.TLSCert)
+				if cfg.TLSSelfProvision {
+					slog.Info("TLS enabled", "certificate", "self-provisioned", "subject", cfg.Hostname)
+					maintenanceTasks = append(maintenanceTasks,
+						servingRenewalTask(myCA, cfg, servingCerts),
+						supersededRevocationTask(myCA, cfg))
+				} else {
+					slog.Info("TLS enabled", "cert", cfg.TLSCert)
+				}
 			}
 
 			// Background CRL refresh: keeps the CRL's NextUpdate from lapsing on a
@@ -676,6 +752,11 @@ func newRootCmd() *cobra.Command {
 				go runCRLRefresher(ctx, myCA, cfg.crlRefreshInterval(), refreshBefore)
 			} else {
 				slog.Info("CRL auto-refresh disabled by configuration")
+			}
+
+			// Shared maintenance loop. Bound to ctx so it stops on shutdown.
+			if len(maintenanceTasks) > 0 {
+				go runMaintenance(ctx, cfg.maintenanceInterval(), maintenanceTasks)
 			}
 
 			// Background expired-certificate cleanup (opt-in): prunes certs that
@@ -729,7 +810,7 @@ func newRootCmd() *cobra.Command {
 			}()
 
 			var serveErr error
-			if cfg.TLSCert != "" && cfg.TLSKey != "" {
+			if tlsConfigured {
 				serveErr = server.ListenAndServeTLS("", "")
 			} else {
 				serveErr = server.ListenAndServe()
@@ -754,6 +835,10 @@ func newRootCmd() *cobra.Command {
 	f.StringVar(&logFile, "logfile", "", "Log to file instead of stderr (implies daemon log destination)")
 	f.StringVar(&tlsCert, "tls-cert", "", "Path to TLS server certificate PEM (enables HTTPS)")
 	f.StringVar(&tlsKey, "tls-key", "", "Path to TLS server private key PEM (enables HTTPS)")
+	f.BoolVar(&tlsSelfProvision, "tls-self-provision", false,
+		"Let the CA issue and renew its own serving certificate (enables HTTPS; requires --hostname, excludes --tls-cert/--tls-key)")
+	f.StringSliceVar(&tlsSelfProvisionNames, "tls-self-provision-names", nil,
+		"Extra DNS names for the self-provisioned serving certificate, beyond --hostname")
 	f.StringVar(&puppetServers, "puppet-server", "", "Comma-separated list of puppet-server CNs allowed admin access")
 	f.StringVar(&puppetServerFile, "puppet-server-file", "", "Path to a file of puppet-server CNs allowed admin access (one per line; # comments and blank lines ignored)")
 	f.BoolVar(&noPpCliAuth, "no-pp-cli-auth", false, "Disable pp_cli_auth extension as an admin credential; require CN allow list only")
