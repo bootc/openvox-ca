@@ -322,8 +322,12 @@ var _ = Describe("Authorisation baseline", Ordered, ContinueOnFailure, func() {
 
 	DescribeTable("records the outcome of every client class",
 		func(route routeCase) {
+			classes := newClasses()
+			Expect(classNames(classes)).To(Equal(expectedClientClasses),
+				"the client-class fixtures no longer match the pinned list")
+
 			var mismatches []string
-			for _, class := range newClasses() {
+			for _, class := range classes {
 				want, ok := route.denied[class.name]
 				Expect(ok).To(BeTrue(),
 					"route %q has no recorded outcome for client class %q; every combination must be stated",
@@ -348,24 +352,32 @@ var _ = Describe("Authorisation baseline", Ordered, ContinueOnFailure, func() {
 		routeEntries,
 	)
 
-	It("applies the same authorisation at the /puppet-ca/v1 prefix", func() {
-		// Routes() registers every path twice, bare and prefixed, against the
-		// same handler. That is half the registered mux, and nothing else here
-		// touches it: a prefix-sensitive change to lookupTier — which matches on
-		// path prefixes — would move the prefixed surface alone and go unnoticed.
-		//
-		// Compared against the same recorded table rather than a second copy of
-		// it, so the two cannot drift.
-		for _, route := range routes {
+	// Routes() registers every path twice, bare and prefixed, against the same
+	// handler. That is half the registered mux, and nothing else here touches
+	// it: a prefix-sensitive change to lookupTier — which matches on path
+	// prefixes — would move the prefixed surface alone and go unnoticed.
+	//
+	// Compared against the same recorded table rather than a second copy of it,
+	// so the two cannot drift, and one Entry per route for the same reason as
+	// the main table.
+	DescribeTable("applies the same authorisation at the /puppet-ca/v1 prefix",
+		func(route routeCase) {
+			var mismatches []string
 			for _, class := range newClasses() {
 				want := route.denied[class.name]
-				Expect(probe(route, class, "/puppet-ca/v1")).To(Equal(want),
-					"route %q at the /puppet-ca/v1 prefix, client %q: recorded denied=%v but the prefixed "+
-						"path disagrees. Both forms must authorise identically.",
-					route.name, class.name, want)
+				if got := probe(route, class, "/puppet-ca/v1"); got != want {
+					mismatches = append(mismatches,
+						fmt.Sprintf("  client %q: bare path denied=%v, prefixed path denied=%v",
+							class.name, want, got))
+				}
 			}
-		}
-	})
+			Expect(mismatches).To(BeEmpty(),
+				"route %q authorises differently at the /puppet-ca/v1 prefix:\n%s\n\n"+
+					"Both forms are registered against the same handler and must agree.",
+				route.name, strings.Join(mismatches, "\n"))
+		},
+		routeEntries,
+	)
 
 	It("states an outcome for every route and client class", func() {
 		// Guards the table itself: a route added without outcomes, or a client
@@ -375,9 +387,9 @@ var _ = Describe("Authorisation baseline", Ordered, ContinueOnFailure, func() {
 		// The class list is pinned by name, not merely counted. Counting alone
 		// lets an adversarial fixture be swapped out — delete "foreign-ca", add
 		// a second benign class, and the length still matches while the row that
-		// mattered is gone.
-		Expect(classNames(newClasses())).To(Equal(expectedClientClasses))
-
+		// mattered is gone. The names are checked inside the route table, where
+		// the classes are minted anyway, so this spec reads no certificates at
+		// all.
 		for _, route := range routes {
 			Expect(route.denied).To(HaveLen(len(expectedClientClasses)),
 				"route %q records %d outcomes but there are %d client classes",
