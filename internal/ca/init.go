@@ -176,7 +176,7 @@ func (c *CA) seedSupportingState(ctx context.Context) error {
 		crlTemplate := &x509.RevocationList{
 			Number:     big.NewInt(1),
 			ThisUpdate: now,
-			NextUpdate: now.Add(c.crlValidity()),
+			NextUpdate: now.Add(c.CRLValidityDuration()),
 		}
 		crlBytes, err := x509.CreateRevocationList(rand.Reader, crlTemplate, c.CACert, c.CAKey)
 		if err != nil {
@@ -437,7 +437,7 @@ func (c *CA) bootstrapCA(ctx context.Context) error {
 	crlTemplate := &x509.RevocationList{
 		Number:     big.NewInt(1),
 		ThisUpdate: now,
-		NextUpdate: now.Add(c.crlValidity()),
+		NextUpdate: now.Add(c.CRLValidityDuration()),
 	}
 	crlBytes, err := x509.CreateRevocationList(rand.Reader, crlTemplate, c.CACert, c.CAKey)
 	if err != nil {
