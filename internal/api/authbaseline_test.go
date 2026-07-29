@@ -232,15 +232,17 @@ var _ = Describe("Authorisation baseline", Ordered, ContinueOnFailure, func() {
 			},
 		},
 		{
-			// Any certificate that chains to our trust anchor is admitted, with
-			// no check that the subject matches the caller. Scoped to our own CA
-			// only because ours is the only issuer configured today.
-			name: "any-client: read a certificate status", method: "GET", path: "/certificate_status/somenode",
+			// Admin-only, matching Puppet Server's shipped auth.conf. An
+			// ordinary agent certificate no longer reads statuses; the routes
+			// back are the CN allowlist and pp_cli_auth, exactly as upstream.
+			name: "admin: read a certificate status", method: "GET", path: "/certificate_status/somenode",
 			denied: map[string]bool{
-				"none": true, "own-ca-plain": false, "own-ca-allowlisted": false,
+				"none": true, "own-ca-plain": true, "own-ca-allowlisted": false,
 				"own-ca-pp-cli-auth": false, "own-ca-admin-both": false, "own-ca-expired": true,
 				"own-ca-revoked": true, "foreign-ca": true,
 			},
+			changedBy: "certificate_status moved from any-client to admin-only for upstream parity; " +
+				"own-ca-plain was previously allowed",
 		},
 		{
 			name: "any-client: renew own certificate", method: "POST", path: "/certificate_renewal",
@@ -417,7 +419,7 @@ var expectedRoutes = []string{
 	"public: fetch the CA certificate",
 	"public: fetch the CRL",
 	"public: submit a CSR",
-	"any-client: read a certificate status",
+	"admin: read a certificate status",
 	"any-client: renew own certificate",
 	"self-or-admin: read own CSR",
 	"self-or-admin: read another node's CSR",
