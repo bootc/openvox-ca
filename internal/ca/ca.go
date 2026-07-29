@@ -204,6 +204,14 @@ type CA struct {
 	// burst of revocations collapses to a single pending notification and an
 	// absent consumer never blocks signing. Consume it via CRLUpdated().
 	crlNotify chan struct{}
+
+	// servingNotify carries a coalesced signal each time a serving certificate
+	// is issued, mirroring crlNotify. It exists because the Kubernetes exporter
+	// reconciles on CRLUpdated(), which a serving-certificate rotation does not
+	// fire: without a second channel an exported serving certificate would sit
+	// stale until the next CRL change, potentially months. Consume it via
+	// ServingCertUpdated().
+	servingNotify chan struct{}
 }
 
 func New(s *storage.StorageService, autosignCfg AutosignConfig, hostname string) *CA {
@@ -217,6 +225,7 @@ func New(s *storage.StorageService, autosignCfg AutosignConfig, hostname string)
 		serialIndex:       make(map[string]string),
 		ocspCache:         make(map[string]ocspCacheEntry),
 		crlNotify:         make(chan struct{}, 1),
+		servingNotify:     make(chan struct{}, 1),
 	}
 }
 
@@ -249,6 +258,14 @@ func (c *CA) IncServingRenewalFailures() {
 // puppetca_serving_cert_renewal_failures_total.
 func (c *CA) ServingRenewalFailureCount() uint64 {
 	return c.servingRenewalFailures.Load()
+}
+
+// ServingCertUpdated returns a channel that receives a value each time this
+// process issues a serving certificate. Coalesced the same way CRLUpdated is:
+// buffered to depth 1 and written non-blockingly, so an absent consumer never
+// blocks issuance and a burst collapses to one notification.
+func (c *CA) ServingCertUpdated() <-chan struct{} {
+	return c.servingNotify
 }
 
 // CRLUpdated returns a channel that receives a value each time the CRL is

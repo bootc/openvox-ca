@@ -45,14 +45,33 @@ type MaterialSource interface {
 	GetCRL(ctx context.Context) ([]byte, error)
 }
 
+// ServingSource additionally provides the self-provisioned serving certificate
+// and its private key. It is separate from MaterialSource because the key must
+// be handed over *decrypted* — a kubernetes.io/tls Secret holding an encrypted
+// PEM is useless to every consumer of one — and only the CA can decrypt it.
+// The storage service satisfies MaterialSource alone, so a deployment that
+// exports no serving material needs no extra wiring.
+type ServingSource interface {
+	ServingCertPEM(ctx context.Context) ([]byte, error)
+	ServingKeyPEM(ctx context.Context) ([]byte, error)
+}
+
 // Exporter reconciles the configured Secret/ConfigMap targets with the current
 // CA certificate and CRL using server-side apply.
 type Exporter struct {
 	client    kubernetes.Interface
 	cfg       Config
 	src       MaterialSource
-	defaultNS string   // resolved pod namespace; used for targets without one
-	metrics   *Metrics // may be nil (metrics disabled)
+	serving   ServingSource // nil unless serving material is exported
+	defaultNS string        // resolved pod namespace; used for targets without one
+	metrics   *Metrics      // may be nil (metrics disabled)
+}
+
+// WithServingSource attaches the source for serving certificate and key
+// material. Required when any target sets serving_cert or serving_key.
+func (e *Exporter) WithServingSource(s ServingSource) *Exporter {
+	e.serving = s
+	return e
 }
 
 // New constructs an Exporter from an existing clientset. cfg must already have
@@ -100,7 +119,7 @@ func (c *Config) needsDefaultNamespace() bool {
 // collected but does not prevent the others from being applied; the joined error
 // (or nil) is returned.
 func (e *Exporter) ExportAll(ctx context.Context) error {
-	certPEM, crlPEM, err := e.fetchMaterials(ctx)
+	m, err := e.fetchMaterials(ctx)
 	if err != nil {
 		return err
 	}
@@ -108,7 +127,7 @@ func (e *Exporter) ExportAll(ctx context.Context) error {
 	var errs []error
 	for i := range e.cfg.Targets {
 		t := &e.cfg.Targets[i]
-		err := e.applyTarget(ctx, t, certPEM, crlPEM)
+		err := e.applyTarget(ctx, t, m)
 		e.metrics.recordApply(t, e.namespaceFor(t), err)
 		if err != nil {
 			slog.Warn("Kubernetes export failed for target",
@@ -122,27 +141,62 @@ func (e *Exporter) ExportAll(ctx context.Context) error {
 	return errors.Join(errs...)
 }
 
-// fetchMaterials reads the cert and CRL PEM, fetching each only if some target
-// requires it.
-func (e *Exporter) fetchMaterials(ctx context.Context) (certPEM, crlPEM []byte, err error) {
-	var wantCert, wantCRL bool
+// materials is the set of PEM blobs one export cycle publishes. Passed as a
+// struct rather than as positional byte slices so that adding a material does
+// not mean editing every signature between here and the apply, and so that a
+// caller cannot transpose two of them.
+type materials struct {
+	cert        []byte
+	crl         []byte
+	servingCert []byte
+	servingKey  []byte
+}
+
+// fetchMaterials reads each material only if some target requires it.
+func (e *Exporter) fetchMaterials(ctx context.Context) (materials, error) {
+	var m materials
+	var wantCert, wantCRL, wantServingCert, wantServingKey bool
 	for i := range e.cfg.Targets {
 		wantCert = wantCert || e.cfg.Targets[i].Cert
 		wantCRL = wantCRL || e.cfg.Targets[i].CRL
+		wantServingCert = wantServingCert || e.cfg.Targets[i].ServingCert
+		wantServingKey = wantServingKey || e.cfg.Targets[i].ServingKey
 	}
 	if wantCert {
-		certPEM, err = e.src.GetCACert(ctx)
+		certPEM, err := e.src.GetCACert(ctx)
 		if err != nil {
-			return nil, nil, fmt.Errorf("reading CA certificate for export: %w", err)
+			return materials{}, fmt.Errorf("reading CA certificate for export: %w", err)
 		}
+		m.cert = certPEM
 	}
 	if wantCRL {
-		crlPEM, err = e.src.GetCRL(ctx)
+		crlPEM, err := e.src.GetCRL(ctx)
 		if err != nil {
-			return nil, nil, fmt.Errorf("reading CRL for export: %w", err)
+			return materials{}, fmt.Errorf("reading CRL for export: %w", err)
+		}
+		m.crl = crlPEM
+	}
+	if wantServingCert || wantServingKey {
+		if e.serving == nil {
+			return materials{}, fmt.Errorf("a target requests serving material but no serving source is configured; " +
+				"serving_cert and serving_key require tls_self_provision")
 		}
 	}
-	return certPEM, crlPEM, nil
+	if wantServingCert {
+		certPEM, err := e.serving.ServingCertPEM(ctx)
+		if err != nil {
+			return materials{}, fmt.Errorf("reading serving certificate for export: %w", err)
+		}
+		m.servingCert = certPEM
+	}
+	if wantServingKey {
+		keyPEM, err := e.serving.ServingKeyPEM(ctx)
+		if err != nil {
+			return materials{}, fmt.Errorf("reading serving key for export: %w", err)
+		}
+		m.servingKey = keyPEM
+	}
+	return m, nil
 }
 
 // namespaceFor returns the namespace a target should be applied to: its own, or
@@ -156,7 +210,7 @@ func (e *Exporter) namespaceFor(t *Target) string {
 
 // applyTarget server-side applies a single target. Force is set so the exporter
 // reclaims any of its fields that drifted (e.g. were edited by another manager).
-func (e *Exporter) applyTarget(ctx context.Context, t *Target, certPEM, crlPEM []byte) error {
+func (e *Exporter) applyTarget(ctx context.Context, t *Target, m materials) error {
 	ns := e.namespaceFor(t)
 	if ns == "" {
 		return fmt.Errorf("no namespace resolved")
@@ -165,11 +219,17 @@ func (e *Exporter) applyTarget(ctx context.Context, t *Target, certPEM, crlPEM [
 	// previously-good cert/CRL in the target object. A requested-but-empty
 	// material means the CA is in an unexpected state, so fail this target (it is
 	// counted and logged) and leave the existing object untouched.
-	if t.Cert && len(certPEM) == 0 {
+	if t.Cert && len(m.cert) == 0 {
 		return fmt.Errorf("refusing to export an empty CA certificate")
 	}
-	if t.CRL && len(crlPEM) == 0 {
+	if t.CRL && len(m.crl) == 0 {
 		return fmt.Errorf("refusing to export an empty CRL")
+	}
+	if t.ServingCert && len(m.servingCert) == 0 {
+		return fmt.Errorf("refusing to export an empty serving certificate")
+	}
+	if t.ServingKey && len(m.servingKey) == 0 {
+		return fmt.Errorf("refusing to export an empty serving key")
 	}
 	opts := metav1.ApplyOptions{FieldManager: e.cfg.FieldManager, Force: true}
 
@@ -178,10 +238,10 @@ func (e *Exporter) applyTarget(ctx context.Context, t *Target, certPEM, crlPEM [
 
 	switch t.Kind {
 	case KindSecret:
-		_, err := e.client.CoreV1().Secrets(ns).Apply(ctx, t.buildSecretApply(ns, certPEM, crlPEM), opts)
+		_, err := e.client.CoreV1().Secrets(ns).Apply(ctx, t.buildSecretApply(ns, m), opts)
 		return err
 	case KindConfigMap:
-		_, err := e.client.CoreV1().ConfigMaps(ns).Apply(ctx, t.buildConfigMapApply(ns, certPEM, crlPEM), opts)
+		_, err := e.client.CoreV1().ConfigMaps(ns).Apply(ctx, t.buildConfigMapApply(ns, m), opts)
 		return err
 	default:
 		// Unreachable after Validate, but fail loudly rather than silently skip.
