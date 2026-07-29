@@ -175,8 +175,8 @@ When mTLS is enabled (both `--tls-cert` and `--tls-key` set), each endpoint requ
 | Tier | Required client cert | Endpoints |
 | --- | --- | --- |
 | **Public** | None | `GET /healthz/*`, `GET /certificate/{subject}`, `GET /certificate_revocation_list/ca`, `PUT /certificate_request/{subject}`, `GET /expirations`, `POST /ocsp`, `GET /ocsp/{request}` |
-| **Any client** | Any CA-signed cert | `POST /certificate_renewal` — and the presented certificate must be one this CA issued and has not revoked; renewal reissues under our authority using the certificate's own subject and extensions, which is only safe for certificates we vetted at issuance |
-| **Self or admin** | Cert CN matches path subject, OR cert is admin | `GET /certificate_request/{subject}` |
+| **Own client** | A cert **this CA** issued | `POST /certificate_renewal` — and the presented certificate must not be revoked; renewal reissues under our authority using the certificate's own subject and extensions, which is only safe for certificates we vetted at issuance |
+| **Self or admin** | Cert CN matches path subject **and was issued by this CA**, OR cert is admin | `GET /certificate_request/{subject}` |
 | **Admin** | Cert is admin (see below) | `GET /certificate_status/{subject}` (public with `--allow-public-status`), `PUT /certificate_status/{subject}`, `DELETE /certificate_status/{subject}`, `DELETE /certificate_request/{subject}`, `GET /certificate_statuses/*`, `POST /sign`, `POST /sign/all`, `POST /generate/{subject}`, `PUT /clean`, `PUT /certificate_revocation_list/ca`, `PUT /certificate/{subject}` |
 
 In plain HTTP mode (no TLS), all endpoints are accessible without authentication.
@@ -191,5 +191,7 @@ A client certificate is considered an admin credential if **either** condition i
 2. **`pp_cli_auth` extension:** the certificate carries the Puppet authorization extension OID `1.3.6.1.4.1.34380.1.3.39` with the UTF8String value `"true"`. OpenVox Server embeds this extension in its own certificate by default, so the `puppetserver ca` CLI can authenticate without being listed by CN.
 
 The `pp_cli_auth` check is enabled by default. Disable it with `--no-pp-cli-auth` (or `no_pp_cli_auth: true` in the config file) if you prefer strict CN-only authorization.
+
+Both conditions are scoped to the **issuer** that signed the certificate. A CN means something only within the namespace of the CA that signed it, so `--puppet-server` and `pp_cli_auth` grant admin to certificates **this CA issued**. Certificates from another issuer are granted admin by that issuer's own `admin_cns` and `allow_pp_cli_auth` — see [trusting client certificates from another CA](configuration.md#trusting-client-certificates-from-another-ca). With no `client_ca` configured there is one issuer and this distinction has no effect.
 
 > **OID source:** [`lib/puppet/ssl/oids.rb`](https://github.com/puppetlabs/puppet/blob/main/lib/puppet/ssl/oids.rb)
