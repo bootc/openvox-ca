@@ -125,8 +125,7 @@ var _ = Describe("Authorisation baseline", Ordered, func() {
 
 		server := api.New(myCA)
 		server.AuthConfig = &api.AuthConfig{
-			CACert:    caCert,
-			AllowList: map[string]bool{"puppet-server": true},
+			Domains: []api.TrustDomain{api.OwnTrustDomain(caCert, map[string]bool{"puppet-server": true}, true)},
 		}
 		mux = server.Routes()
 

@@ -134,8 +134,7 @@ var _ = Describe("Auth Middleware", func() {
 		// "puppet-server" is the sole admin CN in the allow list.
 		server := api.New(myCA)
 		server.AuthConfig = &api.AuthConfig{
-			CACert:    caCert,
-			AllowList: map[string]bool{"puppet-server": true},
+			Domains: []api.TrustDomain{api.OwnTrustDomain(caCert, map[string]bool{"puppet-server": true}, true)},
 		}
 		mux = server.Routes()
 	})
@@ -745,8 +744,7 @@ var _ = Describe("Auth Middleware", func() {
 		BeforeEach(func() {
 			srv := api.New(myCA)
 			srv.AuthConfig = &api.AuthConfig{
-				CACert:            caCert,
-				AllowList:         map[string]bool{"puppet-server": true},
+				Domains:           []api.TrustDomain{api.OwnTrustDomain(caCert, map[string]bool{"puppet-server": true}, true)},
 				AllowPublicStatus: true,
 			}
 			publicStatusMux = srv.Routes()
@@ -793,8 +791,7 @@ var _ = Describe("Auth Middleware", func() {
 		BeforeEach(func() {
 			srv := api.New(myCA)
 			srv.AuthConfig = &api.AuthConfig{
-				CACert:    caCert,
-				AllowList: map[string]bool{},
+				Domains: []api.TrustDomain{api.OwnTrustDomain(caCert, map[string]bool{}, true)},
 			}
 			muxNoCNList = srv.Routes()
 		})
@@ -864,8 +861,7 @@ var _ = Describe("Auth Middleware", func() {
 			// Step 2: Submit CSR; autosign signs it immediately.
 			srv := api.New(autosignCA)
 			srv.AuthConfig = &api.AuthConfig{
-				CACert:    caCert,
-				AllowList: map[string]bool{},
+				Domains: []api.TrustDomain{api.OwnTrustDomain(caCert, map[string]bool{}, true)},
 			}
 			attackMux := srv.Routes()
 
@@ -910,9 +906,7 @@ var _ = Describe("Auth Middleware", func() {
 		BeforeEach(func() {
 			srv := api.New(myCA)
 			srv.AuthConfig = &api.AuthConfig{
-				CACert:      caCert,
-				AllowList:   map[string]bool{},
-				NoPpCliAuth: true,
+				Domains: []api.TrustDomain{api.OwnTrustDomain(caCert, map[string]bool{}, false)},
 			}
 			muxNoPpCli = srv.Routes()
 		})
@@ -929,9 +923,7 @@ var _ = Describe("Auth Middleware", func() {
 		It("still allows POST /sign/all for a CN in the allow list", func() {
 			srv := api.New(myCA)
 			srv.AuthConfig = &api.AuthConfig{
-				CACert:      caCert,
-				AllowList:   map[string]bool{"puppet-server": true},
-				NoPpCliAuth: true,
+				Domains: []api.TrustDomain{api.OwnTrustDomain(caCert, map[string]bool{"puppet-server": true}, false)},
 			}
 			muxWithCN := srv.Routes()
 
@@ -998,15 +990,13 @@ var _ = Describe("lookupTier classification", func() {
 
 		srv := api.New(myCA)
 		srv.AuthConfig = &api.AuthConfig{
-			CACert:    caCert,
-			AllowList: map[string]bool{"puppet-server": true},
+			Domains: []api.TrustDomain{api.OwnTrustDomain(caCert, map[string]bool{"puppet-server": true}, true)},
 		}
 		muxDefault = srv.Routes()
 
 		srvPub := api.New(myCA)
 		srvPub.AuthConfig = &api.AuthConfig{
-			CACert:            caCert,
-			AllowList:         map[string]bool{"puppet-server": true},
+			Domains:           []api.TrustDomain{api.OwnTrustDomain(caCert, map[string]bool{"puppet-server": true}, true)},
 			AllowPublicStatus: true,
 		}
 		muxPublicState = srvPub.Routes()

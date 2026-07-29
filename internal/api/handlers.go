@@ -47,10 +47,26 @@ const maxJSONBody = 1 << 20 // 1 MiB
 // AuthConfig is the mTLS authorization configuration wired into the server.
 // Nil means no mTLS enforcement (plain HTTP / dev mode).
 type AuthConfig struct {
-	CACert            *x509.Certificate
-	AllowList         map[string]bool // admin CNs (puppet-server hostnames)
-	NoPpCliAuth       bool            // when true, pp_cli_auth extension does not grant admin access
-	AllowPublicStatus bool            // when true, GET /certificate_status is public (no client cert required)
+	// Domains are the trust domains a client certificate may be attributed to,
+	// in the order they are tried. Domain zero is always this CA's own; see
+	// TrustDomain and attribute for why the order is part of the contract.
+	//
+	// This replaced a single CACert field. The rename is deliberate: the
+	// meaning genuinely changed from "the certificate every client must chain
+	// to" to "one of several issuers, each with its own authority", and a
+	// silent semantic change on a field named CACert is exactly the kind of
+	// thing that survives review.
+	Domains []TrustDomain
+
+	AllowPublicStatus bool // when true, GET /certificate_status is public (no client cert required)
+}
+
+// OwnDomain returns domain zero, this CA's own issuer.
+func (c *AuthConfig) OwnDomain() *TrustDomain {
+	if len(c.Domains) == 0 {
+		return nil
+	}
+	return &c.Domains[0]
 }
 
 type Server struct {
@@ -921,9 +937,10 @@ func (s *Server) handlePostCertificateRenewal(w http.ResponseWriter, r *http.Req
 		// solely on the mTLS-presented client cert to prove identity and key
 		// possession, and expect the SAME key reissued with a fresh serial
 		// and validity. Reissuing without a fresh proof-of-possession is safe
-		// because newAuthMiddleware (the tierAnyClient path guarding this
+		// because newAuthMiddleware (the tierOwnClient path guarding this
 		// route) has already verified r.TLS.PeerCertificates[0] chains to our
-		// CA and is not revoked; clientCN(r) only reads its CN.
+		// own CA specifically and is not revoked; clientCN(r) only reads its
+		// CN.
 		certPEM, err = s.CA.AutoRenew(r.Context(), r.TLS.PeerCertificates[0])
 		if err != nil {
 			// A key-strength rejection is client-actionable: the presented
