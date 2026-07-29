@@ -1287,7 +1287,9 @@ var _ = Describe("API Workflow", func() {
 				Expect(err).NotTo(HaveOccurred())
 
 				splitServer := api.New(myCA)
-				splitServer.AuthConfig = &api.AuthConfig{CACert: foreignCA}
+				splitServer.AuthConfig = &api.AuthConfig{
+					Domains: []api.TrustDomain{api.OwnTrustDomain(foreignCA, nil, true)},
+				}
 				splitMux = splitServer.Routes()
 			})
 

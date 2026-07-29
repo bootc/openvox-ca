@@ -165,8 +165,7 @@ var _ = Describe("Authorisation baseline", Ordered, ContinueOnFailure, func() {
 
 		server := api.New(myCA)
 		server.AuthConfig = &api.AuthConfig{
-			CACert:    caCert,
-			AllowList: map[string]bool{"puppet-server": true},
+			Domains: []api.TrustDomain{api.OwnTrustDomain(caCert, map[string]bool{"puppet-server": true}, true)},
 		}
 		mux = server.Routes()
 
@@ -625,7 +624,9 @@ var _ = Describe("Authorisation baseline: configuration axes", Ordered, Continue
 
 	Describe("allow_public_status", func() {
 		It("denies a client with no certificate when unset", func() {
-			handler := muxWith(&api.AuthConfig{CACert: caCert, AllowList: map[string]bool{"puppet-server": true}})
+			handler := muxWith(&api.AuthConfig{
+				Domains: []api.TrustDomain{api.OwnTrustDomain(caCert, map[string]bool{"puppet-server": true}, true)},
+			})
 			Expect(probe(handler, "GET", "/certificate_status/somenode", nil)).To(BeTrue())
 		})
 
@@ -636,8 +637,7 @@ var _ = Describe("Authorisation baseline: configuration axes", Ordered, Continue
 			// set should still get public status afterwards, or be told plainly
 			// that the flag no longer does anything.
 			handler := muxWith(&api.AuthConfig{
-				CACert:            caCert,
-				AllowList:         map[string]bool{"puppet-server": true},
+				Domains:           []api.TrustDomain{api.OwnTrustDomain(caCert, map[string]bool{"puppet-server": true}, true)},
 				AllowPublicStatus: true,
 			})
 			Expect(probe(handler, "GET", "/certificate_status/somenode", nil)).To(BeFalse())
@@ -646,7 +646,9 @@ var _ = Describe("Authorisation baseline: configuration axes", Ordered, Continue
 
 	Describe("no_pp_cli_auth", func() {
 		It("grants admin on the pp_cli_auth extension when unset", func() {
-			handler := muxWith(&api.AuthConfig{CACert: caCert, AllowList: map[string]bool{"puppet-server": true}})
+			handler := muxWith(&api.AuthConfig{
+				Domains: []api.TrustDomain{api.OwnTrustDomain(caCert, map[string]bool{"puppet-server": true}, true)},
+			})
 			cert := issueClientCertWithPpCliAuth("cli-user", caCert, caKey)
 			Expect(probe(handler, "PUT", "/certificate_revocation_list/ca", cert)).To(BeFalse())
 		})
@@ -656,9 +658,7 @@ var _ = Describe("Authorisation baseline: configuration axes", Ordered, Continue
 			// table is computed with this false, so without this pair a change
 			// that dropped the flag would move nothing the oracle watches.
 			handler := muxWith(&api.AuthConfig{
-				CACert:      caCert,
-				AllowList:   map[string]bool{"puppet-server": true},
-				NoPpCliAuth: true,
+				Domains: []api.TrustDomain{api.OwnTrustDomain(caCert, map[string]bool{"puppet-server": true}, false)},
 			})
 			byExtension := issueClientCertWithPpCliAuth("cli-user", caCert, caKey)
 			Expect(probe(handler, "PUT", "/certificate_revocation_list/ca", byExtension)).To(BeTrue())

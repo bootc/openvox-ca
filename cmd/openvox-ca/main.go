@@ -118,11 +118,22 @@ func buildAuthConfig(cfg *serverConfig, myCA *ca.CA) (*api.AuthConfig, error) {
 			"Use --no-pp-cli-auth to disable this and require explicit CN allow list.")
 	}
 
+	// Domain zero is this CA, always, and is not configurable: an operator
+	// cannot remove it, rename it, or drop their own CA out of the trust set.
+	// With no client_ca configured the list has length one and authorisation
+	// is exactly what it was.
+	if err := cfg.ClientCAConfig.Validate(); err != nil {
+		return nil, fmt.Errorf("invalid client_ca config: %w", err)
+	}
+	domains, err := buildTrustDomains(cfg, myCA.CACert, allowList)
+	if err != nil {
+		return nil, err
+	}
+
 	return &api.AuthConfig{
-		CACert:            myCA.CACert,
-		AllowList:         allowList,
-		NoPpCliAuth:       cfg.NoPpCliAuth,
-		AllowPublicStatus: cfg.AllowPublicStatus,
+		Domains:                domains,
+		AllowPublicStatus:      cfg.AllowPublicStatus,
+		ClientRevocationPolicy: cfg.Policy(),
 	}, nil
 }
 
@@ -714,6 +725,21 @@ func newRootCmd() *cobra.Command {
 						caPool.AddCert(caCert)
 					}
 				}
+				// Every anchor from every trust domain, so a client holding a
+				// certificate from any trusted issuer actually offers it. This
+				// is a handshake hint only — it populates the
+				// certificate_authorities list — and deliberately broader than
+				// any single domain's authority: it does not merge trust, which
+				// the middleware decides per domain.
+				for i := range cfg.ClientCA {
+					anchors, err := parseAnchorBundle(cfg.ClientCA[i].File)
+					if err != nil {
+						return fmt.Errorf("client_ca %q: %w", cfg.ClientCA[i].Name, err)
+					}
+					for _, anchor := range anchors {
+						caPool.AddCert(anchor)
+					}
+				}
 
 				// SECURITY: TLS server configuration with mTLS support.
 				// RequestClientCert allows public endpoints to work without a
@@ -759,6 +785,21 @@ func newRootCmd() *cobra.Command {
 			// chain need not also be self-provisioning a certificate.
 			if cfg.CRLChainFile != "" {
 				maintenanceTasks = append(maintenanceTasks, crlChainFileTask(myCA, cfg))
+			}
+
+			// Foreign client CRLs reload on the same loop, gated on client_ca
+			// alone. Anchors deliberately do not reload — see refreshClientCRLs.
+			if cfg.ClientCAConfig.Enabled() && srv.AuthConfig != nil {
+				var crlMetrics *clientCRLMetrics
+				if exporter != nil {
+					crlMetrics = newClientCRLMetrics(exporter.Registry())
+				}
+				// Load once before serving, so the first request is not
+				// evaluated against an empty set — which under require would
+				// reject every foreign client until the first tick.
+				refreshClientCRLs(cfg, srv.AuthConfig.Domains, crlMetrics)
+				maintenanceTasks = append(maintenanceTasks,
+					clientCRLTask(cfg, srv.AuthConfig.Domains, crlMetrics))
 			}
 
 			// Shared maintenance loop. Bound to ctx so it stops on shutdown.

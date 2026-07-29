@@ -46,10 +46,40 @@ const maxJSONBody = 1 << 20 // 1 MiB
 // AuthConfig is the mTLS authorization configuration wired into the server.
 // Nil means no mTLS enforcement (plain HTTP / dev mode).
 type AuthConfig struct {
-	CACert            *x509.Certificate
-	AllowList         map[string]bool // admin CNs (puppet-server hostnames)
-	NoPpCliAuth       bool            // when true, pp_cli_auth extension does not grant admin access
-	AllowPublicStatus bool            // when true, GET /certificate_status is public (no client cert required)
+	// Domains are the trust domains a client certificate may be attributed to,
+	// in the order they are tried. Domain zero is always this CA's own; see
+	// TrustDomain and attribute for why the order is part of the contract.
+	//
+	// This replaced a single CACert field. The rename is deliberate: the
+	// meaning genuinely changed from "the certificate every client must chain
+	// to" to "one of several issuers, each with its own authority", and a
+	// silent semantic change on a field named CACert is exactly the kind of
+	// thing that survives review.
+	Domains []TrustDomain
+
+	AllowPublicStatus bool // when true, GET /certificate_status is public (no client cert required)
+
+	// ClientRevocationPolicy governs revocation checking for foreign domains.
+	// Empty means require. Our own domain always checks its own CRL and is
+	// unaffected by this setting.
+	ClientRevocationPolicy string
+}
+
+// revocationPolicy resolves the foreign-domain revocation policy, defaulting
+// to require so an unset value never defaults into a hole.
+func (c *AuthConfig) revocationPolicy() string {
+	if c.ClientRevocationPolicy == "" {
+		return RevocationRequire
+	}
+	return c.ClientRevocationPolicy
+}
+
+// OwnDomain returns domain zero, this CA's own issuer.
+func (c *AuthConfig) OwnDomain() *TrustDomain {
+	if len(c.Domains) == 0 {
+		return nil
+	}
+	return &c.Domains[0]
 }
 
 type Server struct {
