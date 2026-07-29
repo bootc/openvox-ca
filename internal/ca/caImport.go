@@ -188,49 +188,60 @@ func ImportCAMaterial(ctx context.Context, store *storage.StorageService, certBu
 
 	// --- Handle CRL ---
 	if crlPEM != nil {
-		// Validate every block, not just the first: a CRL chain supplied here is
-		// served verbatim to agents, so an unparseable block further down would
-		// surface as a broken CRL on every node rather than an import error.
-		rest := crlPEM
-		blocks := 0
-		for {
-			var crlBlock *pem.Block
-			crlBlock, rest = pem.Decode(rest)
-			if crlBlock == nil {
-				break
-			}
-			if crlBlock.Type != "X509 CRL" {
-				continue
-			}
-			if _, err := x509.ParseRevocationList(crlBlock.Bytes); err != nil {
-				return fmt.Errorf("failed to parse CRL %d in crl-chain: %w", blocks+1, err)
-			}
-			blocks++
+		// Every block must parse. The blob is served verbatim to every agent,
+		// and Puppet's default certificate_revocation = chain makes an agent
+		// parse all of it, so an unparseable block further down would surface
+		// as a broken CRL across the fleet rather than as an import error here.
+		incoming, err := decodeCRLChain(crlPEM)
+		if err != nil {
+			return fmt.Errorf("crl-chain: %w", err)
 		}
-		if blocks == 0 {
+		if len(incoming) == 0 {
 			return fmt.Errorf("crl-chain does not contain a valid X509 CRL PEM block")
 		}
+
+		// Every reader takes block 0 as this CA's own CRL, so put it there.
+		// An operator assembling a chain by hand has no reason to know that,
+		// and correcting it once at import is better than misreading it on
+		// every subsequent load.
+		ordered, foundOurs := orderCRLChain(incoming, caCert)
+		if !foundOurs {
+			// A chain of purely upstream CRLs is legitimate — an operator may
+			// supply ancestors and expect this CA to issue its own. It is also
+			// how someone refreshes ancestor CRLs with the tools available
+			// today, on a CA that has been issuing for months.
+			//
+			// So prefer a CRL of ours already in storage over a fresh empty
+			// one. Leading with an empty CRL would leave every reader taking
+			// block 0 and concluding nothing is revoked, which looks entirely
+			// healthy and silently un-revokes the fleet.
+			ourCRL := storedOwnCRL(ctx, store, caCert)
+			if ourCRL == nil {
+				ourCRL, err = generateEmptyCRL(caCert, signer, crlValidity)
+				if err != nil {
+					return err
+				}
+			}
+			ordered = append([]*x509.RevocationList{ourCRL}, ordered...)
+		}
+
+		// Re-encoded from the parsed chain rather than passed through, so what
+		// is stored and served is exactly what was validated — on both branches,
+		// not just the reordered one.
+		//
 		// Import-time write: runs before any CRL consumer exists, so it
 		// deliberately skips the crlNotify signal (see signCRLLocked).
-		if err := store.UpdateCRL(ctx, crlPEM); err != nil {
+		if err := store.UpdateCRL(ctx, encodeCRLChain(ordered)); err != nil {
 			return fmt.Errorf("failed to write CRL: %w", err)
 		}
 	} else {
-		// Generate a fresh empty CRL.
-		now := time.Now().UTC()
-		crlTemplate := &x509.RevocationList{
-			Number:     big.NewInt(1),
-			ThisUpdate: now,
-			NextUpdate: now.Add(crlValidity),
-		}
-		crlBytes, err := x509.CreateRevocationList(rand.Reader, crlTemplate, caCert, signer)
+		generatedCRL, err := generateEmptyCRL(caCert, signer, crlValidity)
 		if err != nil {
-			return fmt.Errorf("failed to create initial CRL: %w", err)
+			return err
 		}
-		generatedCRL := pem.EncodeToMemory(&pem.Block{Type: "X509 CRL", Bytes: crlBytes})
 		// Import-time write: runs before any CRL consumer exists, so it
 		// deliberately skips the crlNotify signal (see signCRLLocked).
-		if err := store.UpdateCRL(ctx, generatedCRL); err != nil {
+		if err := store.UpdateCRL(ctx, encodeCRLChain([]*x509.RevocationList{generatedCRL})); err != nil {
 			return fmt.Errorf("failed to write CRL: %w", err)
 		}
 	}
@@ -252,4 +263,47 @@ func ImportCAMaterial(ctx context.Context, store *storage.StorageService, certBu
 	}
 
 	return nil
+}
+
+// storedOwnCRL returns the CRL in storage that cert signed, or nil when there
+// is none — including when storage cannot be read or holds nothing usable,
+// since every caller's fallback is to generate a fresh one.
+func storedOwnCRL(ctx context.Context, store *storage.StorageService, cert *x509.Certificate) *x509.RevocationList {
+	existing, err := store.GetCRL(ctx)
+	if err != nil {
+		return nil
+	}
+	stored, err := decodeCRLChain(existing)
+	if err != nil {
+		return nil
+	}
+	for _, crl := range stored {
+		if crlSignedBy(cert, crl) {
+			return crl
+		}
+	}
+	return nil
+}
+
+// generateEmptyCRL signs a fresh, empty CRL for cert.
+//
+// Number 1 is correct here and only here: this runs when the imported chain
+// carries no CRL of ours, so there is no previous number of ours to advance
+// from. Re-signing an existing CRL goes through signCRLLocked, which bumps.
+func generateEmptyCRL(cert *x509.Certificate, key crypto.Signer, validity time.Duration) (*x509.RevocationList, error) {
+	now := time.Now().UTC()
+	template := &x509.RevocationList{
+		Number:     big.NewInt(1),
+		ThisUpdate: now,
+		NextUpdate: now.Add(validity),
+	}
+	der, err := x509.CreateRevocationList(rand.Reader, template, cert, key)
+	if err != nil {
+		return nil, fmt.Errorf("failed to create initial CRL: %w", err)
+	}
+	crl, err := x509.ParseRevocationList(der)
+	if err != nil {
+		return nil, fmt.Errorf("failed to parse the generated CRL: %w", err)
+	}
+	return crl, nil
 }

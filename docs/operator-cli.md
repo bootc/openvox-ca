@@ -97,6 +97,10 @@ openvox-ca-ctl import \
 # The bundle must be a complete chain, nearest first, ending at a self-signed
 # root. If the CA's key is held by a provider rather than a file, there is no
 # --private-key to pass: use `openvox-ca import-ca-cert` instead (below).
+#
+# --crl-chain may hold several concatenated CRLs in any order. This CA's own is
+# identified by signature and moved to the front; the rest are kept and served
+# so agents can do full-chain revocation checking. Every block must parse.
 
 # Migrate an entire CA between storage backends offline (any pair of backends:
 # filesystem, sqlite, postgres, mysql, etcd, redis/valkey). Each backend is
