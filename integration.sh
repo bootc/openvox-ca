@@ -8,9 +8,23 @@ set -eu -o pipefail
 #   integration-trial.sh         which branches conflict, read-only, no worktree
 #   integration-verify-merge.sh  what a resolution dropped; runs below, mid-merge
 #
-# The image is consumed: a deployment pins
-# ghcr.io/bootc/openvox-ca:integration-alpine by digest. Report the digest after
-# a push, not just that it happened.
+# PUSHING THIS BRANCH SHIPS. A live deployment tracks
+# ghcr.io/bootc/openvox-ca:integration-alpine, and the binary reaches it
+# unreviewed: pushing here publishes the image, Renovate opens a digest bump and
+# automerges it in under 70 seconds at any hour (automerge + ignoreTests), and
+# Flux reconciles within 5 minutes. The chart pin is NOT automerged and waits on
+# a human, so what a rebuild delivers is new binary on the old chart.
+#
+# So a rebuild after a quiet week ships every branch's accumulated movement at
+# once. There is an MR per bump, but nothing pauses for anyone to read it. Treat
+# a build as a release to one production CA, not as a canary — report the digest
+# after a push, not just that it happened.
+#
+# Rebuilds also force-push this branch, which orphans the previous tip. That
+# deployment's GitRepository pins branch+commit, so its reconcile fails until
+# the bump merges — it keeps serving the last good artefact, so nothing moves,
+# but it stops updating. Confirmed with its owner 2026-09-07; a tag scheme that
+# would avoid it is Chris's call and not currently implemented.
 #
 # ---------------------------------------------------------------------------
 # WHAT GOES IN BRANCHES
