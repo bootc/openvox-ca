@@ -331,7 +331,7 @@ func (c *CA) GenerateWithOptions(ctx context.Context, subject string, opts Gener
 
 		certPEM, err := c.issueLeafLocked(ctx, subject,
 			pkix.Name{CommonName: subject}, key.Public(),
-			subjectAltNames{DNSNames: dnsNames}, extraExtensions, opts.TTL)
+			subjectAltNames{DNSNames: dnsNames}, extraExtensions, nil, opts.TTL)
 		if err != nil {
 			if replacing {
 				return c.replacementFailed(subject, err)
