@@ -47,6 +47,16 @@ const (
 	certValidity = 5 * 365 * 24 * time.Hour
 	// CRLValidity is the default validity window written into every CRL.
 	CRLValidity = 30 * 24 * time.Hour
+	// leafBackdate is how far before the moment of issuance a leaf's NotBefore
+	// is set, so a verifier whose clock is behind ours still accepts a
+	// certificate we have just signed.
+	//
+	// Named rather than written inline because a second place now depends on
+	// it: issueDecision derives a certificate's forward lifetime -- the span it
+	// was actually issued to serve -- as NotAfter - NotBefore - leafBackdate,
+	// and that arithmetic is what clamps the renew-before window. A literal in
+	// one file and an assumption in another is how the two would diverge.
+	leafBackdate = 24 * time.Hour
 )
 
 // CRLValidityDuration returns the CA's configured CRL validity period.
@@ -606,7 +616,7 @@ func (c *CA) signWithDuration(ctx context.Context, subject string, ttl time.Dura
 		}
 	}
 
-	certPEM, err := c.issueLeafLocked(ctx, subject, csr.Subject, csr.PublicKey, subjectAltNames{DNSNames: dnsNames}, extraExtensions, ttl)
+	certPEM, err := c.issueLeafLocked(ctx, subject, csr.Subject, csr.PublicKey, subjectAltNames{DNSNames: dnsNames}, extraExtensions, nil, ttl)
 	if err != nil {
 		return nil, err
 	}
@@ -630,17 +640,36 @@ type subjectAltNames struct {
 	URIs           []*url.URL
 }
 
+// defaultLeafExtKeyUsage returns the extended key usages a leaf carries when
+// its caller names none.
+//
+// A fresh slice each call, deliberately: it is written into an
+// x509.Certificate template that callers are free to amend, and a shared
+// package-level slice would let one issuance's amendment reach the next.
+func defaultLeafExtKeyUsage() []x509.ExtKeyUsage {
+	return []x509.ExtKeyUsage{x509.ExtKeyUsageServerAuth, x509.ExtKeyUsageClientAuth}
+}
+
 // issueLeafLocked builds, signs, and persists a leaf certificate for subject
-// from the given public key, SANs, and extra (Puppet OID) extensions, then
-// appends the inventory entry and updates the in-memory serial index.
-// ttl=0 means use the default certValidity. c.mu must be held by the caller.
+// from the given public key, SANs, extended key usages, and extra (Puppet OID)
+// extensions, then appends the inventory entry and updates the in-memory serial
+// index. ttl=0 means use the default certValidity. c.mu must be held by the
+// caller.
+//
+// eku=nil means the serverAuth+clientAuth pair every certificate this CA has
+// ever issued, which is what all three callers below pass. It is a parameter
+// because a certificate this CA issues for its own serving name must be able to
+// be serverAuth-only: a clientAuth certificate for a name that appears in
+// puppet_server is a usable admin credential. Making that a parameter of the
+// shared tail rather than a second signing path keeps the key-strength policy,
+// the serial allocation and the inventory append in one place.
 //
 // This is the tail shared by signWithDuration (inputs come from a submitted
 // CSR, after CSR-specific validation), AutoRenew (inputs come from an
 // already-issued certificate's public key, with no CSR involved at all), and
 // GenerateWithOptions (inputs come from a key this CA just generated, with no
 // client involved at all).
-func (c *CA) issueLeafLocked(ctx context.Context, subject string, subjectName pkix.Name, pubKey any, sans subjectAltNames, extraExtensions []pkix.Extension, ttl time.Duration) ([]byte, error) {
+func (c *CA) issueLeafLocked(ctx context.Context, subject string, subjectName pkix.Name, pubKey any, sans subjectAltNames, extraExtensions []pkix.Extension, eku []x509.ExtKeyUsage, ttl time.Duration) ([]byte, error) {
 	// Defensive: a nil CACert here means the caller skipped Init() (or it
 	// failed). Without this guard the c.CACert.NotAfter dereference below
 	// would panic the entire frontend.
@@ -695,14 +724,21 @@ func (c *CA) issueLeafLocked(ctx context.Context, subject string, subjectName pk
 	}
 	subjectKeyID := sha1.Sum(pubKeyDER)
 
+	// Resolved here rather than at each call site so an omitted argument cannot
+	// mean "no extended key usage at all", which in X.509 means *unrestricted*
+	// -- the opposite of what a caller passing nothing intends.
+	if len(eku) == 0 {
+		eku = defaultLeafExtKeyUsage()
+	}
+
 	template := &x509.Certificate{
 		SerialNumber: serialInt,
 		Subject:      subjectName,
-		NotBefore:    now.Add(-24 * time.Hour),
+		NotBefore:    now.Add(-leafBackdate),
 		NotAfter:     now.Add(validity),
 
 		KeyUsage:    x509.KeyUsageDigitalSignature | x509.KeyUsageKeyEncipherment,
-		ExtKeyUsage: []x509.ExtKeyUsage{x509.ExtKeyUsageServerAuth, x509.ExtKeyUsageClientAuth},
+		ExtKeyUsage: eku,
 
 		BasicConstraintsValid: true,
 		IsCA:                  false,
@@ -1467,7 +1503,7 @@ func (c *CA) AutoRenew(ctx context.Context, presentedCert *x509.Certificate) ([]
 				EmailAddresses: presentedCert.EmailAddresses,
 				URIs:           presentedCert.URIs,
 			}
-			return c.issueLeafLocked(ctx, subject, presentedCert.Subject, presentedCert.PublicKey, sans, extraExtensions, 0)
+			return c.issueLeafLocked(ctx, subject, presentedCert.Subject, presentedCert.PublicKey, sans, extraExtensions, nil, 0)
 		}()
 		if err != nil {
 			return err
