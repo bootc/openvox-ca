@@ -226,6 +226,20 @@ type CA struct {
 	// AutoRenew retires its predecessor at all; this decides when.
 	SupersedeAfter time.Duration
 
+	// ManagedCerts are the named leaves this CA keeps alive: it issues each
+	// one, renews it on a loop, and supersedes its predecessor with a delay.
+	// Empty (the zero value) means the mechanism is entirely dormant -- no
+	// goroutine, no storage key, no behaviour change of any kind.
+	//
+	// Set before the server starts its background jobs; ReconcileManaged reads
+	// the slice on every pass and does not expect it to change underneath it.
+	// Note that a managed certificate's predecessor is retired according to
+	// SupersedeAfter, whose zero value revokes immediately -- so a CA that
+	// reconciles managed certificates without setting it retires each one
+	// inline, with no overlap for relying parties. `openvox-ca serve` sets it;
+	// nothing else does.
+	ManagedCerts []ManagedCert
+
 	// ExternalSigner, when non-nil, is used instead of loading the CA private
 	// key from disk. This enables key isolation: the private key lives in a
 	// separate process and signing requests are proxied over IPC.
