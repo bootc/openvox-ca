@@ -121,16 +121,15 @@ set -eu -o pipefail
 BRANCHES=(
   local/integration-setup
 
-  # Conflicts with MAIN, not with a sibling: #311 merged and rewrote
-  # docs/operator-cli.md's "Running alongside a live server" section — its
-  # capability table and the prose beneath it as one argument. Resolve that
-  # whole section as a unit, not the conflicted hunk alone, or the table can
-  # end up saying one thing and the paragraph under it another.
   origin/feature/188-rebuild-inventory-hmac  # PR #312 — issue #188
 
   # Collide on magefile.go. #282 FIRST: #266 wires release.yml to call
   # `mage build:packages`, which #282 provides, and #266's body says it must
   # not merge before #282.
+  #
+  # #282 is 47 behind and now conflicts with main on go.sum, from Renovate
+  # bumps that landed while it sat. That one is its owner's to rebase, not a
+  # resolution to make here.
   origin/feature/package-payload          # PR #282
   origin/feature/release-packaging        # PR #266
 )
