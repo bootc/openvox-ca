@@ -44,6 +44,14 @@ set -eu -o pipefail
 #
 # local/integration-setup shows on the other side of that comm, by design.
 #
+# KEEP TRANSIENT STATE OUT OF THESE COMMENTS. How far behind a branch is, and
+# what it conflicts with today, both change under you — two notes here went
+# stale within hours of being written, and a stale instruction is worse than
+# none because it sends a resolver looking for something that is not there.
+# `integration-trial.sh` answers those questions on demand. What belongs here
+# is what does NOT decay: a merge order stated in a PR body, a resolution that
+# needs the whole section rather than the hunk, a branch held out and why.
+#
 # Order by COLLISION, not by file overlap — two branches touching one file
 # usually merge cleanly. Measure it with pairwise `git merge-tree --write-tree`
 # and keep any pair that truly conflicts adjacent, so it surfaces once.
@@ -126,10 +134,6 @@ BRANCHES=(
   # Collide on magefile.go. #282 FIRST: #266 wires release.yml to call
   # `mage build:packages`, which #282 provides, and #266's body says it must
   # not merge before #282.
-  #
-  # #282 is 47 behind and now conflicts with main on go.sum, from Renovate
-  # bumps that landed while it sat. That one is its owner's to rebase, not a
-  # resolution to make here.
   origin/feature/package-payload          # PR #282
   origin/feature/release-packaging        # PR #266
 )
