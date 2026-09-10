@@ -656,19 +656,21 @@ func defaultLeafExtKeyUsage() []x509.ExtKeyUsage {
 // index. ttl=0 means use the default certValidity. c.mu must be held by the
 // caller.
 //
-// eku=nil means the serverAuth+clientAuth pair every certificate this CA has
-// ever issued, which is what all three callers below pass. It is a parameter
-// because a certificate this CA issues for its own serving name must be able to
-// be serverAuth-only: a clientAuth certificate for a name that appears in
-// puppet_server is a usable admin credential. Making that a parameter of the
-// shared tail rather than a second signing path keeps the key-strength policy,
-// the serial allocation and the inventory append in one place.
+// eku=nil means the serverAuth+clientAuth pair every certificate this CA issued
+// before managed certificates existed, which is what the three CSR- and
+// operator-driven callers pass. It is a parameter because a managed certificate
+// must be able to be serverAuth-only: a clientAuth certificate for a name that
+// appears in puppet_server is a usable admin credential, so the CA's own
+// serving certificate must not carry one. Making that a parameter of the shared
+// tail rather than a second signing path keeps the key-strength policy, the
+// serial allocation and the inventory append in one place.
 //
 // This is the tail shared by signWithDuration (inputs come from a submitted
 // CSR, after CSR-specific validation), AutoRenew (inputs come from an
-// already-issued certificate's public key, with no CSR involved at all), and
+// already-issued certificate's public key, with no CSR involved at all),
 // GenerateWithOptions (inputs come from a key this CA just generated, with no
-// client involved at all).
+// client involved at all), and issueManagedLocked (inputs come from server
+// configuration, with no client involved at all).
 func (c *CA) issueLeafLocked(ctx context.Context, subject string, subjectName pkix.Name, pubKey any, sans subjectAltNames, extraExtensions []pkix.Extension, eku []x509.ExtKeyUsage, ttl time.Duration) ([]byte, error) {
 	// Defensive: a nil CACert here means the caller skipped Init() (or it
 	// failed). Without this guard the c.CACert.NotAfter dereference below
