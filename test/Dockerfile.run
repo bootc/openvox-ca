@@ -14,6 +14,10 @@ FROM quay.io/centos/centos:stream10
 
 # curl: health checks and agent CSR submission
 # openssl: CSR generation and cert verification in integration tests
+# diffutils: `diff`, used by integration-compose.sh's import assertion.
+#   Declared because it was not: the base image shipped it until
+#   2026-09-10, when the rolling stream10 tag dropped it and the suite
+#   failed -- reporting a content mismatch on byte-identical files.
 #
 # uid/gid 1000 pinned to match the published images (see Dockerfile): `USER`
 # has to be numeric, and the local runtime image should present the same
@@ -21,7 +25,7 @@ FROM quay.io/centos/centos:stream10
 # The assertion below must be re-verified by hand when edited -- CI only ever
 # takes its passing branch. See docs/development/testing.md, "Container
 # identity guards".
-RUN dnf install -y curl openssl && dnf clean all && \
+RUN dnf install -y curl openssl diffutils && dnf clean all && \
     groupadd -g 1000 puppet && \
     useradd -m -u 1000 -g 1000 puppet && \
     { [ "$(id -u puppet):$(id -g puppet)" = "1000:1000" ] || \
