@@ -1321,9 +1321,15 @@ func initSignerKeyWith(ctx context.Context, cfg *serverConfig, resolve runtimeRe
 	// CloseStore's actual result rather than a constant: the branch above means
 	// there is a result to carry, and a field hardcoded true would report
 	// success on the very path that has just logged a failure.
+	//
+	// Its neighbour is named for a request, not an outcome, and the two are not
+	// inconsistent for that. FreeOSMemory returns nothing and promises only an
+	// attempt, so there is no result to carry and no honest way to say whether
+	// the pages actually went back. An operator whose RSS did not fall wants to
+	// know this line ran, and must not read it as proof the reclaim succeeded.
 	debug.FreeOSMemory()
 	slog.Debug("Released the signer's initialisation state",
-		"store_closed", closeErr == nil, "os_memory_reclaimed", true)
+		"store_closed", closeErr == nil, "os_memory_release_requested", true)
 
 	return key, rt, nil
 }
