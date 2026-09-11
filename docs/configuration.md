@@ -868,23 +868,23 @@ the CA's still accepts a certificate that has just been issued. Without it, an
 agent running a few seconds slow rejects its own brand-new certificate as not
 yet valid.
 
-`leaf_backdate_sec` sets how far, and defaults to **5 minutes**. That is a
-tolerance for ordinary clock drift, not a margin for a fleet that cannot keep
-time: a client further out than the backdate refuses the certificate, and keeps
-refusing it until its clock is corrected. Where NTP is not available and hosts
-are known to drift further, raise it.
+`leaf_backdate_sec` sets how far, and defaults to **5 minutes**. It assumes the
+fleet's clocks are synchronised, which is what NTP is for. A client further out
+than the backdate refuses the certificate and keeps refusing it until its clock
+is corrected — and that is the intended behaviour, not a gap in it. Five minutes
+of skew is a clock-sync fault, and a fault is better seen than absorbed: a
+backdate wide enough to hide one is a defect wearing a safety margin.
 
 It applies to every leaf — signed from a CSR, generated, renewed or managed — so
-raising it widens the window in which a certificate is valid before anyone asked
-for it. A negative value is refused at startup, because it would issue certificates that
-are valid only in the future. So is anything above 30 days, for the same reason
-in the other direction: this is a clock-skew tolerance, and a certificate valid
-that far before it was issued is not one.
+raising it widens the window in which every certificate is valid before anyone
+asked for it. A negative value is refused at startup, because it would issue
+certificates that are valid only in the future. So is anything above 30 days,
+for the same reason in the other direction: this is a clock-skew tolerance, and
+a certificate valid that far before it was issued is not one.
 
 It does **not** govern the CA's own certificate, which is backdated a fixed 24
 hours when the CA is bootstrapped. That one is written once, by the process that
-creates it, and nothing renews it on a timer; raising this setting for a skewed
-fleet does not change it.
+creates it, and nothing renews it on a timer, so this setting does not reach it.
 
 The setting also feeds the managed-certificate renewal decision, which derives
 how much serving life a certificate was granted by subtracting the backdate from
