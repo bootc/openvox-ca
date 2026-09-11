@@ -50,6 +50,11 @@ type memStore struct {
 	loadErr error
 	saveErr error
 
+	// saveHook, when set, runs before the write and may fail it. It exists for
+	// the one failure the saveErr field cannot express: a store that consumes
+	// the caller's deadline on its way to failing.
+	saveHook func() error
+
 	// delay is spent inside Load, before anything is returned. It exists for
 	// the convergence specs: it widens the window in which four replicas are
 	// all holding stale material, which is what makes the unlocked outcome a
@@ -71,6 +76,17 @@ func (s *memStore) load(context.Context) ([]byte, []byte, error) {
 }
 
 func (s *memStore) save(_ context.Context, certPEM, keyPEM []byte) error {
+	s.mu.Lock()
+	hook := s.saveHook
+	s.mu.Unlock()
+	// Outside the store's own mutex: the hook models what a real store does on
+	// its way to failing, which for the deadline spec means cancelling the
+	// caller's context.
+	if hook != nil {
+		if err := hook(); err != nil {
+			return err
+		}
+	}
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	if s.saveErr != nil {
@@ -304,6 +320,51 @@ var _ = Describe("Reconciling a managed certificate", func() {
 			entries, _, rerr := myCA.readSuperseded(ctx)
 			Expect(rerr).NotTo(HaveOccurred())
 			Expect(entries).To(BeEmpty())
+		})
+
+		It("still revokes it when the store write exhausted the pass's deadline", func() {
+			// The realistic shape of this failure, and the one the plain spec
+			// above cannot reach: the store did not refuse quickly, it HUNG, and
+			// by the time it gave up the deadline the pass started with was
+			// spent. A rollback sharing that deadline finds the context already
+			// done, cannot take the CRL lock, and leaves precisely the orphan it
+			// exists to prevent -- a live certificate whose key exists nowhere,
+			// which nothing retires before it expires.
+			//
+			// Modelled by cancelling the context from inside Save, which is
+			// stronger than waiting for a real deadline: a rollback that
+			// inherits it is guaranteed to fail rather than merely likely to.
+			var passCtx context.Context
+			var cancelPass context.CancelFunc
+			passCtx, cancelPass = context.WithCancel(ctx)
+			defer cancelPass()
+
+			fake.saveErr = nil
+			fake.mu.Lock()
+			fake.saveHook = func() error {
+				cancelPass()
+				return fmt.Errorf("secret store timed out")
+			}
+			fake.mu.Unlock()
+
+			_, err := myCA.reconcileManagedCert(passCtx, entry,
+				time.Now().UTC().Add(dueWindow))
+			Expect(err).To(MatchError(ContainSubstring("secret store timed out")))
+
+			stored, gerr := store.GetCert(ctx, subject)
+			Expect(gerr).NotTo(HaveOccurred())
+			block, _ := pem.Decode(stored)
+			Expect(block).NotTo(BeNil())
+			orphan, perr := x509.ParseCertificate(block.Bytes)
+			Expect(perr).NotTo(HaveOccurred())
+			Expect(orphan.SerialNumber).NotTo(Equal(predecessor.SerialNumber),
+				"the fixture is only meaningful if a new certificate was actually signed")
+
+			revoked, rerr := myCA.IsRevokedSerial(ctx, orphan.SerialNumber)
+			Expect(rerr).NotTo(HaveOccurred())
+			Expect(revoked).To(BeTrue(),
+				"the rollback inherited the cancelled context and never ran, so a certificate "+
+					"nobody can use is live until it expires")
 		})
 
 		It("leaves the predecessor valid and in the store", func() {
