@@ -130,18 +130,22 @@ BRANCHES=(
   local/integration-setup
 
   origin/feature/316-separate-fixture-image  # PR #323 — issue #316
-  origin/fix/313-nolintlint-g703-flake     # PR #325 — issue #313
 
-  # Collide on docs/development/locking.md's lock-name table, on DISJOINT rows:
-  # #312 changes hmac-key, capability-probe and store-instance; #322 changes crl
-  # and subject:<name>. Keep both sides, one row each — do not pick a side. #312
-  # is first here because it lands first, so the rebase is #322's.
+  # #312 collides with BOTH neighbours and sits between them deliberately:
+  # with #327 on cmd/openvox-ca/runtime.go, and with #322 on
+  # docs/development/locking.md. The locking.md collision is DISJOINT ROWS of
+  # the lock-name table — #312 changes hmac-key, capability-probe and
+  # store-instance; #322 changes crl and subject:<name>. Keep both sides, one
+  # row each; do not pick a side.
+  origin/feature/306-signer-drops-store   # PR #327 — issue #306
   origin/feature/188-rebuild-inventory-hmac  # PR #312 — issue #188
   origin/feature/242-managed-certificates  # PR #322 — issue #242
 
-  # Collide on magefile.go. #282 FIRST: #266 wires release.yml to call
-  # `mage build:packages`, which #282 provides, and #266's body says it must
-  # not merge before #282.
+  # #282 likewise collides with both neighbours: with #325 on magefile_test.go
+  # and with #266 on magefile.go. #266 must follow #282 regardless — it wires
+  # release.yml to call `mage build:packages`, which #282 provides, and its own
+  # PR body says so.
+  origin/fix/313-nolintlint-g703-flake    # PR #325 — issue #313
   origin/feature/package-payload          # PR #282
   origin/feature/release-packaging        # PR #266
 )
