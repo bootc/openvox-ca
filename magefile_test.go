@@ -308,6 +308,78 @@ var _ = Describe("shellVariantList", func() {
 	})
 })
 
+var _ = Describe("verifyNolintlintCarveOut", func() {
+	// Against the repository's real files: the carve-out and the pin it was
+	// reasoned against must actually agree right now.
+	It("finds the real carve-out matching the real golangci-lint pin", func() {
+		Expect(verifyNolintlintCarveOut()).To(Succeed())
+	})
+
+	Describe("drift detection", func() {
+		carveOut := []byte(`
+linters:
+  exclusions:
+    rules:
+      - path: internal/storage/filelock\.go
+        linters:
+          - nolintlint
+        text: 'G703.*is unused for linter "gosec"'
+`)
+		noCarveOut := []byte(`
+linters:
+  exclusions:
+    rules:
+      - linters:
+          - staticcheck
+        text: "QF1008"
+`)
+		ci := []byte("      - name: Install golangci-lint\n" +
+			"        run: go install github.com/golangci/golangci-lint/v2/cmd/golangci-lint@" +
+			nolintlintCarveOutPin + "\n")
+
+		It("accepts the carve-out while the pin is the one it was reasoned against", func() {
+			Expect(verifyNolintlintCarveOutIn(carveOut, ci)).To(Succeed())
+		})
+
+		// The whole point: the pin moves in an auto-merged renovate PR, and
+		// nothing else in the repository would notice the carve-out had
+		// outlived its justification.
+		It("rejects a moved pin while the carve-out is still present", func() {
+			moved := bytes.Replace(ci, []byte(nolintlintCarveOutPin), []byte("v2.14.0"), 1)
+			Expect(verifyNolintlintCarveOutIn(carveOut, moved)).To(MatchError(
+				And(ContainSubstring("v2.14.0"),
+					ContainSubstring(nolintlintCarveOutPin),
+					ContainSubstring("securego/gosec#1733"),
+					ContainSubstring("openvox-ca#313"))))
+		})
+
+		// The removal outcome this guard exists to make reachable: once the
+		// carve-out goes, the pin is free to move.
+		It("accepts a moved pin once the carve-out is gone", func() {
+			moved := bytes.Replace(ci, []byte(nolintlintCarveOutPin), []byte("v2.14.0"), 1)
+			Expect(verifyNolintlintCarveOutIn(noCarveOut, moved)).To(Succeed())
+		})
+
+		// The floor. Comparing the two files to each other is not enough: with
+		// no pin to read, a deleted install line would otherwise pass as
+		// "nothing to check" rather than fail as drift.
+		It("rejects a carve-out whose pin cannot be read at all", func() {
+			Expect(verifyNolintlintCarveOutIn(carveOut, []byte("no install line here"))).To(MatchError(
+				And(ContainSubstring("no golangci-lint pin"),
+					ContainSubstring("openvox-ca#313"))))
+		})
+
+		// A rule on another path, or one that does not name nolintlint, is not
+		// this carve-out and must not hold the pin hostage.
+		It("ignores a nolintlint exclusion on a different path", func() {
+			other := bytes.Replace(carveOut,
+				[]byte(`internal/storage/filelock\.go`), []byte(`internal/ca/other\.go`), 1)
+			moved := bytes.Replace(ci, []byte(nolintlintCarveOutPin), []byte("v2.14.0"), 1)
+			Expect(verifyNolintlintCarveOutIn(other, moved)).To(Succeed())
+		})
+	})
+})
+
 var _ = Describe("verifyAutomergeLabelExclusion", func() {
 	// Against the repository's real ci.yml: the clause must actually be there.
 	It("finds the real auto-merge job excluding the signing-review label", func() {
