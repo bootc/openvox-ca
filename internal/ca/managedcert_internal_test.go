@@ -497,8 +497,12 @@ var _ = Describe("The leaf NotBefore backdate", func() {
 		Expect(crt.NotAfter).To(BeTemporally(">", before),
 			"a certificate that expires before it was issued is not a certificate")
 		Expect(crt.NotAfter.Sub(before)).To(BeNumerically("<", certValidity+time.Minute))
-		Expect(crt.NotAfter.Sub(crt.NotBefore)).To(BeNumerically(">", 3*time.Hour),
-			"the span must include the backdate, which is what renewWindowFor subtracts")
+		// The span exceeds the forward life by exactly the backdate, which is the
+		// quantity renewWindowFor subtracts. Asserted as a difference rather
+		// than as `span > 3h`: the default lifetime is five years, so that bound
+		// holds with the backdate deleted altogether and tests nothing.
+		Expect(crt.NotAfter.Sub(crt.NotBefore) - crt.NotAfter.Sub(after)).
+			To(BeNumerically("~", 3*time.Hour, time.Minute))
 	})
 
 	It("falls back to the default for a non-positive setting", func() {

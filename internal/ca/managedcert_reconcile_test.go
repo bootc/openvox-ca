@@ -23,10 +23,12 @@
 package ca
 
 import (
+	"bytes"
 	"context"
 	"crypto/x509"
 	"encoding/pem"
 	"fmt"
+	"log/slog"
 	"math/big"
 	"os"
 	"path/filepath"
@@ -417,6 +419,32 @@ var _ = Describe("Reconciling a managed certificate", func() {
 					"cancelled context too")
 		})
 
+		It("does not put a foreign predecessor into the CA's own record", func() {
+			// On the not-ours arm `current` is a certificate this CA did not
+			// issue. Restoring THAT to cert/<subject> would leave the CA serving
+			// material of unknown provenance with no inventory row, which
+			// evictRevokedLocked then reads as ErrCertExists for ever, since a
+			// foreign serial can never reach this CA's CRL.
+			foreign, foreignKey := selfSignedIssuer("Some other CA")
+			leaf := mintLeaf(foreign, foreignKey, subject, spec.DNSNames, nil,
+				90*24*time.Hour, time.Now().UTC())
+			fake.mu.Lock()
+			fake.certPEM, fake.keyPEM = leaf.certPEM, leaf.keyPEM
+			fake.mu.Unlock()
+
+			_, err := reconcile()
+			Expect(err).To(MatchError(ContainSubstring("secret rejected")))
+
+			stored, gerr := store.GetCert(ctx, subject)
+			Expect(gerr).NotTo(HaveOccurred())
+			sblock, _ := pem.Decode(stored)
+			Expect(sblock).NotTo(BeNil())
+			scert, perr := x509.ParseCertificate(sblock.Bytes)
+			Expect(perr).NotTo(HaveOccurred())
+			Expect(scert.SerialNumber).NotTo(Equal(leaf.cert.SerialNumber),
+				"the CA's record must not be overwritten with a certificate it did not issue")
+		})
+
 		It("leaves the predecessor valid and in the store", func() {
 			_, err := reconcileAt(dueWindow)
 			Expect(err).To(HaveOccurred())
@@ -593,6 +621,55 @@ var _ = Describe("Reconciling a managed certificate", func() {
 				"nor schedule it for revocation, which is the same act with a delay")
 		})
 
+		It("logs the displacement, naming the serial and a remedy", func() {
+			// After the refusal design was abandoned this warning is the ONLY
+			// record that a live credential stopped being reachable by certname.
+			// Deleting the call, or dropping the serial from it, would otherwise
+			// fail nothing.
+			existing, err := myCA.GenerateWithOptions(ctx, subject, GenerateOptions{
+				DNSAltNames: []string{subject},
+			})
+			Expect(err).NotTo(HaveOccurred())
+			block, _ := pem.Decode(existing.CertificatePEM)
+			Expect(block).NotTo(BeNil())
+			incumbent, err := x509.ParseCertificate(block.Bytes)
+			Expect(err).NotTo(HaveOccurred())
+
+			var buf bytes.Buffer
+			prev := slog.Default()
+			slog.SetDefault(slog.New(slog.NewTextHandler(&buf, &slog.HandlerOptions{
+				Level: slog.LevelDebug,
+			})))
+			defer slog.SetDefault(prev)
+
+			_, err = reconcile()
+			Expect(err).NotTo(HaveOccurred())
+
+			Expect(buf.String()).To(ContainSubstring("no longer reachable by certname"))
+			Expect(buf.String()).To(ContainSubstring(serialHexStr(incumbent.SerialNumber)),
+				"the warning must name the displaced serial; it is the only way to address it")
+			Expect(buf.String()).To(ContainSubstring("revoke --serial"))
+		})
+
+		It("says nothing on the steady-state pass", func() {
+			// The complement: an inverted same-serial check would warn on every
+			// ordinary renewal, which is how a real warning becomes noise
+			// nobody reads.
+			_, err := reconcile()
+			Expect(err).NotTo(HaveOccurred())
+
+			var buf bytes.Buffer
+			prev := slog.Default()
+			slog.SetDefault(slog.New(slog.NewTextHandler(&buf, &slog.HandlerOptions{
+				Level: slog.LevelDebug,
+			})))
+			defer slog.SetDefault(prev)
+
+			_, err = reconcileAt(dueWindow)
+			Expect(err).NotTo(HaveOccurred())
+			Expect(buf.String()).NotTo(ContainSubstring("no longer reachable by certname"))
+		})
+
 		It("leaves a certificate with different usages alone too", func() {
 			// The complement of the spec above: an incumbent that does NOT look
 			// like anything this entry would issue is treated identically --
@@ -639,9 +716,32 @@ var _ = Describe("Reconciling a managed certificate", func() {
 			Expect(issued).To(BeTrue(), "the entry must self-heal, not stall")
 			Expect(fake.stored().SerialNumber).NotTo(Equal(previous.SerialNumber))
 
-			// The certificate it displaced keeps its inventory row, so it stays
-			// addressable by serial even though the CA's record for the name now
-			// points at the replacement.
+			// THIS is the fixture that makes the whole displacement decision
+			// falsifiable, and it is the only one that can be.
+			//
+			// `previous` was issued by this entry from this very spec, so it
+			// satisfies leafCarriesNames and leafCarriesUsages by construction.
+			// The abandoned retire-on-resemblance design would therefore have
+			// retired it here -- and no fixture whose incumbent FAILS the spec
+			// can tell that design apart from this one, because that design
+			// would not have retired those either.
+			//
+			// So: not revoked, and not scheduled for revocation. The CA revokes
+			// nothing it cannot prove is the entry's, and it cannot prove this.
+			revoked, rerr := myCA.IsRevokedSerial(ctx, previous.SerialNumber)
+			Expect(rerr).NotTo(HaveOccurred())
+			Expect(revoked).To(BeFalse(),
+				"a certificate that satisfies the entry's own spec must STILL not be revoked; "+
+					"resemblance is not ownership, and an ordinary agent certificate for this "+
+					"name resembles it just as closely")
+
+			entries, _, serr2 := myCA.readSuperseded(ctx)
+			Expect(serr2).NotTo(HaveOccurred())
+			Expect(entries).To(BeEmpty(),
+				"nor scheduled for revocation, which is the same act with a delay")
+
+			// And it keeps its inventory row, so it stays addressable by serial
+			// even though the CA's record for the name now points elsewhere.
 			sub, serr := store.SubjectForSerial(ctx, serialHexStr(previous.SerialNumber))
 			Expect(serr).NotTo(HaveOccurred())
 			Expect(sub).To(Equal(subject),
