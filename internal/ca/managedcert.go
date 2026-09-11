@@ -506,11 +506,11 @@ func (c *CA) reconcileManagedCert(ctx context.Context, m ManagedCert, now time.T
 		// way -- refusing would stall the self-heal #242's failure table
 		// requires -- but a credential that stops being reachable by certname
 		// is not something to let pass silently.
-		c.warnIfDisplacingLocked(ctx, subject, current)
+		c.warnIfDisplacingUnderSubjectLock(ctx, subject, current)
 
 		slog.Info("Issuing managed certificate", "subject", subject, "reason", reason.String())
 
-		did, err := c.issueManagedLocked(ctx, m, reason, current)
+		did, err := c.issueManagedUnderSubjectLock(ctx, m, reason, current)
 		issued = did
 		return err
 	})
@@ -520,7 +520,7 @@ func (c *CA) reconcileManagedCert(ctx context.Context, m ManagedCert, now time.T
 	return issued, nil
 }
 
-// warnIfDisplacingLocked reports a certificate this CA holds for the subject
+// warnIfDisplacingUnderSubjectLock reports a certificate this CA holds for the subject
 // that the managed entry is about to replace and does not account for.
 //
 // issueLeafLocked ends in an unconditional SaveCert, so whatever is at
@@ -531,8 +531,9 @@ func (c *CA) reconcileManagedCert(ctx context.Context, m ManagedCert, now time.T
 // CA's record points at its successor, so `revoke --certname` reaches the new
 // one and the old one is addressable only by serial.
 //
-// This says so, loudly, and then lets the issuance proceed. Three earlier
-// designs were tried and are recorded here because each is tempting:
+// This says so, loudly, and then lets the issuance proceed. Two earlier designs
+// were tried and a third was considered and refused; all three are recorded
+// here because each is tempting:
 //
 //   - Refuse whenever the incumbent is not `current`. That is what the first
 //     version did, and it refused exactly the cases #242's failure table
@@ -557,8 +558,23 @@ func (c *CA) reconcileManagedCert(ctx context.Context, m ManagedCert, now time.T
 // gets the serial and the remedy instead. The certificate is not lost: it keeps
 // its inventory row, and `openvox-ca-ctl revoke --serial` addresses it.
 //
-// The caller must hold subject's lock.
-func (c *CA) warnIfDisplacingLocked(ctx context.Context, subject string, current *x509.Certificate) {
+// The check is one-directional, and deliberately so for now. Renew and
+// AutoRenew also end in issueLeafLocked's unconditional SaveCert, so the holder
+// of a displaced certificate can renew and take cert/<subject> back -- leaving
+// the *managed* certificate reachable only by serial, with no warning, because
+// neither renewal path consults c.ManagedCerts. Making it symmetric means
+// teaching the renewal paths about a mechanism nothing configures yet, so it is
+// recorded here rather than built: #243 must not inherit the asymmetry as
+// settled.
+//
+// The caller must hold subject's lock and must NOT hold c.mu: IsRevokedSerial
+// takes c.mu.RLock, which is not reentrant. Named for the lock it runs under
+// rather than with this package's `...Locked` suffix, which everywhere else
+// means "c.mu is held by the caller" -- the opposite of what is wanted here,
+// and a reader who followed the usual reading would wedge the reconcile
+// goroutine on a mutex that honours no deadline, while it holds the subject's
+// cluster lock.
+func (c *CA) warnIfDisplacingUnderSubjectLock(ctx context.Context, subject string, current *x509.Certificate) {
 	storedPEM, err := c.Storage.GetCert(ctx, subject)
 	if err != nil {
 		if !errors.Is(err, fs.ErrNotExist) {
@@ -593,8 +609,8 @@ func (c *CA) warnIfDisplacingLocked(ctx context.Context, subject string, current
 	// NIST 800-53: AU-2 (Event Logging), AC-6 (Least Privilege)
 	slog.Warn("A managed certificate is replacing a different certificate stored for its name; "+
 		"the replaced certificate stays valid and is no longer reachable by certname. "+
-		"Retire it with 'openvox-ca-ctl revoke --serial <hex> --force', or give the managed "+
-		"certificate a name of its own",
+		"Retire it with 'openvox-ca-ctl revoke --serial <hex>' if it must go, or give the "+
+		"managed certificate a name of its own",
 		"subject", subject, "displaced_serial", serialHexStr(stored.SerialNumber),
 		"displaced_not_after", stored.NotAfter.UTC().Format(time.RFC3339))
 }
@@ -627,7 +643,7 @@ func (c *CA) storedMaterialRevoked(ctx context.Context, certPEM []byte, subject 
 	return revoked
 }
 
-// issueManagedLocked generates a key, signs a certificate for m's spec, writes
+// issueManagedUnderSubjectLock generates a key, signs a certificate for m's spec, writes
 // the pair to m's store, and retires the predecessor. The caller must hold
 // subject's lock and must NOT hold c.mu.
 //
@@ -635,7 +651,7 @@ func (c *CA) storedMaterialRevoked(ctx context.Context, certPEM []byte, subject 
 // store and to nowhere else: not to the backing store, and not to the local
 // cadir either. That is why RetainPrivateKeyInStorage has no equivalent on this
 // path -- there is nothing to opt out of.
-func (c *CA) issueManagedLocked(ctx context.Context, m ManagedCert, reason issueReason,
+func (c *CA) issueManagedUnderSubjectLock(ctx context.Context, m ManagedCert, reason issueReason,
 	current *x509.Certificate) (bool, error) {
 	subject := m.Spec.Subject
 
@@ -759,14 +775,25 @@ func (c *CA) issueManagedLocked(ctx context.Context, m ManagedCert, reason issue
 					"error", serr)
 			}
 		}
-		if current != nil {
-			// Unconditional, including on the arm where the restore succeeded:
-			// that is the arm with no other trace of the predecessor's serial,
-			// and it is the serial an operator needs, because by-name
-			// revocation resolves to the orphan instead.
+		// Reported on every arm where a predecessor exists, including the one
+		// where the restore succeeded: that is the arm with no other trace of
+		// its serial, and it is the serial an operator needs, because by-name
+		// revocation resolves to the orphan instead.
+		//
+		// The remedy differs by provenance. A predecessor this CA issued can be
+		// retired by serial; one it did not has no inventory row, so
+		// RevokeSerial answers ErrSerialUnknown, which force does not override.
+		// Offering that command there would send the operator at a refusal.
+		switch {
+		case current != nil && reason == reasonNotOurs:
+			slog.Warn("A managed certificate could not be stored; the predecessor remains in "+
+				"service, and this CA did not issue it, so it cannot be revoked here. "+
+				"Retire it wherever it was issued, or remove it from the entry's store",
+				"subject", subject, "predecessor_serial", serialHexStr(current.SerialNumber))
+		case current != nil:
 			slog.Warn("A managed certificate could not be stored; the predecessor remains in "+
 				"service and by-name revocation will not reach it. Retire it with "+
-				"'openvox-ca-ctl revoke --serial <hex> --force' if it must go",
+				"'openvox-ca-ctl revoke --serial <hex>' if it must go",
 				"subject", subject, "predecessor_serial", serialHexStr(current.SerialNumber))
 		}
 		return false, fmt.Errorf("writing the material for %s to its store: %w", subject, err)

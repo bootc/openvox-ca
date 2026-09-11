@@ -37,11 +37,23 @@ import (
 // puppetca_leaf_certificate_not_after_timestamp_seconds covers its expiry and
 // the shipped expiry alerts cover it with no new series.
 //
-// What that does NOT cover is an entry that has never issued at all -- a
-// permanent refusal, or a store that never accepts a write. There is no series
-// for a certificate that does not exist, so no PromQL comparison can match its
-// absence; the Kubernetes exporter has the same hole and closes it with a
-// dedicated "not running" rule. The managed mechanism needs the equivalent.
+// Two outcomes that reasoning does not reach:
+//
+//   - An entry that has never issued at all -- a store that never accepts a
+//     write. There is no series for a certificate that does not exist, so no
+//     PromQL comparison can match its absence; the Kubernetes exporter has the
+//     same hole and closes it with a dedicated "not running" rule.
+//   - A certificate a managed issuance displaced. It stays valid but it is no
+//     longer at cert/<subject>, and the leaf series are built per subject by
+//     walking ListCerts -- so its expiry series simply stops being exported and
+//     the shipped expiry alerts can never fire for it. This is the worse of the
+//     two: a live credential that leaves the series it was in, rather than one
+//     that never enters them, and its only trace is a Warn line that does not
+//     repeat, because the next pass finds the store and the record in
+//     agreement and never re-checks.
+//
+// The managed mechanism needs the equivalent of that "not running" rule, and
+// something durable for the displacement.
 //
 // It is not added here because nothing configures a managed certificate yet: a
 // counter would be permanently zero on every deployment, and docs/metrics.md

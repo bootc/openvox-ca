@@ -594,14 +594,15 @@ look:
 > **The one revocation this does not block is auto-renewal's.** When an agent
 > renews, the CA revokes the certificate it just replaced (`revoke_on_auto_renew`,
 > on by default) on a best-effort basis: a failure there is logged
-> (`AutoRenew: failed to revoke replaced certificate`) and the renewal is allowed
+> (`AutoRenew: failed to retire replaced certificate`) and the renewal is allowed
 > to stand, with no retry. So a chain file that is unreadable at that moment does
 > not block the renewal — it skips that one revocation permanently, and the
 > superseded certificate stays valid until it expires. `puppetca_crl_update_failures_total`
-> counts it, but nothing records which serial now needs revoking by hand. Grep
-> for that message alongside a rising
-> `puppetca_crl_chain_refresh_failures_total`, and revoke by subject afterwards
-> if the window mattered.
+> counts it. Grep for that message alongside a rising
+> `puppetca_crl_chain_refresh_failures_total`: the warning names the serial, and
+> revoking by subject will not reach it — the replacement is what makes it a
+> renewal, so `revoke --certname` retires that instead. Retire it with
+> `openvox-ca-ctl revoke --serial <hex>` if the window mattered.
 
 **Write the file atomically** — write to a temporary path, then rename. A read
 that catches a `cat >` mid-write sees a file that does not end on a PEM block
@@ -875,8 +876,10 @@ are known to drift further, raise it.
 
 It applies to every leaf — signed from a CSR, generated, renewed or managed — so
 raising it widens the window in which a certificate is valid before anyone asked
-for it. A negative value is refused at startup, because it would issue
-certificates that are valid only in the future.
+for it. A negative value is refused at startup, because it would issue certificates that
+are valid only in the future. So is anything above 30 days, for the same reason
+in the other direction: this is a clock-skew tolerance, and a certificate valid
+that far before it was issued is not one.
 
 It does **not** govern the CA's own certificate, which is backdated a fixed 24
 hours when the CA is bootstrapped. That one is written once, by the process that
@@ -945,7 +948,7 @@ Two settings, two questions:
 | Setting | Question |
 | --- | --- |
 | `revoke_on_auto_renew` | *Whether* an auto-renewal retires its predecessor at all. `false` keeps it valid until it naturally expires and records nothing. |
-| `superseded_cert_revoke_after_sec` | *When*, on both renewal paths. `0` means inside the renewal call; unset means 24 hours later. |
+| `superseded_cert_revoke_after_sec` | *When*, on every path that retires a predecessor: both renewal paths and the managed-certificate reconcile, which nothing configures yet. `0` means inside the renewal call; unset means 24 hours later. |
 
 They compose as you would expect: with `revoke_on_auto_renew: false` the
 auto-renewal path records nothing, whatever the delay says, and the CSR-body
