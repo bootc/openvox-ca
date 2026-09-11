@@ -23,6 +23,7 @@
 package ca
 
 import (
+	"context"
 	"crypto"
 	"crypto/ecdsa"
 	"crypto/elliptic"
@@ -35,6 +36,7 @@ import (
 
 	. "github.com/onsi/ginkgo/v2"
 	. "github.com/onsi/gomega"
+	"github.com/voxpupuli/openvox-ca/internal/storage"
 )
 
 // mintedLeaf is a certificate and its key, as a store would hold them.
@@ -402,5 +404,79 @@ var _ = Describe("A managed-certificate spec", func() {
 	It("allows a ttl of zero, which inherits the CA's configured leaf lifetime", func() {
 		spec.TTL = 0
 		Expect(spec.Validate()).To(Succeed())
+	})
+})
+
+var _ = Describe("The leaf NotBefore backdate", func() {
+	// The setting reaches issued certificates through CA.leafBackdate(), and
+	// nothing else in the suite looks at an issued certificate's NotBefore.
+	// Without these, deleting the wiring in `openvox-ca serve` -- or making the
+	// accessor ignore the field -- leaves every spec green while an operator's
+	// leaf_backdate_sec does nothing.
+	var (
+		ctx  context.Context
+		myCA *CA
+	)
+
+	issueAndParse := func(subject string) *x509.Certificate {
+		GinkgoHelper()
+		res, err := myCA.Generate(ctx, subject, []string{subject})
+		Expect(err).NotTo(HaveOccurred())
+		block, _ := pem.Decode(res.CertificatePEM)
+		Expect(block).NotTo(BeNil())
+		crt, err := x509.ParseCertificate(block.Bytes)
+		Expect(err).NotTo(HaveOccurred())
+		return crt
+	}
+
+	BeforeEach(func() {
+		ctx = context.Background()
+		myCA = New(storage.New(GinkgoT().TempDir()), AutosignConfig{Mode: "off"}, "puppet.test")
+		myCA.CAKeyConfig = KeyConfig{Algo: KeyAlgoECDSA, Size: 256}
+		myCA.LeafKeyConfig = KeyConfig{Algo: KeyAlgoECDSA, Size: 256}
+		Expect(myCA.Init(ctx)).To(Succeed())
+	})
+
+	It("backdates by five minutes when nothing is configured", func() {
+		before := time.Now().UTC()
+		crt := issueAndParse("default.test")
+		// Bracketed rather than compared to a single instant, because the
+		// certificate was signed at some point between `before` and now.
+		Expect(crt.NotBefore).To(BeTemporally("<=", before.Add(-defaultLeafBackdate)))
+		Expect(crt.NotBefore).To(BeTemporally(">", before.Add(-defaultLeafBackdate-time.Minute)),
+			"a much earlier NotBefore means the default is not 5 minutes")
+	})
+
+	It("honours a configured backdate", func() {
+		myCA.LeafBackdate = 3 * time.Hour
+		before := time.Now().UTC()
+		crt := issueAndParse("configured.test")
+		Expect(crt.NotBefore).To(BeTemporally("<=", before.Add(-3*time.Hour)))
+		Expect(crt.NotBefore).To(BeTemporally(">", before.Add(-3*time.Hour-time.Minute)),
+			"the configured backdate was ignored in favour of some other value")
+	})
+
+	It("does not let the backdate move NotAfter", func() {
+		// The backdate lengthens the span but must not extend the life the
+		// certificate was asked for, or raising it for a skewed fleet would
+		// silently hand out longer-lived credentials.
+		myCA.LeafBackdate = 3 * time.Hour
+		before := time.Now().UTC()
+		crt := issueAndParse("notafter.test")
+		Expect(crt.NotAfter).To(BeTemporally(">", before),
+			"a certificate that expires before it was issued is not a certificate")
+		Expect(crt.NotAfter.Sub(before)).To(BeNumerically("<", certValidity+time.Minute))
+		Expect(crt.NotAfter.Sub(crt.NotBefore)).To(BeNumerically(">", 3*time.Hour),
+			"the span must include the backdate, which is what renewWindowFor subtracts")
+	})
+
+	It("falls back to the default for a non-positive setting", func() {
+		// Refused at startup by configuration, so a CA that reaches here with
+		// one was built in code. The default is the safe answer: a zero or
+		// negative backdate would issue certificates that are not yet valid.
+		myCA.LeafBackdate = -time.Hour
+		before := time.Now().UTC()
+		crt := issueAndParse("negative.test")
+		Expect(crt.NotBefore).To(BeTemporally("<=", before.Add(-defaultLeafBackdate)))
 	})
 })

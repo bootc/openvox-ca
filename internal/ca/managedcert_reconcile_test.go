@@ -27,6 +27,7 @@ import (
 	"crypto/x509"
 	"encoding/pem"
 	"fmt"
+	"math/big"
 	"os"
 	"path/filepath"
 	"sync"
@@ -263,6 +264,27 @@ var _ = Describe("Reconciling a managed certificate", func() {
 		Expect(fake.saveCount()).To(BeZero())
 	})
 
+	It("refuses an entry with no store configured, without panicking", func() {
+		// A nil Load would be called inside the subject lock, and
+		// reconcileManagedOnce has no recover -- so the panic would take the
+		// process down rather than being logged and retried.
+		bare := ManagedCert{Spec: spec}
+		issued, err := myCA.reconcileManagedCert(ctx, bare, time.Now().UTC())
+		Expect(err).To(MatchError(ContainSubstring("store is not configured")))
+		Expect(issued).To(BeFalse())
+		Expect(store.HasCert(ctx, subject)).To(BeFalse(), "nothing may be signed on this path")
+	})
+
+	It("refuses on an uninitialised CA rather than panicking", func() {
+		// Every other entry point into this package has this spec; the
+		// reconcile path is reached from a background job, where a panic is
+		// the process rather than one request.
+		blank := New(storage.New(GinkgoT().TempDir()), AutosignConfig{Mode: "off"}, "puppet.test")
+		issued, err := blank.reconcileManagedCert(ctx, entry, time.Now().UTC())
+		Expect(err).To(MatchError(ErrNotInitialized))
+		Expect(issued).To(BeFalse())
+	})
+
 	It("stops on a store it cannot read rather than reissuing over it", func() {
 		// Reconciling against material we could not read would reissue on every
 		// pass for as long as the store is down -- and each pass would supersede
@@ -301,19 +323,34 @@ var _ = Describe("Reconciling a managed certificate", func() {
 			Expect(err).To(MatchError(ContainSubstring("secret rejected")))
 			Expect(issued).To(BeFalse())
 
-			stored, err := store.GetCert(ctx, subject)
+			// The orphan's serial comes from the inventory, not from
+			// cert/<subject>: the failure path puts the CA's record back to the
+			// predecessor, so the blob is no longer the certificate that was
+			// just signed. The inventory row is what still names it.
+			orphanSerial, err := store.LatestSerialForSubject(ctx, subject)
 			Expect(err).NotTo(HaveOccurred())
-			block, _ := pem.Decode(stored)
-			Expect(block).NotTo(BeNil())
-			orphan, err := x509.ParseCertificate(block.Bytes)
-			Expect(err).NotTo(HaveOccurred())
-			Expect(orphan.SerialNumber).NotTo(Equal(predecessor.SerialNumber),
+			Expect(orphanSerial).NotTo(Equal(serialHexStr(predecessor.SerialNumber)),
 				"the fixture is only meaningful if a new certificate was actually signed")
 
-			revoked, err := myCA.IsRevokedSerial(ctx, orphan.SerialNumber)
+			orphanInt, ok := new(big.Int).SetString(orphanSerial, 16)
+			Expect(ok).To(BeTrue())
+			revoked, err := myCA.IsRevokedSerial(ctx, orphanInt)
 			Expect(err).NotTo(HaveOccurred())
 			Expect(revoked).To(BeTrue(),
 				"a certificate nobody can use must not be left live for its full lifetime")
+
+			// And the CA's own record names the certificate actually in
+			// service, not the revoked orphan. Left pointing at the orphan, an
+			// operator's `revoke --certname` would resolve to it, report
+			// success, and retire nothing.
+			restored, err := store.GetCert(ctx, subject)
+			Expect(err).NotTo(HaveOccurred())
+			rblock, _ := pem.Decode(restored)
+			Expect(rblock).NotTo(BeNil())
+			rcert, err := x509.ParseCertificate(rblock.Bytes)
+			Expect(err).NotTo(HaveOccurred())
+			Expect(rcert.SerialNumber).To(Equal(predecessor.SerialNumber),
+				"the CA's record must be put back to the predecessor still in service")
 
 			// And not merely recorded for later: an immediate revocation is on
 			// the CRL now, with nothing waiting on a sweep.
@@ -351,16 +388,14 @@ var _ = Describe("Reconciling a managed certificate", func() {
 				time.Now().UTC().Add(dueWindow))
 			Expect(err).To(MatchError(ContainSubstring("secret store timed out")))
 
-			stored, gerr := store.GetCert(ctx, subject)
+			orphanSerial, gerr := store.LatestSerialForSubject(ctx, subject)
 			Expect(gerr).NotTo(HaveOccurred())
-			block, _ := pem.Decode(stored)
-			Expect(block).NotTo(BeNil())
-			orphan, perr := x509.ParseCertificate(block.Bytes)
-			Expect(perr).NotTo(HaveOccurred())
-			Expect(orphan.SerialNumber).NotTo(Equal(predecessor.SerialNumber),
+			Expect(orphanSerial).NotTo(Equal(serialHexStr(predecessor.SerialNumber)),
 				"the fixture is only meaningful if a new certificate was actually signed")
 
-			revoked, rerr := myCA.IsRevokedSerial(ctx, orphan.SerialNumber)
+			orphanInt, ok := new(big.Int).SetString(orphanSerial, 16)
+			Expect(ok).To(BeTrue())
+			revoked, rerr := myCA.IsRevokedSerial(ctx, orphanInt)
 			Expect(rerr).NotTo(HaveOccurred())
 			Expect(revoked).To(BeTrue(),
 				"the rollback inherited the cancelled context and never ran, so a certificate "+
@@ -489,8 +524,11 @@ var _ = Describe("Reconciling a managed certificate", func() {
 			Expect(rerr).NotTo(HaveOccurred())
 			Expect(wasRevoked).To(BeTrue())
 
-			_, err = reconcile()
+			issued, err := reconcile()
 			Expect(err).NotTo(HaveOccurred())
+			Expect(issued).To(BeTrue(),
+				"the revoked certificate must have been replaced, or the empty list "+
+					"below is satisfied by nothing having happened at all")
 
 			entries, _, rerr := myCA.readSuperseded(ctx)
 			Expect(rerr).NotTo(HaveOccurred())
@@ -557,6 +595,61 @@ var _ = Describe("Reconciling a managed certificate", func() {
 			Expect(rerr).NotTo(HaveOccurred())
 			Expect(wasRevoked).To(BeTrue(),
 				"the fixture only tests the revoked arm if the incumbent really is revoked")
+
+			issued, err := reconcile()
+			Expect(err).NotTo(HaveOccurred())
+			Expect(issued).To(BeTrue())
+		})
+
+		It("reissues and retires the incumbent when its own store was emptied", func() {
+			// #242's failure table: "Store contents deleted externally | The
+			// load in step 1 catches it; next pass reissues." The CA still
+			// holds the certificate this entry issued last pass, so a guard
+			// that merely refused an unrecognised incumbent would stall the
+			// entry for ever and let the real certificate expire -- which is
+			// what the first version of this guard did.
+			_, err := reconcile()
+			Expect(err).NotTo(HaveOccurred())
+			previous := fake.stored()
+
+			// The store is emptied out from under the CA.
+			fake.mu.Lock()
+			fake.certPEM, fake.keyPEM = nil, nil
+			fake.mu.Unlock()
+
+			issued, err := reconcile()
+			Expect(err).NotTo(HaveOccurred())
+			Expect(issued).To(BeTrue(), "the entry must self-heal, not stall")
+			Expect(fake.stored().SerialNumber).NotTo(Equal(previous.SerialNumber))
+
+			// And the certificate it displaced is retired rather than left as a
+			// live credential nothing addresses.
+			revoked, rerr := myCA.IsRevokedSerial(ctx, previous.SerialNumber)
+			Expect(rerr).NotTo(HaveOccurred())
+			Expect(revoked).To(BeTrue(),
+				"the displaced certificate is still live and no longer reachable by name")
+		})
+
+		It("reissues when its own store holds bytes that will not parse", func() {
+			// The other self-heal arm, and the reason the guard treats
+			// undecodable stored bytes as a repair rather than a collision.
+			_, err := reconcile()
+			Expect(err).NotTo(HaveOccurred())
+
+			fake.mu.Lock()
+			fake.certPEM = []byte("this is not a certificate")
+			fake.mu.Unlock()
+
+			issued, err := reconcile()
+			Expect(err).NotTo(HaveOccurred())
+			Expect(issued).To(BeTrue())
+		})
+
+		It("reissues over an undecodable certificate in the CA's own record", func() {
+			// Nothing anybody can present, so there is nothing to protect and
+			// overwriting is the repair. Without this arm a corrupt blob would
+			// wedge the entry permanently.
+			Expect(store.SaveCert(ctx, subject, []byte("not a certificate"))).To(Succeed())
 
 			issued, err := reconcile()
 			Expect(err).NotTo(HaveOccurred())
