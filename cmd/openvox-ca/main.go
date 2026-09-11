@@ -1300,11 +1300,12 @@ func initSignerKeyWith(ctx context.Context, cfg *serverConfig, resolve runtimeRe
 	// Store-lifetime only. Init is the last reader of the backend in this
 	// process; the key provider's session, when there is one, has to keep
 	// running for every signature from here on.
-	if err := rt.CloseStore(); err != nil {
+	closeErr := rt.CloseStore()
+	if closeErr != nil {
 		// Not fatal. The CA exists, the key is in hand, and refusing to serve
 		// because a handle nobody will use again closed untidily would turn a
 		// leak into an outage.
-		slog.Warn("Failed to close the signer's storage backend after initialisation", "error", err)
+		slog.Warn("Failed to close the signer's storage backend after initialisation", "error", closeErr)
 	}
 
 	// Ask for the heap back rather than waiting for the background scavenger.
@@ -1314,13 +1315,15 @@ func initSignerKeyWith(ctx context.Context, cfg *serverConfig, resolve runtimeRe
 	// It is the difference between a transient peak and a persistent RSS
 	// against the tree's divided GOMEMLIMIT.
 	//
-	// Logged at Debug because it is unconditional — there is no branch here for
-	// an operator to tell apart, unlike the memory-budget decisions launcher.go
-	// reports. What it answers is the question profiling cannot: whether this
-	// build reached the release path at all.
+	// Debug rather than Info: it says nothing an operator needs on a healthy
+	// start, and the question it does answer — whether this build reached the
+	// release path at all — is the one profiling cannot. store_closed carries
+	// CloseStore's actual result rather than a constant: the branch above means
+	// there is a result to carry, and a field hardcoded true would report
+	// success on the very path that has just logged a failure.
 	debug.FreeOSMemory()
 	slog.Debug("Released the signer's initialisation state",
-		"store_closed", true, "os_memory_reclaimed", true)
+		"store_closed", closeErr == nil, "os_memory_reclaimed", true)
 
 	return key, rt, nil
 }
