@@ -208,7 +208,9 @@ linters:
       # that fix -- and with it verifyNolintlintCarveOut in magefile.go and its
       # specs in magefile_test.go, which exist only to make this rule's removal
       # condition reachable, plus the paragraph about it in AGENTS.md under
-      # the golangci-lint pin. Delete this rule on its own and `mage dev:check`
+      # the golangci-lint pin and the note above the first directive in
+      # internal/storage/filelock.go, which describes this rule and that guard
+      # and becomes false the moment either goes. Delete this rule on its own and `mage dev:check`
       # still passes -- the guard treats an absent carve-out as the outcome it
       # was built to reach -- but `mage test:magefile` fails on "finds the real
       # carve-out, and it matches the real golangci-lint pin", which asserts

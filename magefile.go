@@ -803,8 +803,20 @@ func exclusionPathsCover(paths, pathsExcept []string, file string) (bool, error)
 //
 // Absence is a legitimate terminal state -- deliberate removal is the outcome
 // the pin guard exists to make reachable -- but it must be real absence.
-// Anything that still suppresses nolintlint on that file is an error, not a
-// false.
+// Anything under linters.exclusions that still suppresses nolintlint on that
+// file is an error, not a false.
+//
+// The scope of that promise is the exclusions node, and deliberately not the
+// whole configuration. Two settings outside it also stop the unused-directive
+// report reaching this file -- linters.settings.nolintlint.allow-unused, and
+// dropping nolintlint from linters.enable -- and neither is modelled here.
+// They are module-wide policy changes rather than ways of spelling this
+// carve-out, they were considered and rejected as remedies in openvox-ca#313,
+// and chasing them here would restart exactly the enumeration this function
+// was rewritten to stop: allow-unused, then enable, then default, then the
+// next one. If either is ever set, this guard frees the pin on a carve-out
+// that has genuinely gone, which is correct -- what would be wrong is this
+// comment claiming to have checked.
 func nolintlintCarveOut(golangciSrc []byte) (bool, error) {
 	var cfg struct {
 		Linters struct {
