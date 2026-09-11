@@ -687,7 +687,7 @@ func defaultLeafExtKeyUsage() []x509.ExtKeyUsage {
 // CSR, after CSR-specific validation), AutoRenew (inputs come from an
 // already-issued certificate's public key, with no CSR involved at all),
 // GenerateWithOptions (inputs come from a key this CA just generated, with no
-// client involved at all), and issueManagedLocked (inputs come from server
+// client involved at all), and issueManagedUnderSubjectLock (inputs come from server
 // configuration, with no client involved at all).
 func (c *CA) issueLeafLocked(ctx context.Context, subject string, subjectName pkix.Name, pubKey any, sans subjectAltNames, extraExtensions []pkix.Extension, eku []x509.ExtKeyUsage, ttl time.Duration) ([]byte, error) {
 	// Defensive: a nil CACert here means the caller skipped Init() (or it

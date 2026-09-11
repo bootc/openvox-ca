@@ -300,7 +300,7 @@ var _ = Describe("The managed-certificate issue decision", func() {
 	It("reports a foreign certificate as foreign even when it is also revoked", func() {
 		// The order matters to the caller, not just to the log line: on this
 		// arm the certificate's serial belongs to another issuer and must never
-		// reach our CRL, and reasonNotOurs is how issueManagedLocked knows.
+		// reach our CRL, and reasonNotOurs is how issueManagedUnderSubjectLock knows.
 		foreign, foreignKey := selfSignedIssuer("Some other CA")
 		leaf := mintLeaf(foreign, foreignKey, subject, spec.DNSNames, nil, 90*24*time.Hour, now)
 
@@ -503,6 +503,26 @@ var _ = Describe("The leaf NotBefore backdate", func() {
 		// holds with the backdate deleted altogether and tests nothing.
 		Expect(crt.NotAfter.Sub(crt.NotBefore) - crt.NotAfter.Sub(after)).
 			To(BeNumerically("~", 3*time.Hour, time.Minute))
+	})
+
+	It("does not reach the CA's own certificate", func() {
+		// The changeset splits one backdate into two: leaves take the setting,
+		// and bootstrapCA keeps a fixed 24 hours. That exclusion is asserted as
+		// a contract in three doc comments and in docs/configuration.md, and
+		// nothing was pinning it -- so the obvious tidy-up now that an accessor
+		// exists (routing init.go through c.leafBackdate() too) would shrink the
+		// CA certificate's backdate to five minutes with every spec still green.
+		fresh := New(storage.New(GinkgoT().TempDir()), AutosignConfig{Mode: "off"}, "puppet.test")
+		fresh.CAKeyConfig = KeyConfig{Algo: KeyAlgoECDSA, Size: 256}
+		fresh.LeafBackdate = 3 * time.Hour
+		before := time.Now().UTC()
+		Expect(fresh.Init(ctx)).To(Succeed())
+		then := time.Now().UTC()
+
+		Expect(fresh.CACert.NotBefore).To(BeTemporally("<=", then.Add(-24*time.Hour)))
+		Expect(fresh.CACert.NotBefore).To(BeTemporally(">", before.Add(-25*time.Hour)),
+			"the CA certificate must keep its fixed 24-hour bootstrap backdate, "+
+				"whatever leaf_backdate_sec says")
 	})
 
 	It("falls back to the default for a non-positive setting", func() {
