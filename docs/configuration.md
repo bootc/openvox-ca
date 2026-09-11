@@ -158,8 +158,15 @@ revoke_on_auto_renew: true      # false matches OpenVox Server's Clojure CA (no 
 # below, and set 0 for the earlier behaviour of revoking inside the call.
 superseded_cert_revoke_after_sec: -1   # overlap window; 0 = revoke inside the renewal; -1/unset = 24h
 superseded_cert_sweep_interval_sec: 0  # how often the sweep runs; 0 = built-in default (15m)
-leaf_backdate_sec: 0                   # clock-skew tolerance on NotBefore; 0 = built-in default (5m)
-managed_cert_interval_sec: 0           # managed-certificate reconcile cadence; 0 = built-in default (15m)
+
+# Clock-skew tolerance on every leaf certificate's NotBefore. See "Clock skew and
+# NotBefore" below.
+leaf_backdate_sec: 0                   # 0 = built-in default (5m)
+
+# How often the managed-certificate reconcile loop runs. A managed certificate is
+# a named leaf the CA issues and renews on a loop; nothing configures one yet, so
+# this setting has no effect until an instance of that mechanism ships.
+managed_cert_interval_sec: 0           # 0 = built-in default (15m)
 ```
 
 ## Environment variables
@@ -854,11 +861,11 @@ too low. Shedding under an unauthenticated flood is the bound doing its job.
 
 ## Clock skew and NotBefore
 
-Every certificate this CA issues is backdated: its `NotBefore` is set a little
-earlier than the moment it was signed, so a client whose clock is behind the
-CA's still accepts a certificate that has just been issued. Without it, an agent
-running a few seconds slow rejects its own brand-new certificate as not yet
-valid.
+Every **leaf** certificate this CA issues is backdated: its `NotBefore` is set a
+little earlier than the moment it was signed, so a client whose clock is behind
+the CA's still accepts a certificate that has just been issued. Without it, an
+agent running a few seconds slow rejects its own brand-new certificate as not
+yet valid.
 
 `leaf_backdate_sec` sets how far, and defaults to **5 minutes**. That is a
 tolerance for ordinary clock drift, not a margin for a fleet that cannot keep
@@ -866,10 +873,15 @@ time: a client further out than the backdate refuses the certificate, and keeps
 refusing it until its clock is corrected. Where NTP is not available and hosts
 are known to drift further, raise it.
 
-It applies to every certificate — signed from a CSR, generated, renewed or
-managed — so raising it widens the window in which a certificate is valid before
-anyone asked for it. A negative value is refused at startup, because it would
-issue certificates that are valid only in the future.
+It applies to every leaf — signed from a CSR, generated, renewed or managed — so
+raising it widens the window in which a certificate is valid before anyone asked
+for it. A negative value is refused at startup, because it would issue
+certificates that are valid only in the future.
+
+It does **not** govern the CA's own certificate, which is backdated a fixed 24
+hours when the CA is bootstrapped. That one is written once, by the process that
+creates it, and nothing renews it on a timer; raising this setting for a skewed
+fleet does not change it.
 
 The setting also feeds the managed-certificate renewal decision, which derives
 how much serving life a certificate was granted by subtracting the backdate from

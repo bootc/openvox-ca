@@ -28,6 +28,27 @@ import (
 // runManagedCertReconciler reconciles the CA's managed certificates on a timer
 // until ctx is cancelled.
 //
+// # Observability, and what is deliberately absent
+//
+// This loop publishes no metric of its own, and that is a decision rather than
+// an oversight. Every reconcile outcome an operator can currently reach is
+// either a log line here or an ordinary certificate fact: a managed certificate
+// is a certificate at cert/<subject> with an inventory row, so once one exists
+// puppetca_leaf_certificate_not_after_timestamp_seconds covers its expiry and
+// the shipped expiry alerts cover it with no new series.
+//
+// What that does NOT cover is an entry that has never issued at all -- a
+// permanent refusal, or a store that never accepts a write. There is no series
+// for a certificate that does not exist, so no PromQL comparison can match its
+// absence; the Kubernetes exporter has the same hole and closes it with a
+// dedicated "not running" rule. The managed mechanism needs the equivalent.
+//
+// It is not added here because nothing configures a managed certificate yet: a
+// counter would be permanently zero on every deployment, and docs/metrics.md
+// would gain a row nothing can move. It belongs with the first instance, which
+// is also the first change that can say what a useful value looks like. See
+// #243.
+//
 // A timer, deliberately, and not the Kubernetes exporter's CRLUpdated() channel:
 // that channel fires on revocation, and renewal is driven by the clock. A CA
 // that revokes nothing for a fortnight would otherwise let every managed

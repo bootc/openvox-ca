@@ -208,6 +208,38 @@ var _ = Describe("The leaf backdate and reconcile interval settings", func() {
 		Expect(err).To(MatchError(ContainSubstring("leaf_backdate_sec must not be negative")))
 	})
 
+	It("reaches the CA, which is the step whose absence is silent", func() {
+		// applyCAConfig is where a setting stops being configuration and starts
+		// being behaviour. Deleting that one line leaves every other spec here
+		// green while an operator's leaf_backdate_sec does nothing at all.
+		setEnv("PUPPET_CA_LEAF_BACKDATE_SEC", "7200")
+		cfg, err := loadServerConfig("")
+		Expect(err).NotTo(HaveOccurred())
+
+		myCA := &ca.CA{}
+		Expect(applyCAConfig(myCA, cfg)).To(Succeed())
+		Expect(myCA.LeafBackdate).To(Equal(2 * time.Hour))
+	})
+
+	It("is read from the config file, not only the environment", func() {
+		// Both keys are published as config-file keys in docs/configuration.md,
+		// and a typo in either struct tag would leave the documented key inert
+		// with every environment-driven spec still green.
+		cfg, err := loadServerConfig(writeTempConfig(
+			"leaf_backdate_sec: 3600\nmanaged_cert_interval_sec: 60\n"))
+		Expect(err).NotTo(HaveOccurred())
+		Expect(cfg.leafBackdate()).To(Equal(time.Hour))
+		Expect(cfg.managedCertInterval()).To(Equal(time.Minute))
+	})
+
+	It("lets the environment outrank the config file", func() {
+		setEnv("PUPPET_CA_LEAF_BACKDATE_SEC", "900")
+		cfg, err := loadServerConfig(writeTempConfig("leaf_backdate_sec: 3600\n"))
+		Expect(err).NotTo(HaveOccurred())
+		Expect(cfg.leafBackdate()).To(Equal(15*time.Minute),
+			"the documented precedence is environment over file")
+	})
+
 	It("defaults the reconcile interval, and takes a configured one", func() {
 		cfg, err := loadServerConfig("")
 		Expect(err).NotTo(HaveOccurred())
