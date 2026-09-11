@@ -37,6 +37,13 @@ repository's Go toolchain (`go install github.com/golangci/golangci-lint/v2/cmd/
 a prebuilt binary compiled against an older Go can panic when analysing newer
 language constructs.
 
+That pin currently has a second reader. While the temporary `nolintlint`
+carve-out for `internal/storage/filelock.go` is in `.golangci.yml`,
+`nolintlintCarveOutPin` in `magefile.go` must hold the same version, and
+`mage dev:check` fails when the two disagree -- so a Renovate bump of the pin is
+a deliberate decision, not a rubber stamp. The failure names both remedies.
+Delete this paragraph when the carve-out goes; openvox-ca#313 has the reasoning.
+
 Route all test artifacts (logs, coverage, results) to `.test-output/` (gitignored).
 
 ## Testing: Ginkgo + Gomega only
