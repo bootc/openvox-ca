@@ -185,8 +185,8 @@ linters:
       # suppresses every linter on its line, so the one check that stops a
       # blanket suppression appearing in this file would go quiet for exactly
       # the directives this rule is about. Anchoring on "is unused for linter"
-      # keeps the match to the staleness report and leaves require-specific and
-      # require-explanation (lines 103-104) in force.
+      # keeps the match to the staleness report and leaves nolintlint's
+      # require-specific and require-explanation settings in force.
       #
       # So: G703 stays enabled across the module, both directives stay, gosec
       # is still suppressed at the two sites on every run where its analysis
@@ -205,7 +205,12 @@ linters:
       # 2026-09-04), which sorts the edges and raises the cap to 1024. That is
       # in no gosec release yet, and golangci-lint pins gosec v2.28.0.
       # REMOVE THIS RULE once the pinned golangci-lint ships a gosec containing
-      # that fix; see voxpupuli/openvox-ca#313.
+      # that fix -- and with it verifyNolintlintCarveOut in magefile.go and its
+      # specs in magefile_test.go, which exist only to make this rule's removal
+      # condition reachable. Deleting the rule alone is silent, not red: that
+      # guard treats an absent carve-out as the outcome it was built to reach,
+      # so it would be left behind as dead code with nothing reporting it. See
+      # voxpupuli/openvox-ca#313.
       - path: internal/storage/filelock\.go
         linters:
           - nolintlint
