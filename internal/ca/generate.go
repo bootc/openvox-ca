@@ -180,11 +180,7 @@ func (c *CA) GenerateWithOptions(ctx context.Context, subject string, opts Gener
 		return nil, err
 	}
 
-	// Resolve leaf key config; fall back to default if not set.
-	leafCfg := c.LeafKeyConfig
-	if leafCfg.Algo == "" {
-		leafCfg = DefaultLeafKeyConfig
-	}
+	leafCfg := c.leafKeyConfig()
 
 	// Key generation is CPU-bound and touches no shared state, so it runs
 	// outside the lock. generateKey validates the config, so an off-policy

@@ -48,8 +48,8 @@ import (
 
 // CertSpec describes what a managed certificate must be. It is fixed by
 // configuration and never derived from anything a client submits, which is what
-// makes reconcileManagedCert's place on the issuance seam defensible; see
-// issuanceseam_test.go.
+// makes issueManagedUnderSubjectLock's place on the issuance seam defensible;
+// see issuanceseam_test.go, which pins that caller set.
 type CertSpec struct {
 	// Subject is the certname. It becomes the certificate's Common Name, the
 	// key it occupies in the inventory, and the subject recorded on the
@@ -171,20 +171,23 @@ type CertSpec struct {
 	SupersedeAfter *time.Duration
 }
 
-// keyConfig resolves the key algorithm and size for m, preferring the entry's
-// own setting and falling back to the CA's.
+// keyConfigFor resolves the key algorithm and size for spec, preferring the
+// entry's own setting and falling back to the CA's.
+//
+// The CA-level fallback is leafKeyConfig's, deliberately rather than a second
+// reading of the same field: this used to test Algo-or-Size where generate.go
+// tests Algo alone, and the two then disagreed about `leaf_key_size: 4096` with
+// no `leaf_key_algo` -- a configuration an operator can write today, which
+// main.go and ValidateKeyConfig both accept. One CA, two paths, two key sizes.
 func (c *CA) keyConfigFor(spec CertSpec) KeyConfig {
 	if spec.KeyConfig.Algo != "" || spec.KeyConfig.Size != 0 {
 		return spec.KeyConfig
 	}
-	if c.LeafKeyConfig.Algo != "" || c.LeafKeyConfig.Size != 0 {
-		return c.LeafKeyConfig
-	}
-	return DefaultLeafKeyConfig
+	return c.leafKeyConfig()
 }
 
-// supersedeAfterFor resolves the overlap window for m, preferring the entry's
-// own setting and falling back to the CA's.
+// supersedeAfterFor resolves the overlap window for spec, preferring the
+// entry's own setting and falling back to the CA's.
 func (c *CA) supersedeAfterFor(spec CertSpec) time.Duration {
 	if spec.SupersedeAfter != nil {
 		return *spec.SupersedeAfter
@@ -218,10 +221,30 @@ func (s CertSpec) Validate() error {
 				s.Subject)
 		}
 	}
+	for _, addr := range s.EmailAddresses {
+		if addr == "" {
+			return fmt.Errorf("managed certificate %s: an email address entry is empty; "+
+				"it reaches the certificate as a name matching nothing", s.Subject)
+		}
+	}
 	for _, u := range s.URIs {
+		// Nil would panic in leafCarriesNames and in marshalling; a zero-value
+		// URL stringifies to "" and reaches the certificate as an empty
+		// uniformResourceIdentifier. Both satisfy the at-least-one-name check
+		// above while naming nothing, which is what that check exists to stop.
 		if u == nil {
 			return fmt.Errorf("managed certificate %s: a URI entry is nil", s.Subject)
 		}
+		if u.String() == "" {
+			return fmt.Errorf("managed certificate %s: a URI entry is empty; "+
+				"it reaches the certificate as a name matching nothing", s.Subject)
+		}
+	}
+	// Bounded like the DNS names, and for the same reason: the count is what
+	// reaches the certificate, and nothing downstream caps it.
+	if n := len(s.EmailAddresses) + len(s.URIs) + len(s.IPAddresses); n > maxDNSAltNames {
+		return fmt.Errorf("managed certificate %s: too many non-DNS alternative names "+
+			"(%d > %d)", s.Subject, n, maxDNSAltNames)
 	}
 	if s.TTL < 0 {
 		return fmt.Errorf("managed certificate %s: ttl must not be negative", s.Subject)
@@ -830,7 +853,7 @@ func (c *CA) issueManagedUnderSubjectLock(ctx context.Context, m ManagedCert, re
 	// CPU-bound and touching no shared state, so outside c.mu -- but inside the
 	// subject lock, unlike GenerateWithOptions, because the key must not exist
 	// before this replica has established that it is the one issuing.
-	key, err := c.issuanceKeyFor(m, storedKeyPEM)
+	key, err := c.issuanceKeyFor(m, reason, current, storedKeyPEM)
 	if err != nil {
 		return false, err
 	}
@@ -1022,9 +1045,40 @@ func (c *CA) issueManagedUnderSubjectLock(ctx context.Context, m ManagedCert, re
 // an entry fails every pass until the operator fixes it. That is the right way
 // round: silently re-keying would defeat the pin the setting exists to provide,
 // and a pin the CA abandons without saying so is worse than one it refuses.
-func (c *CA) issuanceKeyFor(m ManagedCert, storedKeyPEM []byte) (crypto.Signer, error) {
+//
+// # Revocation outranks the pin
+//
+// A revoked certificate is replaced with a NEW key, whatever ReuseKey says.
+// Reissuing over the same key would hand back, with a fresh serial and a full
+// lifetime, exactly the material an operator revoking for key disclosure was
+// trying to retire -- and no CRL would list the replacement. That is the hazard
+// refuseIfSuperseded closes on the two renewal paths; this path reaches it by a
+// different door and has to close it too. The pin loses, loudly: a revocation
+// is a deliberate act and the operator needs telling that it broke the pin.
+func (c *CA) issuanceKeyFor(m ManagedCert, reason issueReason, current *x509.Certificate,
+	storedKeyPEM []byte) (crypto.Signer, error) {
 	subject := m.Spec.Subject
-	if m.Spec.ReuseKey && len(storedKeyPEM) > 0 {
+	switch {
+	case !m.Spec.ReuseKey:
+		// Nothing to say: re-keying every renewal is the default.
+	case reason == reasonRevoked:
+		slog.Warn("Not reusing the stored private key for a managed certificate: its "+
+			"certificate was revoked, and reissuing over the same key would return the "+
+			"material the revocation retired. Generating a new one, which breaks any "+
+			"pin on the old key",
+			"subject", subject)
+	case len(storedKeyPEM) == 0 && current == nil:
+		// A first issuance has an empty store by definition. Nothing was
+		// pinned yet, so there is nothing to report.
+	case len(storedKeyPEM) == 0:
+		// A certificate with no key beside it -- a pass that died between
+		// signing and the store write. Not a first issuance, so a pin really
+		// is being broken.
+		slog.Warn("Cannot reuse the stored private key for a managed certificate: the "+
+			"store holds a certificate but no key. Generating a new one, which breaks "+
+			"any pin on the old key",
+			"subject", subject)
+	default:
 		block, _ := pem.Decode(storedKeyPEM)
 		if block == nil {
 			slog.Warn("Cannot reuse the stored private key for a managed certificate: "+

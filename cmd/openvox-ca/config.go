@@ -345,6 +345,15 @@ func loadServerConfig(configFile string) (*serverConfig, error) {
 			"it is a clock-skew tolerance, and a certificate valid that far before it was "+
 			"issued is not one", maxLeafBackdateSec, cfg.LeafBackdateSec)
 	}
+	// Bounded for the same overflow reason as the backdate, and one further
+	// one: a wrapped product that lands non-positive reaches time.NewTicker,
+	// which panics -- inside a background goroutine, where nothing recovers, so
+	// a mistyped interval takes the server down rather than being refused.
+	if cfg.ManagedCertIntervalSec > maxManagedCertIntervalSec {
+		return nil, fmt.Errorf("managed_cert_interval_sec must not exceed %d seconds "+
+			"(30 days, got %d): a reconcile loop that wakes less often than that is not "+
+			"keeping anything alive", maxManagedCertIntervalSec, cfg.ManagedCertIntervalSec)
+	}
 
 	return cfg, nil
 }
@@ -575,6 +584,12 @@ const defaultLeafBackdate = 5 * time.Minute
 // and comfortably below the point at which the seconds-to-nanoseconds multiply
 // overflows int64.
 const maxLeafBackdateSec = 30 * 24 * 60 * 60
+
+// maxManagedCertIntervalSec is the ceiling on managed_cert_interval_sec, for
+// the reason maxLeafBackdateSec exists and one more: a value that wraps the
+// seconds-to-nanoseconds multiply into a non-positive duration reaches
+// time.NewTicker, which panics rather than erroring.
+const maxManagedCertIntervalSec = 30 * 24 * 60 * 60
 
 // leafBackdate resolves how far leaf certificates are backdated, falling back
 // to defaultLeafBackdate when unset.
