@@ -492,6 +492,95 @@ func stripSpace(s string) string {
 // pull requests refuses ones labelled signingReviewLabel. Without it the label
 // is decoration: renovate.json can apply it, but nothing reads it, and
 // Renovate's own automerge setting does not govern this merge -- ci.yml does.
+// nolintlintCarveOutPin is the golangci-lint version the nolintlint carve-out
+// in .golangci.yml was reasoned against. The carve-out exists because gosec
+// v2.28.0, which that release pins, walks a randomly ordered caller-edge list
+// and truncates it at 32 (securego/gosec#1712); securego/gosec#1733 fixes that
+// upstream but is in no gosec release yet. See openvox-ca#313.
+const nolintlintCarveOutPin = "v2.13.2"
+
+// nolintlintCarveOutPath is the `path` of the exclusion rule being guarded, as
+// it appears in .golangci.yml.
+const nolintlintCarveOutPath = `internal/storage/filelock\.go`
+
+// golangciLintPinRe reads the golangci-lint version installed by ci.yml. It is
+// deliberately the same shape renovate's custom manager matches, so the two
+// cannot disagree about which token is the pin.
+var golangciLintPinRe = regexp.MustCompile(
+	`go install github\.com/golangci/golangci-lint/v2/cmd/golangci-lint@(v\d+\.\d+\.\d+)`)
+
+// verifyNolintlintCarveOut fails once the golangci-lint pin moves while the
+// nolintlint carve-out for filelock.go is still in .golangci.yml.
+//
+// The carve-out is temporary and its removal condition is a golangci-lint
+// release carrying a fixed gosec. Nothing else would notice that moment: the
+// pin is owned by a renovate custom manager, and the auto-merge job merges
+// renovate pull requests that are not labelled review-signing-path, which
+// golangci-lint is not. So the exact event that makes the carve-out removable
+// is a merge nobody reads. This guard is what turns that into a red check.
+func verifyNolintlintCarveOut() error {
+	golangciSrc, err := os.ReadFile(".golangci.yml")
+	if err != nil {
+		return err
+	}
+	ciSrc, err := os.ReadFile(filepath.Join(".github", "workflows", "ci.yml"))
+	if err != nil {
+		return err
+	}
+	return verifyNolintlintCarveOutIn(golangciSrc, ciSrc)
+}
+
+// verifyNolintlintCarveOutIn is verifyNolintlintCarveOut over caller-supplied
+// contents, split out so the failure branches are testable without touching
+// the real files.
+//
+// It has an absolute floor rather than only comparing the two inputs to each
+// other: when the carve-out is present, ci.yml MUST yield a parseable pin.
+// Without that, deleting the install line would read as "nothing to check"
+// instead of as drift.
+func verifyNolintlintCarveOutIn(golangciSrc, ciSrc []byte) error {
+	var cfg struct {
+		Linters struct {
+			Exclusions struct {
+				Rules []struct {
+					Path    string   `yaml:"path"`
+					Linters []string `yaml:"linters"`
+				} `yaml:"rules"`
+			} `yaml:"exclusions"`
+		} `yaml:"linters"`
+	}
+	if err := yaml.Unmarshal(golangciSrc, &cfg); err != nil {
+		return fmt.Errorf(".golangci.yml: %w", err)
+	}
+
+	present := slices.ContainsFunc(cfg.Linters.Exclusions.Rules, func(r struct {
+		Path    string   `yaml:"path"`
+		Linters []string `yaml:"linters"`
+	},
+	) bool {
+		return r.Path == nolintlintCarveOutPath && slices.Contains(r.Linters, "nolintlint")
+	})
+	if !present {
+		// The carve-out is gone, which is the outcome this guard exists to
+		// make reachable. Nothing left to pin.
+		return nil
+	}
+
+	m := golangciLintPinRe.FindSubmatch(ciSrc)
+	if m == nil {
+		return fmt.Errorf("the nolintlint carve-out for %s is still in .golangci.yml, but no "+
+			"golangci-lint pin could be read from ci.yml; the carve-out is only safe while the pinned "+
+			"version is known (see openvox-ca#313)", nolintlintCarveOutPath)
+	}
+	if pin := string(m[1]); pin != nolintlintCarveOutPin {
+		return fmt.Errorf("golangci-lint is pinned at %s but the nolintlint carve-out in .golangci.yml "+
+			"was reasoned against %s; check whether that release carries securego/gosec#1733 (taint "+
+			"caller traversal made deterministic) and, if it does, delete the carve-out and this guard "+
+			"-- see openvox-ca#313", pin, nolintlintCarveOutPin)
+	}
+	return nil
+}
+
 func verifyAutomergeLabelExclusion() error {
 	src, err := os.ReadFile(filepath.Join(".github", "workflows", "ci.yml"))
 	if err != nil {
@@ -3866,6 +3955,10 @@ func (Dev) Check() error {
 		return err
 	}
 	fmt.Println("Checking workflow base scoping...")
+	if err := verifyNolintlintCarveOut(); err != nil {
+		return err
+	}
+
 	if err := verifyWorkflowBaseScoping(); err != nil {
 		return err
 	}

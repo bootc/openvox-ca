@@ -176,13 +176,29 @@ linters:
       # it") removes an audited security suppression. This rule closes that
       # trap by never making the recommendation.
       #
-      # Deliberately narrow. G703 stays enabled across the module, both
-      # directives stay, and gosec is still suppressed at the two sites on
-      # every run where its analysis reaches them. Only nolintlint's staleness
-      # check is disabled, only in this file, and only for directives naming
-      # G703: a stale //nolint:gosec // G204 in filelock.go is still reported.
-      # The cost is that if these two directives ever do go genuinely stale,
-      # nothing will say so.
+      # Deliberately narrow, and the `text` regexp is what makes it so. Every
+      # nolintlint message quotes the whole directive, explanation included --
+      # that is why matching a rule ID works at all, and it is also why a bare
+      # `text: "G703"` would match nolintlint's *other* checks on the same
+      # directive. It would then silence the require-specific report for a
+      # future `//nolint // G703: ...` here, and an unspecific //nolint
+      # suppresses every linter on its line, so the one check that stops a
+      # blanket suppression appearing in this file would go quiet for exactly
+      # the directives this rule is about. Anchoring on "is unused for linter"
+      # keeps the match to the staleness report and leaves require-specific and
+      # require-explanation (lines 103-104) in force.
+      #
+      # So: G703 stays enabled across the module, both directives stay, gosec
+      # is still suppressed at the two sites on every run where its analysis
+      # reaches them, and of nolintlint only the unused-directive report is
+      # dropped, only in this file, and only for directives naming G703. A
+      # stale //nolint:gosec // G204 in filelock.go is still reported, and so
+      # is a malformed G703 directive. The cost is that if these two
+      # directives ever do go genuinely stale, nothing will say so.
+      #
+      # If a future golangci-lint reworded that message the regexp would stop
+      # matching and the flake would come back visibly, as a red gate -- which
+      # is the failure direction to prefer over silently widening.
       #
       # Upstream: securego/gosec#1711 and #1712, fixed by securego/gosec#1733
       # ("fix(taint): make wide caller traversal deterministic", merged
@@ -193,7 +209,7 @@ linters:
       - path: internal/storage/filelock\.go
         linters:
           - nolintlint
-        text: "G703"
+        text: 'G703.*is unused for linter "gosec"'
 
 formatters:
   enable:
