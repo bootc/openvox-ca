@@ -228,17 +228,25 @@ func (r issueReason) String() string {
 // want. It only binds when the alternative is a reissue loop.
 //
 // Forward lifetime, not NotAfter-NotBefore: issueLeafLocked backdates
-// NotBefore by leafBackdate so a verifier with a slow clock still accepts a
-// certificate we have just signed, and counting that backdate as life the
-// certificate has to serve would reintroduce the same loop at short ttls (a
-// one-hour certificate has a 25-hour span, and half of that is longer than the
-// certificate lasts).
+// NotBefore so a verifier with a slow clock still accepts a certificate we
+// have just signed, and counting that backdate as life the certificate has to
+// serve would reintroduce the same loop at short ttls (with a 24-hour backdate
+// a one-hour certificate has a 25-hour span, and half of that is longer than
+// the certificate lasts).
+//
+// backdate is the CA's current setting, which is not necessarily the one in
+// force when leaf was signed. Changing the setting therefore mis-measures
+// certificates already issued, by exactly the difference between the two
+// values -- bounded, one-way, and corrected at the next issuance. Nothing in
+// the certificate records the backdate it was issued under, so the current
+// setting is the only value available; the alternative, assuming a constant,
+// was wrong for every deployment that changed it.
 //
 // This is only ever reached for certificates this CA issued: reasonNotOurs is
-// decided first, so the leafBackdate assumption never has to hold for a
-// foreign certificate.
-func renewWindowFor(leaf *x509.Certificate, want CertSpec) time.Duration {
-	forward := leaf.NotAfter.Sub(leaf.NotBefore) - leafBackdate
+// decided first, so the backdate assumption never has to hold for a foreign
+// certificate.
+func renewWindowFor(leaf *x509.Certificate, want CertSpec, backdate time.Duration) time.Duration {
+	forward := leaf.NotAfter.Sub(leaf.NotBefore) - backdate
 	if forward <= 0 {
 		// A certificate with no forward life at all. Nothing to hold back;
 		// letting the caller renew it immediately is the only useful answer.
@@ -265,7 +273,7 @@ func renewWindowFor(leaf *x509.Certificate, want CertSpec) time.Duration {
 // reach the serial it must supersede. It is nil when there was nothing usable
 // to parse.
 func issueDecision(certPEM, keyPEM []byte, want CertSpec, issuer *x509.Certificate,
-	now time.Time, revoked bool) (issue bool, reason issueReason, current *x509.Certificate) {
+	backdate time.Duration, now time.Time, revoked bool) (issue bool, reason issueReason, current *x509.Certificate) {
 	if len(certPEM) == 0 {
 		return true, reasonAbsent, nil
 	}
@@ -325,7 +333,7 @@ func issueDecision(certPEM, keyPEM []byte, want CertSpec, issuer *x509.Certifica
 		return true, reasonRevoked, leaf
 	}
 
-	if !now.Before(leaf.NotAfter.Add(-renewWindowFor(leaf, want))) {
+	if !now.Before(leaf.NotAfter.Add(-renewWindowFor(leaf, want, backdate))) {
 		return true, reasonRenewWindow, leaf
 	}
 	return false, reasonCurrent, leaf
@@ -378,11 +386,16 @@ func leafCarriesUsages(leaf *x509.Certificate, want CertSpec) bool {
 	if len(wanted) == 0 {
 		wanted = defaultLeafExtKeyUsage()
 	}
-	got := slices.Clone(leaf.ExtKeyUsage)
-	wanted = slices.Clone(wanted)
-	slices.Sort(got)
-	slices.Sort(wanted)
-	return slices.Equal(got, slices.Compact(wanted))
+	// Both sides are compacted, and that symmetry is the whole point. crypto/x509
+	// de-duplicates extended key usages neither on write nor on parse, so a spec
+	// naming the same usage twice yields a certificate carrying it twice --
+	// which, compared against a compacted want, never matches. The certificate
+	// would then fail the very spec that produced it, on every pass, for ever:
+	// the unbounded reissue loop renewWindowFor exists to close, reached through
+	// a door the clamp cannot see. Compacting one side only is how that happens.
+	got := slices.Compact(slices.Sorted(slices.Values(leaf.ExtKeyUsage)))
+	wanted = slices.Compact(slices.Sorted(slices.Values(wanted)))
+	return slices.Equal(got, wanted)
 }
 
 // ReconcileManaged runs one pass over c.ManagedCerts, issuing whatever is due.
@@ -480,12 +493,31 @@ func (c *CA) reconcileManagedCert(ctx context.Context, m ManagedCert, now time.T
 		// the failure as "not revoked" decides nothing.
 		revoked := c.storedMaterialRevoked(ctx, certPEM, subject)
 
-		issue, reason, current := issueDecision(certPEM, keyPEM, m.Spec, issuer, now, revoked)
+		issue, reason, current := issueDecision(certPEM, keyPEM, m.Spec, issuer, c.leafBackdate(), now, revoked)
 		if !issue {
 			slog.Debug("Managed certificate is current",
 				"subject", subject, "not_after", current.NotAfter.Format(time.RFC3339))
 			return nil
 		}
+		// Refuse to displace somebody else's certificate for this name.
+		//
+		// issueLeafLocked ends in an unconditional SaveCert, so what sits at
+		// cert/<subject> is replaced whatever it is -- and the predecessor this
+		// path retires is the one from the *entry's own store*, which on the
+		// absent and unparseable arms is nothing at all. Without this check a
+		// managed entry configured for a name that already has a certificate
+		// overwrites the CA's record of it while leaving it valid, unrevoked
+		// and no longer reachable by `revoke --certname`: a live credential
+		// nothing can retire before it expires.
+		//
+		// A certname belongs to one subject. Two things wanting the same one is
+		// a configuration error and is reported as such, because the
+		// alternative -- picking a winner -- is how the CA ends up quietly
+		// holding two live certificates for one name.
+		if err := c.managedCollisionLocked(ctx, subject, current); err != nil {
+			return err
+		}
+
 		slog.Info("Issuing managed certificate", "subject", subject, "reason", reason.String())
 
 		did, err := c.issueManagedLocked(ctx, m, reason, current)
@@ -496,6 +528,71 @@ func (c *CA) reconcileManagedCert(ctx context.Context, m ManagedCert, now time.T
 		return false, err
 	}
 	return issued, nil
+}
+
+// managedCollisionLocked refuses an issuance that would displace a certificate
+// this CA holds for the subject but that the managed entry does not own.
+//
+// `current` is what the entry's store held, already parsed by issueDecision.
+// The CA's own record at cert/<subject> is a separate fact, and the two agree
+// in the steady state: the previous pass wrote both. They disagree in exactly
+// two situations, and only one of them is an error.
+//
+//   - The stored certificate is the one the entry is replacing (same serial),
+//     or it is already revoked, or there is none. Nothing is being taken away,
+//     so the issuance proceeds. The revoked case matters more than it looks: it
+//     is what a store write that failed after signing leaves behind, and that
+//     orphan must not block the retry it exists to permit.
+//   - The stored certificate is live and is not the entry's. Something else
+//     owns this name. Refuse.
+//
+// A read failure refuses too. The question being asked is "may I overwrite
+// this", and an unreadable answer is not a yes -- the cost of refusing wrongly
+// is a pass that retries in fifteen minutes, and the cost of proceeding
+// wrongly is a live credential nothing will ever retire.
+//
+// The caller must hold subject's lock, which is what makes the answer still
+// true by the time it is acted on.
+func (c *CA) managedCollisionLocked(ctx context.Context, subject string, current *x509.Certificate) error {
+	if !c.Storage.HasCert(ctx, subject) {
+		return nil
+	}
+	storedPEM, err := c.Storage.GetCert(ctx, subject)
+	if err != nil {
+		return fmt.Errorf("reading the stored certificate for %s: %w", subject, err)
+	}
+	block, _ := pem.Decode(storedPEM)
+	if block == nil {
+		// Unparseable bytes are not a credential anybody can present, so there
+		// is nothing here to protect. Say so rather than refusing for ever:
+		// this is the one arm where overwriting is the repair.
+		slog.Warn("Replacing an undecodable stored certificate for a managed subject",
+			"subject", subject)
+		return nil
+	}
+	stored, err := x509.ParseCertificate(block.Bytes)
+	if err != nil {
+		slog.Warn("Replacing an unparseable stored certificate for a managed subject",
+			"subject", subject, "error", err)
+		return nil
+	}
+	if current != nil && stored.SerialNumber.Cmp(current.SerialNumber) == 0 {
+		return nil
+	}
+	revoked, err := c.IsRevokedSerial(ctx, stored.SerialNumber)
+	if err != nil {
+		return fmt.Errorf("checking whether the stored certificate for %s is revoked, "+
+			"before replacing it: %w", subject, err)
+	}
+	if revoked {
+		return nil
+	}
+	return fmt.Errorf("refusing to issue a managed certificate for %s: a different, "+
+		"unrevoked certificate (serial %s) is already stored for that name. A certname "+
+		"belongs to one subject; issuing here would overwrite that certificate while "+
+		"leaving it valid and unrevocable by name. Revoke or clean it first, or give the "+
+		"managed certificate a name of its own",
+		subject, serialHexStr(stored.SerialNumber))
 }
 
 // storedMaterialRevoked reports whether the certificate in certPEM is on this
@@ -586,10 +683,25 @@ func (c *CA) issueManagedLocked(ctx context.Context, m ManagedCert, reason issue
 		// predecessor is left exactly as it was, still valid and still in the
 		// store, and the next pass retries.
 		if newSerial != "" {
-			if rerr := c.Storage.WithLock(ctx, lockNameCRL, func() error {
+			// Its own budget, detached from the pass's. The likeliest reason a
+			// store write fails is that it hung, and by then the deadline this
+			// pass started with is spent -- so a rollback sharing it would find
+			// the context already done, fail to take the CRL lock, and leave
+			// exactly the orphan it exists to prevent. The same reasoning, and
+			// the same shape, as CleanupExpiredCerts and the superseded
+			// write-back.
+			revokeCtx, cancelRevoke := context.WithTimeout(
+				context.WithoutCancel(ctx), LockTimeout/2)
+			defer cancelRevoke()
+			// Deliberately not withCRLLockCounted, matching Clean: the failures
+			// inside this closure are already counted by revokeSerialLocked and
+			// signCRLLocked, so wrapping would add only the arm where the lock
+			// could not be taken at all. docs/metrics.md names this path as
+			// uncounted on the lock arm.
+			if rerr := c.Storage.WithLock(revokeCtx, lockNameCRL, func() error {
 				c.mu.Lock()
 				defer c.mu.Unlock()
-				return c.revokeSerialLocked(ctx, newSerial)
+				return c.revokeSerialLocked(revokeCtx, newSerial)
 			}); rerr != nil {
 				// Counted by revokeSerialLocked and signCRLLocked where it
 				// reached them. Say plainly what is left behind: a live
@@ -612,10 +724,24 @@ func (c *CA) issueManagedLocked(ctx context.Context, m ManagedCert, reason issue
 	// written and a failure here must not undo it.
 	if current != nil && reason != reasonNotOurs && reason != reasonRevoked {
 		oldSerial := serialHexStr(current.SerialNumber)
-		if err := c.supersedeReplaced(ctx, subject, oldSerial); err != nil {
+		// Its own budget too, and for the same reason: by this point the pass
+		// has spent its deadline on a load, a key generation, a signature and a
+		// store write, and a retirement that cannot be recorded is one nothing
+		// retries -- the next pass finds the new certificate current.
+		supersedeCtx, cancelSupersede := context.WithTimeout(
+			context.WithoutCancel(ctx), LockTimeout/2)
+		defer cancelSupersede()
+		if err := c.supersedeReplaced(supersedeCtx, subject, oldSerial); err != nil {
 			// Counted already -- crlUpdateFailures on the immediate path,
 			// supersedeFailures on the delayed one.
-			slog.Warn("Managed certificate issued, but its predecessor was not retired",
+			//
+			// The wording is the documented one, deliberately: docs/metrics.md
+			// tells an operator responding to PuppetCASupersedeFailing to grep
+			// for "failed to retire replaced certificate" and retire what it
+			// names by serial. Renew and AutoRenew emit that string; a third
+			// caller phrasing it differently is a path the runbook silently
+			// misses.
+			slog.Warn("ReconcileManaged: failed to retire replaced certificate",
 				"subject", subject, "serial", oldSerial, "error", err)
 		}
 	}

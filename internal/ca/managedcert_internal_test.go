@@ -45,6 +45,12 @@ type mintedLeaf struct {
 	key     crypto.Signer
 }
 
+// fixtureBackdate is the NotBefore backdate every fixture here is minted with.
+// Chosen well above the 5-minute default so that subtracting it is observable:
+// with a 24-hour backdate a one-hour certificate spans 25 hours, which is the
+// case that distinguishes a clamp over forward life from one over the span.
+const fixtureBackdate = 24 * time.Hour
+
 // selfSignedIssuer builds a throwaway CA to sign fixtures with. ECDSA P-256
 // because these specs mint dozens of certificates and RSA would make the suite
 // slow for nothing -- no assertion here is about the key algorithm.
@@ -70,11 +76,17 @@ func selfSignedIssuer(cn string) (*x509.Certificate, crypto.Signer) {
 // mintLeaf signs a leaf with exactly the properties a spec asks for, including
 // its NotBefore and NotAfter.
 //
-// It backdates NotBefore by leafBackdate, as issueLeafLocked does, because the
-// renew-window clamp reads that backdate out of the certificate again. A
-// fixture that did not carry it would exercise arithmetic the real path never
-// performs -- and would make the clamp look correct at short lifetimes when it
-// is not.
+// It backdates NotBefore by fixtureBackdate, as issueLeafLocked backdates by
+// the CA's setting, because the renew-window clamp reads that backdate out of
+// the certificate again. A fixture that did not carry it would exercise
+// arithmetic the real path never performs -- and would make the clamp look
+// correct at short lifetimes when it is not.
+//
+// The fixture deliberately uses a LARGE backdate rather than the 5-minute
+// default. The clamp's short-ttl arm is only interesting when the backdate is a
+// significant fraction of the certificate's life, so a fixture pinned to the
+// default would leave the arithmetic that matters untested on every spec here
+// -- and would pass just as well if the subtraction were deleted.
 func mintLeaf(issuer *x509.Certificate, issuerKey crypto.Signer, cn string,
 	dnsNames []string, eku []x509.ExtKeyUsage, forwardLife time.Duration, now time.Time) mintedLeaf {
 	key, err := ecdsa.GenerateKey(elliptic.P256(), rand.Reader)
@@ -89,7 +101,7 @@ func mintLeaf(issuer *x509.Certificate, issuerKey crypto.Signer, cn string,
 		Subject:               pkix.Name{CommonName: cn},
 		DNSNames:              dnsNames,
 		ExtKeyUsage:           eku,
-		NotBefore:             now.Add(-leafBackdate),
+		NotBefore:             now.Add(-fixtureBackdate),
 		NotAfter:              now.Add(forwardLife),
 		KeyUsage:              x509.KeyUsageDigitalSignature | x509.KeyUsageKeyEncipherment,
 		BasicConstraintsValid: true,
@@ -133,7 +145,7 @@ var _ = Describe("The managed-certificate issue decision", func() {
 	// that is known to answer "no".
 	It("leaves a certificate that satisfies the spec alone", func() {
 		leaf := mintLeaf(issuer, issuerKey, subject, spec.DNSNames, nil, 90*24*time.Hour, now)
-		issue, reason, current := issueDecision(leaf.certPEM, leaf.keyPEM, spec, issuer, now, false)
+		issue, reason, current := issueDecision(leaf.certPEM, leaf.keyPEM, spec, issuer, fixtureBackdate, now, false)
 		Expect(issue).To(BeFalse(), "a fresh certificate matching the spec must not be reissued")
 		Expect(reason).To(Equal(reasonCurrent))
 		Expect(current).NotTo(BeNil(), "the parsed certificate is returned so the caller need not decode it again")
@@ -143,7 +155,7 @@ var _ = Describe("The managed-certificate issue decision", func() {
 	DescribeTable("reissues, and says why",
 		func(material func() (certPEM, keyPEM []byte), revoked bool, want issueReason) {
 			certPEM, keyPEM := material()
-			issue, reason, _ := issueDecision(certPEM, keyPEM, spec, issuer, now, revoked)
+			issue, reason, _ := issueDecision(certPEM, keyPEM, spec, issuer, fixtureBackdate, now, revoked)
 			Expect(issue).To(BeTrue(), "expected an issuance for reason %s", want)
 			Expect(reason).To(Equal(want), "reason = %s; want %s", reason, want)
 		},
@@ -228,7 +240,7 @@ var _ = Describe("The managed-certificate issue decision", func() {
 		leaf := mintLeaf(issuer, issuerKey, subject, spec.DNSNames, nil, 90*24*time.Hour, now)
 		spec.ExtKeyUsage = []x509.ExtKeyUsage{x509.ExtKeyUsageServerAuth}
 
-		issue, reason, _ := issueDecision(leaf.certPEM, leaf.keyPEM, spec, issuer, now, false)
+		issue, reason, _ := issueDecision(leaf.certPEM, leaf.keyPEM, spec, issuer, fixtureBackdate, now, false)
 		Expect(issue).To(BeTrue())
 		Expect(reason).To(Equal(reasonUsageMismatch))
 	})
@@ -237,8 +249,29 @@ var _ = Describe("The managed-certificate issue decision", func() {
 		spec.ExtKeyUsage = []x509.ExtKeyUsage{x509.ExtKeyUsageServerAuth}
 		leaf := mintLeaf(issuer, issuerKey, subject, spec.DNSNames, spec.ExtKeyUsage, 90*24*time.Hour, now)
 
-		issue, reason, _ := issueDecision(leaf.certPEM, leaf.keyPEM, spec, issuer, now, false)
+		issue, reason, _ := issueDecision(leaf.certPEM, leaf.keyPEM, spec, issuer, fixtureBackdate, now, false)
 		Expect(issue).To(BeFalse(), "reason %s", reason)
+	})
+
+	It("accepts a certificate whose spec names the same usage twice", func() {
+		// crypto/x509 de-duplicates extended key usages neither on write nor on
+		// parse, so a spec naming one twice produces a certificate carrying it
+		// twice. Comparing that against a compacted want never matches, and the
+		// certificate then fails the very spec that produced it -- on every
+		// pass, for ever. That is the unbounded reissue loop renewWindowFor
+		// exists to close, reached through a door the clamp cannot see, so it
+		// is pinned here rather than left to the clamp.
+		spec.ExtKeyUsage = []x509.ExtKeyUsage{x509.ExtKeyUsageServerAuth, x509.ExtKeyUsageServerAuth}
+		leaf := mintLeaf(issuer, issuerKey, subject, spec.DNSNames, spec.ExtKeyUsage,
+			90*24*time.Hour, now)
+		Expect(leaf.cert.ExtKeyUsage).To(HaveLen(2),
+			"the fixture is only meaningful if the duplicate really survives the round trip; "+
+				"if crypto/x509 ever starts de-duplicating, this spec is testing nothing")
+
+		issue, reason, _ := issueDecision(leaf.certPEM, leaf.keyPEM, spec, issuer,
+			fixtureBackdate, now, false)
+		Expect(issue).To(BeFalse(),
+			"a certificate issued from this very spec must satisfy it (reason %s)", reason)
 	})
 
 	It("accepts a certificate carrying names beyond the spec's", func() {
@@ -249,7 +282,7 @@ var _ = Describe("The managed-certificate issue decision", func() {
 			append(append([]string{}, spec.DNSNames...), "extra.example.com"),
 			nil, 90*24*time.Hour, now)
 
-		issue, _, _ := issueDecision(leaf.certPEM, leaf.keyPEM, spec, issuer, now, false)
+		issue, _, _ := issueDecision(leaf.certPEM, leaf.keyPEM, spec, issuer, fixtureBackdate, now, false)
 		Expect(issue).To(BeFalse())
 	})
 
@@ -257,7 +290,7 @@ var _ = Describe("The managed-certificate issue decision", func() {
 		// An uninitialised CA cannot establish ownership, and "ours" would be
 		// the unsafe answer.
 		leaf := mintLeaf(issuer, issuerKey, subject, spec.DNSNames, nil, 90*24*time.Hour, now)
-		issue, reason, _ := issueDecision(leaf.certPEM, leaf.keyPEM, spec, nil, now, false)
+		issue, reason, _ := issueDecision(leaf.certPEM, leaf.keyPEM, spec, nil, fixtureBackdate, now, false)
 		Expect(issue).To(BeTrue())
 		Expect(reason).To(Equal(reasonNotOurs))
 	})
@@ -269,7 +302,7 @@ var _ = Describe("The managed-certificate issue decision", func() {
 		foreign, foreignKey := selfSignedIssuer("Some other CA")
 		leaf := mintLeaf(foreign, foreignKey, subject, spec.DNSNames, nil, 90*24*time.Hour, now)
 
-		_, reason, _ := issueDecision(leaf.certPEM, leaf.keyPEM, spec, issuer, now, true)
+		_, reason, _ := issueDecision(leaf.certPEM, leaf.keyPEM, spec, issuer, fixtureBackdate, now, true)
 		Expect(reason).To(Equal(reasonNotOurs))
 	})
 
@@ -285,7 +318,7 @@ var _ = Describe("The managed-certificate issue decision", func() {
 			// certificate is inside a 30-day window the moment it exists.
 			leaf := mintLeaf(issuer, issuerKey, subject, spec.DNSNames, nil, 20*24*time.Hour, now)
 
-			issue, reason, _ := issueDecision(leaf.certPEM, leaf.keyPEM, spec, issuer, now, false)
+			issue, reason, _ := issueDecision(leaf.certPEM, leaf.keyPEM, spec, issuer, fixtureBackdate, now, false)
 			Expect(issue).To(BeFalse(),
 				"a certificate issued for 20 days against a 30-day window must not be due at once "+
 					"(reason %s); without the clamp this reissues on every pass, for ever", reason)
@@ -297,7 +330,7 @@ var _ = Describe("The managed-certificate issue decision", func() {
 			leaf := mintLeaf(issuer, issuerKey, subject, spec.DNSNames, nil, 20*24*time.Hour, now)
 
 			issue, _, _ := issueDecision(leaf.certPEM, leaf.keyPEM, spec, issuer,
-				now.Add(10*24*time.Hour).Add(time.Minute), false)
+				fixtureBackdate, now.Add(10*24*time.Hour).Add(time.Minute), false)
 			Expect(issue).To(BeTrue(), "the clamped window must still open")
 		})
 
@@ -309,7 +342,7 @@ var _ = Describe("The managed-certificate issue decision", func() {
 			spec.TTL = time.Hour
 			leaf := mintLeaf(issuer, issuerKey, subject, spec.DNSNames, nil, time.Hour, now)
 
-			issue, reason, _ := issueDecision(leaf.certPEM, leaf.keyPEM, spec, issuer, now, false)
+			issue, reason, _ := issueDecision(leaf.certPEM, leaf.keyPEM, spec, issuer, fixtureBackdate, now, false)
 			Expect(issue).To(BeFalse(),
 				"a one-hour certificate must not be due the moment it is signed (reason %s)", reason)
 		})
@@ -320,7 +353,7 @@ var _ = Describe("The managed-certificate issue decision", func() {
 			// applied -- a clamp that quietly shortened every window would be a
 			// change to what the setting means.
 			leaf := mintLeaf(issuer, issuerKey, subject, spec.DNSNames, nil, 90*24*time.Hour, now)
-			Expect(renewWindowFor(leaf.cert, spec)).To(Equal(30 * 24 * time.Hour))
+			Expect(renewWindowFor(leaf.cert, spec, fixtureBackdate)).To(Equal(30 * 24 * time.Hour))
 		})
 	})
 })
@@ -356,6 +389,14 @@ var _ = Describe("A managed-certificate spec", func() {
 		// acts on a certificate that has already stopped working.
 		spec.RenewBefore = 0
 		Expect(spec.Validate()).To(MatchError(ContainSubstring("renew_before must be positive")))
+	})
+
+	It("refuses a negative ttl", func() {
+		// Not merely nonsense: issueLeafLocked's `if ttl > 0` would silently
+		// discard it and substitute the CA default, so without this arm a
+		// mistyped lifetime becomes a five-year certificate with no complaint.
+		spec.TTL = -time.Hour
+		Expect(spec.Validate()).To(MatchError(ContainSubstring("ttl must not be negative")))
 	})
 
 	It("allows a ttl of zero, which inherits the CA's configured leaf lifetime", func() {

@@ -25,17 +25,6 @@ import (
 	"github.com/voxpupuli/openvox-ca/internal/ca"
 )
 
-// defaultManagedCertInterval is how often the reconcile loop wakes when no
-// interval is configured.
-//
-// Renewal is not urgent work: a managed certificate's renew-before window is
-// measured in days or weeks, so the interval only has to be short relative to
-// that, and short enough that a store deleted out from under the CA is repaired
-// while somebody is still looking. Fifteen minutes matches the superseded
-// sweep, which is the neighbouring job with the same shape and the same
-// tolerance.
-const defaultManagedCertInterval = 15 * time.Minute
-
 // runManagedCertReconciler reconciles the CA's managed certificates on a timer
 // until ctx is cancelled.
 //
