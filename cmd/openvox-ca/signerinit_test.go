@@ -22,6 +22,8 @@ import (
 	"crypto"
 	"crypto/rand"
 	"crypto/sha256"
+	"errors"
+	"log/slog"
 	"path/filepath"
 
 	. "github.com/onsi/ginkgo/v2"
@@ -153,6 +155,62 @@ var _ = Describe("initSignerKeyWith", func() {
 
 		Expect(rt.Close()).To(Succeed())
 		Expect(keyCloserRan).To(BeTrue())
+	})
+
+	It("serves anyway when the store will not close, and says so", func() {
+		// The branch the code itself calls out as consequential: refusing to
+		// serve because a handle nobody will use again closed untidily would
+		// turn a leak into an outage. Nothing drove it -- signerinit's backend
+		// is a working SQLite pool whose Close always succeeds -- so a
+		// regression making the failure fatal would have gone unnoticed.
+		//
+		// A closer that fails, prepended so it runs before the real backend's
+		// and supplies the first error runClosers returns.
+		var keyCloserRan bool
+		cfg := signerConfig()
+		boom := errors.New("backend refused to close")
+		resolve := func(ctx context.Context, cfg *serverConfig) (*caRuntime, error) {
+			rt, err := resolverNoting(&keyCloserRan)(ctx, cfg)
+			if err != nil {
+				return nil, err
+			}
+			rt.storeClosers = append(rt.storeClosers, func() error { return boom })
+			return rt, nil
+		}
+
+		var key crypto.Signer
+		var rt *caRuntime
+		var err error
+		logs := captureLogs(slog.LevelDebug, func() {
+			key, rt, err = initSignerKeyWith(ctx, cfg, resolve)
+		})
+
+		Expect(err).NotTo(HaveOccurred(), "a failed store close must not stop the signer serving")
+		Expect(key).NotTo(BeNil())
+		DeferCleanup(func() { _ = rt.Close() })
+
+		Expect(logs).To(ContainSubstring("Failed to close the signer's storage backend"),
+			"the failure must not be swallowed silently")
+		Expect(logs).To(ContainSubstring("store_closed=false"),
+			"the release line must report what actually happened, not a constant")
+	})
+
+	It("reports the store as closed when it closed", func() {
+		// The other half. Without it, "store_closed=false" above is satisfied
+		// just as well by a field wired to a constant false.
+		var keyCloserRan bool
+		cfg := signerConfig()
+
+		var rt *caRuntime
+		var err error
+		logs := captureLogs(slog.LevelDebug, func() {
+			_, rt, err = initSignerKeyWith(ctx, cfg, resolverNoting(&keyCloserRan))
+		})
+		Expect(err).NotTo(HaveOccurred())
+		DeferCleanup(func() { _ = rt.Close() })
+
+		Expect(logs).To(ContainSubstring("store_closed=true"))
+		Expect(logs).NotTo(ContainSubstring("Failed to close the signer's storage backend"))
 	})
 
 	It("closes the runtime when initialisation fails", func() {
