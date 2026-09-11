@@ -129,7 +129,15 @@ set -eu -o pipefail
 BRANCHES=(
   local/integration-setup
 
+  origin/feature/316-separate-fixture-image  # PR #323 — issue #316
+  origin/fix/313-nolintlint-g703-flake     # PR #325 — issue #313
+
+  # Collide on docs/development/locking.md's lock-name table, on DISJOINT rows:
+  # #312 changes hmac-key, capability-probe and store-instance; #322 changes crl
+  # and subject:<name>. Keep both sides, one row each — do not pick a side. #312
+  # is first here because it lands first, so the rebase is #322's.
   origin/feature/188-rebuild-inventory-hmac  # PR #312 — issue #188
+  origin/feature/242-managed-certificates  # PR #322 — issue #242
 
   # Collide on magefile.go. #282 FIRST: #266 wires release.yml to call
   # `mage build:packages`, which #282 provides, and #266's body says it must
