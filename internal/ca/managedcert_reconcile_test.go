@@ -236,10 +236,12 @@ var _ = Describe("Reconciling a managed certificate", func() {
 	})
 
 	It("issues a serverAuth-only certificate when the spec says so", func() {
-		// SECURITY: the serving certificate must not be usable as a client
-		// credential. A clientAuth certificate for a name that appears in
-		// puppet_server is an admin credential, so this asserts the absence
-		// rather than only the presence.
+		// SECURITY: when a spec asks for serverAuth alone, clientAuth must
+		// really be absent, so this asserts the absence rather than only the
+		// presence. Which certificates should ask is a configuration question
+		// -- a certificate shared with an OpenVox Server needs clientAuth, one
+		// that only answers handshakes does not. What must never happen is
+		// getting the wider pair while having asked for the narrower.
 		entry.Spec.ExtKeyUsage = []x509.ExtKeyUsage{x509.ExtKeyUsageServerAuth}
 		_, err := reconcile()
 		Expect(err).NotTo(HaveOccurred())

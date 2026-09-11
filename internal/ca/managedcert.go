@@ -65,9 +65,13 @@ type CertSpec struct {
 	// ExtKeyUsage is what the certificate may be used for. Nil means the
 	// serverAuth+clientAuth pair every other issuance path uses.
 	//
-	// SECURITY: a serving certificate must be serverAuth-only. A clientAuth
-	// certificate for a name that appears in puppet_server is a usable admin
-	// credential, so a spec that wants one must say so rather than inherit it.
+	// SECURITY: clientAuth is what makes a certificate usable as a CA client,
+	// and a certname listed in puppet_server is an administrator -- so the two
+	// together are an admin credential. The listing is what grants the
+	// authority; the usage is what lets it be presented. A deployment whose
+	// certificate only ever answers handshakes can narrow this and lose
+	// nothing, which is a decision for whoever configures the entry rather than
+	// one this type should prejudge.
 	// NIST 800-53: AC-6 (Least Privilege), CM-7 (Least Functionality)
 	ExtKeyUsage []x509.ExtKeyUsage
 
@@ -373,12 +377,13 @@ func leafCarriesNames(leaf *x509.Certificate, want CertSpec) bool {
 // leafCarriesUsages reports whether leaf's extended key usages are exactly the
 // ones want asks for.
 //
-// Exactly, not "at least": the spec's job here is to *withhold* clientAuth from
-// a serving certificate, and a subset test would leave an existing
-// serverAuth+clientAuth certificate satisfying a serverAuth-only spec until it
-// expired of its own accord. That is the one drift where waiting is the wrong
-// answer -- the certificate still in the store is a usable admin credential for
-// a name in puppet_server, which is the whole reason the usage is configurable.
+// Exactly, not "at least": what the spec says is what gets issued, in both
+// directions. A subset test would leave an existing serverAuth+clientAuth
+// certificate satisfying a serverAuth-only spec until it expired of its own
+// accord -- and that is the one drift where waiting is the wrong answer, since
+// the certificate still in the store is a usable admin credential for a name in
+// puppet_server. Narrowing the usage has to take effect when the operator
+// narrows it, or the setting is decorative.
 //
 // The issue this implements did not list a usage mismatch among its reasons;
 // it is here because without it a change to the setting has no effect until

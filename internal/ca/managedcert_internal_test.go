@@ -238,7 +238,9 @@ var _ = Describe("The managed-certificate issue decision", func() {
 		// The certificate carries the default pair; the spec wants serverAuth
 		// alone. Waiting for natural expiry is the wrong answer here: what is
 		// in the store is a clientAuth certificate for a name in puppet_server,
-		// which is a usable admin credential.
+		// which is a usable admin credential. Narrowing has to take effect when
+		// the operator narrows it -- widening is not urgent in the same way,
+		// but the comparison is exact in both directions so that neither drifts.
 		leaf := mintLeaf(issuer, issuerKey, subject, spec.DNSNames, nil, 90*24*time.Hour, now)
 		spec.ExtKeyUsage = []x509.ExtKeyUsage{x509.ExtKeyUsageServerAuth}
 
