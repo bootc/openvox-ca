@@ -278,7 +278,8 @@ merely within one. `c.mu` was never what stood between them.
 `c.mu` is held across the signing call itself **on the issuance paths**. Every
 one of them (`Sign`, `SignWithTTL`, `SaveRequest`'s autosign, `Renew`,
 `AutoRenew`, `ImportCertificate`, `Generate`, `ReconcileManaged`) calls
-`issueLeafLocked` with `c.mu` held, and `x509.CreateCertificate` runs inside it — so with an external
+`issueLeafLocked` with `c.mu` held, and `x509.CreateCertificate` runs inside it
+— so with an external
 key provider (`ca_key_provider: openbao`, or the isolated signer) `c.mu`, not
 the per-subject cluster lock, is the process-wide issuance serialiser, and it
 spans a network/IPC round trip. Issuance therefore proceeds at roughly one
@@ -362,7 +363,8 @@ written as two.
   paths that take all three. For the five issuance paths it is the subject lock
   around the whole operation, then the `crl` lock + `c.mu` for the revocation
   step; note they release and re-acquire `c.mu` between the signing and
-  revocation steps — `c.mu` is not held across a `WithLock` acquisition. `Revoke` has the same nesting for a
+  revocation steps — `c.mu` is not held across a `WithLock` acquisition.
+  `Revoke` has the same nesting for a
   different reason: the `crl` lock + `c.mu` cover the revocation that is the
   whole operation, and the subject lock is there only to serialise it against
   an issuance already under way for that subject.
@@ -1073,16 +1075,20 @@ below,
 [deleterequest_test.go](../../internal/ca/deleterequest_test.go) for
 `DeleteRequest`, and
 [managedcert_reconcile_test.go](../../internal/ca/managedcert_reconcile_test.go)
-for the managed-certificate reconcile. That last one is also pinned a second
-way, which is worth copying where an operation is genuinely concurrent: four
-replicas over one lock table must converge on a single issuance, and a
-companion spec gives four replicas *separate* lock tables and requires more
-than one issuance — so the convergence claim is falsifiable by construction
-rather than only when the scheduler happens to expose it. That last one also pins the far side — it parks a delete on
-the inventory append inside an autosigning `SaveRequest`'s issuance, so it
-observes the lock being held from that append until `SaveRequest` returns, not
-across the evict/save prefix ahead of it. Dropping `SaveRequest`'s `WithLock`
-still fails it, which is what makes `SaveRequest` pinned too.
+for the managed-certificate reconcile.
+
+`deleterequest_test.go` also pins the far side — it parks a delete on the
+inventory append inside an autosigning `SaveRequest`'s issuance, so it observes
+the lock being held from that append until `SaveRequest` returns, not across
+the evict/save prefix ahead of it. Dropping `SaveRequest`'s `WithLock` still
+fails it, which is what makes `SaveRequest` pinned too.
+
+`managedcert_reconcile_test.go` is pinned a second way of its own, which is
+worth copying where an operation is genuinely concurrent: four replicas over
+one lock table must converge on a single issuance, and a companion spec gives
+four replicas *separate* lock tables and requires more than one issuance — so
+the convergence claim is falsifiable by construction rather than only when the
+scheduler happens to expose it.
 
 `Sign` is pinned as well, but in a second shape rather than this one:
 [lockorder_test.go](../../internal/ca/lockorder_test.go)'s rule-9 spec compares

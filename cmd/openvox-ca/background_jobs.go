@@ -192,7 +192,7 @@ func backgroundJobs(cfg *serverConfig, myCA *ca.CA) []backgroundJob {
 	// each entry's work is serialised on that subject's cluster lock, and the
 	// replica that loses the race reads what the winner wrote and does nothing.
 	if len(myCA.ManagedCerts) > 0 {
-		managedInterval := defaultManagedCertInterval
+		managedInterval := cfg.managedCertInterval()
 		jobs = append(jobs, backgroundJob{jobManagedCerts, func(ctx context.Context) {
 			runManagedCertReconciler(ctx, myCA, managedInterval)
 		}})

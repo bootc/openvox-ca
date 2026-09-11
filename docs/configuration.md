@@ -158,6 +158,8 @@ revoke_on_auto_renew: true      # false matches OpenVox Server's Clojure CA (no 
 # below, and set 0 for the earlier behaviour of revoking inside the call.
 superseded_cert_revoke_after_sec: -1   # overlap window; 0 = revoke inside the renewal; -1/unset = 24h
 superseded_cert_sweep_interval_sec: 0  # how often the sweep runs; 0 = built-in default (15m)
+leaf_backdate_sec: 0                   # clock-skew tolerance on NotBefore; 0 = built-in default (5m)
+managed_cert_interval_sec: 0           # managed-certificate reconcile cadence; 0 = built-in default (15m)
 ```
 
 ## Environment variables
@@ -251,6 +253,8 @@ The CA key passphrase can also be provided via `PUPPET_CA_KEY_PASSPHRASE` (env v
 | `revoke_on_auto_renew` | `PUPPET_CA_REVOKE_ON_AUTO_RENEW` |
 | `superseded_cert_revoke_after_sec` | `PUPPET_CA_SUPERSEDED_CERT_REVOKE_AFTER_SEC` |
 | `superseded_cert_sweep_interval_sec` | `PUPPET_CA_SUPERSEDED_CERT_SWEEP_INTERVAL_SEC` |
+| `leaf_backdate_sec` | `PUPPET_CA_LEAF_BACKDATE_SEC` |
+| `managed_cert_interval_sec` | `PUPPET_CA_MANAGED_CERT_INTERVAL_SEC` |
 
 > **Note:** `--daemon` is intentionally excluded from config file and environment
 > variable support because `PUPPET_CA_DAEMON` is used internally as the daemon fork
@@ -847,6 +851,31 @@ Three metrics (see [metrics.md](metrics.md)):
 
 Sustained shedding while the signer has capacity to spare means the limit is
 too low. Shedding under an unauthenticated flood is the bound doing its job.
+
+## Clock skew and NotBefore
+
+Every certificate this CA issues is backdated: its `NotBefore` is set a little
+earlier than the moment it was signed, so a client whose clock is behind the
+CA's still accepts a certificate that has just been issued. Without it, an agent
+running a few seconds slow rejects its own brand-new certificate as not yet
+valid.
+
+`leaf_backdate_sec` sets how far, and defaults to **5 minutes**. That is a
+tolerance for ordinary clock drift, not a margin for a fleet that cannot keep
+time: a client further out than the backdate refuses the certificate, and keeps
+refusing it until its clock is corrected. Where NTP is not available and hosts
+are known to drift further, raise it.
+
+It applies to every certificate — signed from a CSR, generated, renewed or
+managed — so raising it widens the window in which a certificate is valid before
+anyone asked for it. A negative value is refused at startup, because it would
+issue certificates that are valid only in the future.
+
+The setting also feeds the managed-certificate renewal decision, which derives
+how much serving life a certificate was granted by subtracting the backdate from
+its validity period. Changing the setting therefore mis-measures certificates
+already issued under the old value, by exactly the difference; the error is
+bounded and corrects itself at the next issuance.
 
 ## Delayed supersession
 

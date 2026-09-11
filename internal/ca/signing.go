@@ -47,17 +47,35 @@ const (
 	certValidity = 5 * 365 * 24 * time.Hour
 	// CRLValidity is the default validity window written into every CRL.
 	CRLValidity = 30 * 24 * time.Hour
-	// leafBackdate is how far before the moment of issuance a leaf's NotBefore
-	// is set, so a verifier whose clock is behind ours still accepts a
-	// certificate we have just signed.
+	// defaultLeafBackdate is how far before the moment of issuance a leaf's
+	// NotBefore is set when the CA does not say otherwise, so a verifier whose
+	// clock is behind ours still accepts a certificate we have just signed.
 	//
-	// Named rather than written inline because a second place now depends on
-	// it: issueDecision derives a certificate's forward lifetime -- the span it
-	// was actually issued to serve -- as NotAfter - NotBefore - leafBackdate,
-	// and that arithmetic is what clamps the renew-before window. A literal in
-	// one file and an assumption in another is how the two would diverge.
-	leafBackdate = 24 * time.Hour
+	// Five minutes is the tolerance, not a margin for a broken fleet: a client
+	// whose clock is further out than this rejects a certificate the CA signed
+	// a moment ago as not yet valid, and will keep doing so until its clock is
+	// fixed. The knob exists for a fleet that cannot run NTP; the default
+	// assumes it can.
+	//
+	// It is a default rather than a constant because a second place depends on
+	// the value: issueDecision derives a certificate's forward lifetime -- the
+	// span it was actually issued to serve -- as NotAfter - NotBefore - the
+	// backdate, and that arithmetic is what clamps the renew-before window.
+	defaultLeafBackdate = 5 * time.Minute
 )
+
+// leafBackdate returns how far this CA backdates a leaf's NotBefore.
+//
+// Zero (the CA struct's zero value) means defaultLeafBackdate; a negative
+// setting is refused at startup, so a caller that reaches here with one is a
+// CA built in code rather than from configuration, and gets the default rather
+// than a certificate that is not valid until the future.
+func (c *CA) leafBackdate() time.Duration {
+	if c.LeafBackdate > 0 {
+		return c.LeafBackdate
+	}
+	return defaultLeafBackdate
+}
 
 // CRLValidityDuration returns the CA's configured CRL validity period.
 // When CRLValidityDays is zero the package-level CRLValidity default is used.
@@ -736,7 +754,7 @@ func (c *CA) issueLeafLocked(ctx context.Context, subject string, subjectName pk
 	template := &x509.Certificate{
 		SerialNumber: serialInt,
 		Subject:      subjectName,
-		NotBefore:    now.Add(-leafBackdate),
+		NotBefore:    now.Add(-c.leafBackdate()),
 		NotAfter:     now.Add(validity),
 
 		KeyUsage:    x509.KeyUsageDigitalSignature | x509.KeyUsageKeyEncipherment,

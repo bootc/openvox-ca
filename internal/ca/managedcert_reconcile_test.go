@@ -385,12 +385,159 @@ var _ = Describe("Reconciling a managed certificate", func() {
 		})
 	})
 
-	It("blocks on the subject lock the rest of the CA uses", func() {
-		// The deterministic half of the convergence claim. Holding
-		// subjectLockName from another goroutine and asserting the reconcile
-		// waits pins "this path takes that lock" as a decision rather than as a
-		// coincidence of timing -- and it is the lock that every other issuance
-		// path for this subject takes, not one of its own.
+	Describe("when the stored certificate has been revoked", func() {
+		// The only wiring between the CRL and issueDecision's `revoked` input is
+		// storedMaterialRevoked, and nothing exercised it: every other spec here
+		// reaches it with an unrevoked certificate, so replacing its body with
+		// `return false` failed nothing. An operator who revokes a managed
+		// certificate expects it replaced now, not whenever its renew window
+		// happens to open.
+		It("reissues at once, without waiting for the renew window", func() {
+			_, err := reconcile()
+			Expect(err).NotTo(HaveOccurred())
+			predecessor := fake.stored()
+
+			Expect(myCA.Revoke(ctx, subject)).To(Succeed())
+
+			// The SAME clock as the first pass. That is what makes this
+			// falsifiable: a renew-window reissue would confound it, and at this
+			// instant the certificate is 90 days from expiry with a 30-day
+			// window, so the only thing that can make it due is the revocation.
+			issued, err := reconcile()
+			Expect(err).NotTo(HaveOccurred())
+			Expect(issued).To(BeTrue(), "a revoked certificate must be replaced immediately")
+			Expect(fake.stored().SerialNumber).NotTo(Equal(predecessor.SerialNumber))
+		})
+
+		It("does not retire a predecessor that is already on the CRL", func() {
+			// issueManagedLocked skips supersession on the revoked arm. Without
+			// that guard the CA re-retires a serial the CRL already carries:
+			// harmless on the immediate path, but on the delayed one it appends
+			// a pending entry for a certificate that needs nothing further.
+			myCA.SupersedeAfter = 24 * time.Hour
+			_, err := reconcile()
+			Expect(err).NotTo(HaveOccurred())
+			predecessor := fake.stored()
+
+			Expect(myCA.Revoke(ctx, subject)).To(Succeed())
+			// Confirm the revocation landed on the certificate this spec is
+			// about. Revoke resolves the subject to its current certificate, so
+			// if that were ever something other than the one in the store, the
+			// assertions below would be about a certificate nobody revoked.
+			wasRevoked, rerr := myCA.IsRevokedSerial(ctx, predecessor.SerialNumber)
+			Expect(rerr).NotTo(HaveOccurred())
+			Expect(wasRevoked).To(BeTrue())
+
+			_, err = reconcile()
+			Expect(err).NotTo(HaveOccurred())
+
+			entries, _, rerr := myCA.readSuperseded(ctx)
+			Expect(rerr).NotTo(HaveOccurred())
+			Expect(entries).To(BeEmpty(),
+				"an already-revoked predecessor needs no supersession window")
+		})
+	})
+
+	Describe("when another certificate already holds the name", func() {
+		// issueLeafLocked ends in an unconditional SaveCert, and the predecessor
+		// this path retires comes from the entry's own store -- which on the
+		// absent arm is nothing. Without a guard, a managed entry configured for
+		// a name that already has a certificate overwrites the CA's record of it
+		// while leaving it valid, unrevoked, and no longer reachable by
+		// `revoke --certname`: a live credential nothing can retire.
+		It("refuses rather than displacing it", func() {
+			existing, err := myCA.GenerateWithOptions(ctx, subject, GenerateOptions{
+				DNSAltNames: []string{subject},
+			})
+			Expect(err).NotTo(HaveOccurred())
+			block, _ := pem.Decode(existing.CertificatePEM)
+			Expect(block).NotTo(BeNil())
+			incumbent, err := x509.ParseCertificate(block.Bytes)
+			Expect(err).NotTo(HaveOccurred())
+
+			issued, err := reconcile()
+			Expect(err).To(MatchError(ContainSubstring("refusing to issue a managed certificate")))
+			Expect(issued).To(BeFalse())
+
+			// The incumbent is untouched: still stored, still valid. Both halves
+			// matter -- leaving it stored but revoked, or revoked but stored,
+			// would each be a way of losing it.
+			stored, err := store.GetCert(ctx, subject)
+			Expect(err).NotTo(HaveOccurred())
+			sblock, _ := pem.Decode(stored)
+			Expect(sblock).NotTo(BeNil())
+			still, err := x509.ParseCertificate(sblock.Bytes)
+			Expect(err).NotTo(HaveOccurred())
+			Expect(still.SerialNumber).To(Equal(incumbent.SerialNumber),
+				"the incumbent certificate must not be overwritten")
+
+			revoked, err := myCA.IsRevokedSerial(ctx, incumbent.SerialNumber)
+			Expect(err).NotTo(HaveOccurred())
+			Expect(revoked).To(BeFalse(), "and must not be revoked either")
+
+			Expect(fake.saveCount()).To(BeZero(), "nothing may reach the managed store")
+		})
+
+		It("proceeds once the incumbent has been revoked", func() {
+			// The refusal is about live credentials, not about the name having
+			// any history. This is also the arm a store write that failed after
+			// signing leaves behind, so refusing here would block the retry the
+			// mechanism depends on.
+			existing, err := myCA.GenerateWithOptions(ctx, subject, GenerateOptions{
+				DNSAltNames: []string{subject},
+			})
+			Expect(err).NotTo(HaveOccurred())
+			block, _ := pem.Decode(existing.CertificatePEM)
+			Expect(block).NotTo(BeNil())
+			incumbent, err := x509.ParseCertificate(block.Bytes)
+			Expect(err).NotTo(HaveOccurred())
+			Expect(myCA.Revoke(ctx, subject)).To(Succeed())
+			wasRevoked, rerr := myCA.IsRevokedSerial(ctx, incumbent.SerialNumber)
+			Expect(rerr).NotTo(HaveOccurred())
+			Expect(wasRevoked).To(BeTrue(),
+				"the fixture only tests the revoked arm if the incumbent really is revoked")
+
+			issued, err := reconcile()
+			Expect(err).NotTo(HaveOccurred())
+			Expect(issued).To(BeTrue())
+		})
+
+		It("proceeds on the steady-state pass, where the stored certificate is its own", func() {
+			// The guard must not fire on the certificate this entry itself
+			// wrote, or the second renewal of every managed certificate fails.
+			_, err := reconcile()
+			Expect(err).NotTo(HaveOccurred())
+
+			issued, err := reconcileAt(dueWindow)
+			Expect(err).NotTo(HaveOccurred())
+			Expect(issued).To(BeTrue(), "a managed certificate must be able to replace itself")
+		})
+	})
+
+	It("blocks on the subject lock, and takes crl inside it, not before", func() {
+		// The deterministic half of the convergence claim, in the shape
+		// renewrace_test.go uses for the four other callers of this nesting --
+		// because lockorder_test.go's allowedLockNesting now names
+		// ReconcileManaged as the fifth and credits this spec with pinning it.
+		//
+		// Three assertions, and the second is the one that makes it an
+		// *ordering* spec rather than merely a locking one:
+		//
+		//  1. the reconcile waits on a held subject lock (it takes the lock);
+		//  2. `crl` stays grantable while it waits (it did NOT take crl first,
+		//     which is the inversion the documented order exists to forbid, and
+		//     which would otherwise deadlock two replicas against each other);
+		//  3. the CRL-locked work demonstrably ran, so 2 is not vacuous.
+		//
+		// Without 2 and 3 an inverted acquisition leaves this spec green.
+		//
+		// Seeded with a predecessor so there is something to retire: with
+		// SupersedeAfter at its zero value the retirement revokes inline, which
+		// is the CRL-locked work assertion 3 observes.
+		_, err := reconcile()
+		Expect(err).NotTo(HaveOccurred())
+		predecessor := fake.stored()
+
 		release := make(chan struct{})
 		held := make(chan struct{})
 		go func() {
@@ -406,15 +553,38 @@ var _ = Describe("Reconciling a managed certificate", func() {
 		done := make(chan struct{})
 		go func() {
 			defer GinkgoRecover()
-			_, err := reconcile()
+			_, err := reconcileAt(dueWindow)
 			Expect(err).NotTo(HaveOccurred())
 			close(done)
 		}()
 
 		Consistently(done, 200*time.Millisecond, 20*time.Millisecond).ShouldNot(BeClosed(),
 			"the reconcile issued while another holder had the subject lock")
+
+		// While it is parked, `crl` must still be free. A path that took crl
+		// before the subject lock would be holding it now.
+		crlFree := make(chan struct{})
+		go func() {
+			defer GinkgoRecover()
+			crlCtx, cancel := context.WithTimeout(ctx, 2*time.Second)
+			defer cancel()
+			Expect(store.WithLock(crlCtx, lockNameCRL, func() error { return nil })).To(Succeed())
+			close(crlFree)
+		}()
+		Eventually(crlFree).Should(BeClosed(),
+			"the CRL lock was not grantable while the reconcile waited on the subject lock, "+
+				"so this path takes crl outside the subject lock -- the inversion "+
+				"docs/development/locking.md forbids")
+
 		close(release)
 		Eventually(done).Should(BeClosed())
+
+		// And the CRL-locked work really happened, so the grant above was not
+		// merely a lock nobody wanted.
+		revoked, err := myCA.IsRevokedSerial(ctx, predecessor.SerialNumber)
+		Expect(err).NotTo(HaveOccurred())
+		Expect(revoked).To(BeTrue(),
+			"the predecessor was not retired, so this spec observed no CRL-locked work at all")
 	})
 })
 
