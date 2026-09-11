@@ -27,6 +27,7 @@ import (
 	"os"
 	"path/filepath"
 	"runtime"
+	"strings"
 
 	. "github.com/onsi/ginkgo/v2"
 	. "github.com/onsi/gomega"
@@ -323,6 +324,14 @@ var _ = Describe("verifyNolintlintCarveOut", func() {
 		Expect(present).To(BeTrue(), "the carve-out is still in .golangci.yml, so this guard must still recognise it")
 
 		Expect(verifyNolintlintCarveOut()).To(Succeed())
+
+		// And the premise: the carve-out exists to keep two live gosec
+		// suppressions suppressible. Without this, deleting them would leave
+		// the rule and this guard demanding pin maintenance for nothing.
+		src, err := os.ReadFile(nolintlintCarveOutFile)
+		Expect(err).NotTo(HaveOccurred())
+		Expect(strings.Count(string(src), "//nolint:gosec // G703")).To(Equal(2),
+			"the carve-out protects exactly the two G703 directives in %s", nolintlintCarveOutFile)
 	})
 
 	Describe("drift detection", func() {
@@ -346,7 +355,14 @@ linters:
 		ci := []byte("      - name: Install golangci-lint\n" +
 			"        run: go install github.com/golangci/golangci-lint/v2/cmd/golangci-lint@" +
 			nolintlintCarveOutPin + "\n")
-		moved := bytes.Replace(ci, []byte(nolintlintCarveOutPin), []byte("v2.14.0"), 1)
+		// Deliberately unreachable rather than the next plausible release.
+		// The event this guard exists for is a renovate bump, and the
+		// documented remedy is to set nolintlintCarveOutPin to the new pin --
+		// so a fixture spelling "the next version" would one day equal the
+		// constant, bytes.Replace would find nothing, and the specs built on
+		// it would silently change meaning.
+		const movedPin = "v99.0.0"
+		moved := bytes.Replace(ci, []byte(nolintlintCarveOutPin), []byte(movedPin), 1)
 
 		It("accepts the carve-out while the pin is the one it was reasoned against", func() {
 			Expect(verifyNolintlintCarveOutIn(carveOut, ci)).To(Succeed())
@@ -357,7 +373,7 @@ linters:
 		// outlived its justification.
 		It("rejects a moved pin while the carve-out is still present", func() {
 			Expect(verifyNolintlintCarveOutIn(carveOut, moved)).To(MatchError(
-				And(ContainSubstring("v2.14.0"),
+				And(ContainSubstring(movedPin),
 					ContainSubstring(nolintlintCarveOutPin),
 					ContainSubstring("securego/gosec#1733"),
 					ContainSubstring("openvox-ca#313"))))
@@ -406,7 +422,9 @@ linters:
 			widened := bytes.Replace(carveOut,
 				[]byte(nolintlintCarveOutPath), []byte("internal/storage/"), 1)
 			Expect(verifyNolintlintCarveOutIn(widened, ci)).To(MatchError(
-				ContainSubstring("internal/storage/")))
+				And(ContainSubstring("internal/storage/"),
+					ContainSubstring("nolintlintCarveOutPath"),
+					ContainSubstring("openvox-ca#313"))))
 		})
 
 		// The narrowness is the load-bearing half. Reverting text to a bare
@@ -435,6 +453,24 @@ linters:
 		It("ignores an exclusion on this path that does not name nolintlint", func() {
 			notNolintlint := bytes.Replace(carveOut, []byte("- nolintlint"), []byte("- gosec"), 1)
 			Expect(verifyNolintlintCarveOutIn(notNolintlint, moved)).To(Succeed())
+		})
+
+		// An exclusion with no `path` applies to every file, so it covers
+		// filelock.go more widely than ours. Reading it as "carve-out removed"
+		// would free the pin while a broader suppression was in force.
+		It("rejects a path-less nolintlint exclusion, which covers every file", func() {
+			pathless := []byte(`
+linters:
+  exclusions:
+    rules:
+      - linters:
+          - nolintlint
+        text: '` + nolintlintCarveOutText + `'
+`)
+			Expect(string(pathless)).NotTo(ContainSubstring("path:"), "the fixture must really have no path")
+			Expect(verifyNolintlintCarveOutIn(pathless, moved)).To(MatchError(
+				And(ContainSubstring("nolintlintCarveOutPath"),
+					ContainSubstring("openvox-ca#313"))))
 		})
 
 		// Two rules covering the file leaves the guard unable to say which one

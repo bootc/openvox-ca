@@ -209,8 +209,9 @@ linters:
       # specs in magefile_test.go, which exist only to make this rule's removal
       # condition reachable. Deleting the rule alone is silent, not red: that
       # guard treats an absent carve-out as the outcome it was built to reach,
-      # so it would be left behind as dead code with nothing reporting it. See
-      # voxpupuli/openvox-ca#313.
+      # so it would be left behind as dead code with nothing reporting it. The
+      # paragraph about this in AGENTS.md, under the golangci-lint pin, goes at
+      # the same time. See voxpupuli/openvox-ca#313.
       - path: internal/storage/filelock\.go
         linters:
           - nolintlint

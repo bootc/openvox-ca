@@ -681,15 +681,6 @@ type pullRequestTrigger struct {
 	BranchesIgnore []string `yaml:"branches-ignore"`
 }
 
-// verifyWorkflowBaseScoping runs both base-scoping guards over the real
-// workflow files. Wired into dev:check as a single step.
-//
-// They are two halves of one invariant. CI and CodeQL run on pull requests
-// whatever the base, so that a stacked PR is exercised rather than silently
-// skipped; and because that leaves the auto-merge job unconfined by its
-// trigger, the job carries its own base pin. Re-filter the triggers and the
-// first half is lost; drop the pin and the second is. Either way the loss is
-// silent, which is precisely the failure mode the change existed to fix.
 // nolintlintCarveOutPin is the golangci-lint version the nolintlint carve-out
 // in .golangci.yml was reasoned against. The carve-out exists because gosec
 // v2.28.0, which that release pins, walks a randomly ordered caller-edge list
@@ -752,9 +743,14 @@ func nolintlintCarveOut(golangciSrc []byte) (bool, error) {
 
 	var covering []exclusionRule
 	for _, r := range cfg.Linters.Exclusions.Rules {
-		if r.Path == "" || !slices.Contains(r.Linters, "nolintlint") {
+		if !slices.Contains(r.Linters, "nolintlint") {
 			continue
 		}
+		// An exclusion with no `path` applies to every file, filelock.go
+		// included, so it covers the carve-out more widely than ours does.
+		// regexp.Compile("") matches everything, which is exactly that
+		// semantics -- skipping it here would read a wider suppression as
+		// "carve-out removed" and retire this guard in silence.
 		re, err := regexp.Compile(r.Path)
 		if err != nil {
 			// golangci-lint would reject the config outright; say so here
@@ -852,6 +848,15 @@ func verifyNolintlintCarveOutIn(golangciSrc, ciSrc []byte) error {
 	return nil
 }
 
+// verifyWorkflowBaseScoping runs both base-scoping guards over the real
+// workflow files. Wired into dev:check as a single step.
+//
+// They are two halves of one invariant. CI and CodeQL run on pull requests
+// whatever the base, so that a stacked PR is exercised rather than silently
+// skipped; and because that leaves the auto-merge job unconfined by its
+// trigger, the job carries its own base pin. Re-filter the triggers and the
+// first half is lost; drop the pin and the second is. Either way the loss is
+// silent, which is precisely the failure mode the change existed to fix.
 func verifyWorkflowBaseScoping() error {
 	sources := make(map[string][]byte, len(baseScopedWorkflows))
 	for _, name := range baseScopedWorkflows {
