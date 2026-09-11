@@ -250,8 +250,9 @@ type serverConfig struct {
 	// It is a clock-skew tolerance, not a margin for a broken fleet: an agent
 	// further out than this rejects a certificate the CA signed a moment ago as
 	// not yet valid, and keeps rejecting it until its clock is fixed. Raise it
-	// only where NTP cannot be relied on. It applies to every certificate this
-	// CA issues.
+	// only where NTP cannot be relied on. It applies to every leaf this CA
+	// issues -- from a CSR, generated, renewed or managed -- and not to the
+	// CA's own certificate, which is backdated a fixed 24 hours at bootstrap.
 	LeafBackdateSec int `yaml:"leaf_backdate_sec"`
 
 	// ManagedCertIntervalSec is how often the managed-certificate reconcile
@@ -331,6 +332,18 @@ func loadServerConfig(configFile string) (*serverConfig, error) {
 		return nil, fmt.Errorf("leaf_backdate_sec must not be negative (got %d): "+
 			"a negative backdate issues certificates that are not yet valid",
 			cfg.LeafBackdateSec)
+	}
+	// Bounded above as well as below. The setting is a clock-skew tolerance, so
+	// no real fleet needs days of it, and the check that matters is not the
+	// absurd value an operator would notice: `time.Duration(n) * time.Second`
+	// multiplies by a billion in int64 nanoseconds, so a mistyped extra few
+	// zeroes wraps, and a wrapped product that lands positive passes every
+	// `> 0` guard downstream and reaches issuance as a nonsense backdate.
+	// A ceiling refuses both the absurd value and the wrap.
+	if cfg.LeafBackdateSec > maxLeafBackdateSec {
+		return nil, fmt.Errorf("leaf_backdate_sec must not exceed %d seconds (30 days, got %d): "+
+			"it is a clock-skew tolerance, and a certificate valid that far before it was "+
+			"issued is not one", maxLeafBackdateSec, cfg.LeafBackdateSec)
 	}
 
 	return cfg, nil
@@ -556,6 +569,12 @@ func (c *serverConfig) supersededCertRevokeAfter() time.Duration {
 // zero setting and an absent one reach the CA as the same value, rather than
 // the CA defaulting one and this package defaulting the other.
 const defaultLeafBackdate = 5 * time.Minute
+
+// maxLeafBackdateSec is the ceiling loadServerConfig enforces on
+// leaf_backdate_sec. Thirty days is far beyond any real clock-skew tolerance
+// and comfortably below the point at which the seconds-to-nanoseconds multiply
+// overflows int64.
+const maxLeafBackdateSec = 30 * 24 * 60 * 60
 
 // leafBackdate resolves how far leaf certificates are backdated, falling back
 // to defaultLeafBackdate when unset.

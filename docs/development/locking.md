@@ -277,8 +277,10 @@ merely within one. `c.mu` was never what stood between them.
 
 `c.mu` is held across the signing call itself **on the issuance paths**. Every
 one of them (`Sign`, `SignWithTTL`, `SaveRequest`'s autosign, `Renew`,
-`AutoRenew`, `ImportCertificate`, `Generate`, `ReconcileManaged`) calls
-`issueLeafLocked` with `c.mu` held, and `x509.CreateCertificate` runs inside it
+`AutoRenew`, `Generate`, `ReconcileManaged`) calls `issueLeafLocked` with
+`c.mu` held — `ImportCertificate` holds `c.mu` too but signs nothing, so it is
+not on that list, and issuanceseam_test.go pins the set — and
+`x509.CreateCertificate` runs inside it
 — so with an external
 key provider (`ca_key_provider: openbao`, or the isolated signer) `c.mu`, not
 the per-subject cluster lock, is the process-wide issuance serialiser, and it
@@ -1102,11 +1104,14 @@ park-on-a-held-lock proves the operation *waits*, a before/after count proves it
 *acquires*, and the second is much cheaper when the operation is not otherwise
 concurrent.
 
-The nested lock-ordering invariant *is* now automated, in
-[renewrace_test.go](../../internal/ca/renewrace_test.go): for each caller that
-holds both locks — `Revoke`, `Clean`, `Renew`, `AutoRenew` — it parks the
-operation on a held subject lock and requires `crl` to still be grantable while
-it waits. An inverted nesting therefore fails on an assertion rather than
+The nested lock-ordering invariant *is* now automated: for each caller that
+holds both locks — `Revoke`, `Clean`, `Renew` and `AutoRenew` in
+[renewrace_test.go](../../internal/ca/renewrace_test.go), and
+`ReconcileManaged` in
+[managedcert_reconcile_test.go](../../internal/ca/managedcert_reconcile_test.go)
+— the spec parks the operation on a held subject lock and requires `crl` to
+still be grantable while it is waiting. An inverted nesting therefore fails on
+an assertion rather than
 deadlocking the suite to its timeout, which is how an inversion otherwise
 presents: every backend serialises same-process callers on a mutex that ignores
 the context deadline. These run under the race detector on every unit

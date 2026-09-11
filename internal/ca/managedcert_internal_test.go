@@ -349,6 +349,28 @@ var _ = Describe("The managed-certificate issue decision", func() {
 				"a one-hour certificate must not be due the moment it is signed (reason %s)", reason)
 		})
 
+		It("gives no window at all to a certificate the backdate outlives", func() {
+			// Raising leaf_backdate_sec above a certificate's own span makes the
+			// forward life negative. Without the guard the window goes negative
+			// too, and `NotAfter.Add(-negative)` pushes the renewal PAST expiry
+			// -- so the subject sits with an expired certificate for the
+			// difference. The guard returns zero, which renews exactly at
+			// expiry: late, but not later than it has to be.
+			leaf := mintLeaf(issuer, issuerKey, subject, spec.DNSNames, nil, time.Hour, now)
+			Expect(renewWindowFor(leaf.cert, spec, 2*fixtureBackdate)).To(BeZero())
+
+			// And the decision that reads it does not call the certificate due
+			// while it is still valid, nor leave it undue once it is not.
+			issue, _, _ := issueDecision(leaf.certPEM, leaf.keyPEM, spec, issuer,
+				2*fixtureBackdate, now.Add(30*time.Minute), false)
+			Expect(issue).To(BeFalse(), "still valid, so not yet due")
+
+			issue, reason, _ := issueDecision(leaf.certPEM, leaf.keyPEM, spec, issuer,
+				2*fixtureBackdate, now.Add(time.Hour+time.Minute), false)
+			Expect(issue).To(BeTrue())
+			Expect(reason).To(Equal(reasonRenewWindow))
+		})
+
 		It("leaves an ordinary window untouched", func() {
 			// The clamp is a floor, not a policy. On a healthy CA the operator's
 			// 30 days is nowhere near half of 90, and must be exactly what is
@@ -418,10 +440,19 @@ var _ = Describe("The leaf NotBefore backdate", func() {
 		myCA *CA
 	)
 
+	// after is set by issueAndParse to the instant the call returned. The upper
+	// bounds below must be anchored on that, not on a timestamp taken BEFORE
+	// the call: issueLeafLocked reads its own clock, so the true NotBefore is
+	// at or after (before - backdate), and an assertion against `before` only
+	// passes because ASN.1 truncates to whole seconds -- which makes it a race
+	// against however long the call took, and it is a keygen and a signature.
+	var after time.Time
+
 	issueAndParse := func(subject string) *x509.Certificate {
 		GinkgoHelper()
 		res, err := myCA.Generate(ctx, subject, []string{subject})
 		Expect(err).NotTo(HaveOccurred())
+		after = time.Now().UTC()
 		block, _ := pem.Decode(res.CertificatePEM)
 		Expect(block).NotTo(BeNil())
 		crt, err := x509.ParseCertificate(block.Bytes)
@@ -440,9 +471,9 @@ var _ = Describe("The leaf NotBefore backdate", func() {
 	It("backdates by five minutes when nothing is configured", func() {
 		before := time.Now().UTC()
 		crt := issueAndParse("default.test")
-		// Bracketed rather than compared to a single instant, because the
-		// certificate was signed at some point between `before` and now.
-		Expect(crt.NotBefore).To(BeTemporally("<=", before.Add(-defaultLeafBackdate)))
+		// Bracketed by the two instants that surround the signature, so neither
+		// bound depends on how long the call took.
+		Expect(crt.NotBefore).To(BeTemporally("<=", after.Add(-defaultLeafBackdate)))
 		Expect(crt.NotBefore).To(BeTemporally(">", before.Add(-defaultLeafBackdate-time.Minute)),
 			"a much earlier NotBefore means the default is not 5 minutes")
 	})
@@ -451,7 +482,7 @@ var _ = Describe("The leaf NotBefore backdate", func() {
 		myCA.LeafBackdate = 3 * time.Hour
 		before := time.Now().UTC()
 		crt := issueAndParse("configured.test")
-		Expect(crt.NotBefore).To(BeTemporally("<=", before.Add(-3*time.Hour)))
+		Expect(crt.NotBefore).To(BeTemporally("<=", after.Add(-3*time.Hour)))
 		Expect(crt.NotBefore).To(BeTemporally(">", before.Add(-3*time.Hour-time.Minute)),
 			"the configured backdate was ignored in favour of some other value")
 	})
@@ -477,6 +508,8 @@ var _ = Describe("The leaf NotBefore backdate", func() {
 		myCA.LeafBackdate = -time.Hour
 		before := time.Now().UTC()
 		crt := issueAndParse("negative.test")
-		Expect(crt.NotBefore).To(BeTemporally("<=", before.Add(-defaultLeafBackdate)))
+		Expect(crt.NotBefore).To(BeTemporally("<=", after.Add(-defaultLeafBackdate)))
+		Expect(crt.NotBefore).To(BeTemporally(">", before.Add(-defaultLeafBackdate-time.Minute)),
+			"a negative setting must fall back to the default, not be applied")
 	})
 })
