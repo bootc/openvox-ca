@@ -151,6 +151,49 @@ linters:
       - linters:
           - staticcheck
         text: "QF1008"
+      # TEMPORARY, with a removal condition -- see the end of this comment.
+      #
+      # gosec's taint engine examines at most maxCallerEdges = 32 of a
+      # function's incoming call-graph edges, and those edges come from
+      # x/tools' cha.CallGraph, which builds them by iterating a
+      # map[*ssa.Function]bool. Go randomises map iteration order per process,
+      # so the edge list is in a different order on every run.
+      #
+      # (*FilesystemBackend).AcquireSameHostLock has 35 incoming edges under
+      # CHA's over-approximation of interface dispatch -- three over the cap --
+      # and its `name` parameter is the taint source that reaches both G703
+      # sinks in filelock.go: the os.OpenFile on the joined lock path, and the
+      # os.Stat that ownerUID does on the same path to decorate an error. One
+      # source, two sinks, which is why both directives fire together or not at
+      # all. Whether the tainted caller lands inside the randomly ordered first
+      # 32 is chance: measured at roughly 5 runs in 100 where it does not, on
+      # linux/amd64 and darwin/arm64 alike. On those runs gosec reports nothing
+      # at the two sites and nolintlint calls the suppressions unused, failing
+      # the gate on unchanged code.
+      #
+      # The suppressions are load-bearing -- strip them and gosec reports G703
+      # at both sites -- so the linter's own recommendation ("unused, delete
+      # it") removes an audited security suppression. This rule closes that
+      # trap by never making the recommendation.
+      #
+      # Deliberately narrow. G703 stays enabled across the module, both
+      # directives stay, and gosec is still suppressed at the two sites on
+      # every run where its analysis reaches them. Only nolintlint's staleness
+      # check is disabled, only in this file, and only for directives naming
+      # G703: a stale //nolint:gosec // G204 in filelock.go is still reported.
+      # The cost is that if these two directives ever do go genuinely stale,
+      # nothing will say so.
+      #
+      # Upstream: securego/gosec#1711 and #1712, fixed by securego/gosec#1733
+      # ("fix(taint): make wide caller traversal deterministic", merged
+      # 2026-09-04), which sorts the edges and raises the cap to 1024. That is
+      # in no gosec release yet, and golangci-lint pins gosec v2.28.0.
+      # REMOVE THIS RULE once the pinned golangci-lint ships a gosec containing
+      # that fix; see voxpupuli/openvox-ca#313.
+      - path: internal/storage/filelock\.go
+        linters:
+          - nolintlint
+        text: "G703"
 
 formatters:
   enable:
