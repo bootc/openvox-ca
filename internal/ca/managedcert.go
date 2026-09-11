@@ -57,9 +57,25 @@ type CertSpec struct {
 	Subject string
 
 	// DNSNames are the subjectAltName DNS entries the certificate must carry.
-	// The Subject is not added automatically: a managed certificate's names are
-	// configuration, and silently widening them is how a certificate ends up
-	// answering to a name nobody asked it to.
+	// At least one is required, and the Subject is not added automatically.
+	//
+	// These are used exactly as configured. Two behaviours that apply to names
+	// arriving on a submitted CSR deliberately do not apply here, and both are
+	// properties this type promises rather than accidents of the call graph:
+	//
+	//   - PromoteCNToSAN does not add the Subject. A managed certificate's names
+	//     are configuration, and an entry that wanted its certname as a SAN can
+	//     say so; adding it silently is how a certificate comes to answer to a
+	//     name nobody asked it to.
+	//   - AllowSubjectAltNames does not gate them. That setting governs what a
+	//     *request* may ask for, and there is no request here -- the names come
+	//     from a file an administrator wrote. checkSubjectAltNames is reached
+	//     only from signWithDuration, which issuanceseam_test.go pins.
+	//
+	// Requiring at least one is what stops the first of those becoming a trap.
+	// With no promotion and no names, the certificate carries no SAN extension
+	// at all, and RFC 2818 clients ignore the Common Name -- so it would be
+	// refused for every name including its own, while looking well-formed.
 	DNSNames []string
 
 	// ExtKeyUsage is what the certificate may be used for. Nil means the
@@ -89,6 +105,49 @@ type CertSpec struct {
 	// renewWindowFor for what is actually applied and why the difference
 	// matters.
 	RenewBefore time.Duration
+
+	// KeyConfig is the algorithm and size of the key generated for this
+	// certificate. The zero value inherits the CA's LeafKeyConfig, which in
+	// turn falls back to DefaultLeafKeyConfig.
+	//
+	// Per-entry because the things a managed certificate serves need not agree
+	// with the fleet: a component whose clients are all modern can take an
+	// ECDSA key where agent certificates stay on RSA for compatibility.
+	KeyConfig KeyConfig
+
+	// SupersedeAfter is how long this certificate's predecessor stays valid
+	// after a replacement is issued. Nil inherits the CA's SupersedeAfter.
+	//
+	// A pointer because zero is a meaningful value rather than an absence: it
+	// means revoke inside the reconcile pass, with no overlap at all. An entry
+	// that wants that on a CA whose default grants a window has no other way to
+	// say so.
+	//
+	// Per-entry because the overlap is a property of whatever depends on the
+	// certificate — how long it takes to notice a replacement and pick it up —
+	// and two managed certificates need not agree about that.
+	SupersedeAfter *time.Duration
+}
+
+// keyConfig resolves the key algorithm and size for m, preferring the entry's
+// own setting and falling back to the CA's.
+func (c *CA) keyConfigFor(spec CertSpec) KeyConfig {
+	if spec.KeyConfig.Algo != "" || spec.KeyConfig.Size != 0 {
+		return spec.KeyConfig
+	}
+	if c.LeafKeyConfig.Algo != "" || c.LeafKeyConfig.Size != 0 {
+		return c.LeafKeyConfig
+	}
+	return DefaultLeafKeyConfig
+}
+
+// supersedeAfterFor resolves the overlap window for m, preferring the entry's
+// own setting and falling back to the CA's.
+func (c *CA) supersedeAfterFor(spec CertSpec) time.Duration {
+	if spec.SupersedeAfter != nil {
+		return *spec.SupersedeAfter
+	}
+	return c.SupersedeAfter
 }
 
 // Validate reports whether the spec can be issued from at all. Called for every
@@ -99,6 +158,11 @@ func (s CertSpec) Validate() error {
 	if err := ValidateSubject(s.Subject); err != nil {
 		return err
 	}
+	if len(s.DNSNames) == 0 {
+		return fmt.Errorf("managed certificate %s: at least one DNS name is required; "+
+			"a certificate with no subjectAltName is refused by every RFC 2818 client, "+
+			"including for its own certname", s.Subject)
+	}
 	if err := validateDNSAltNames(s.DNSNames); err != nil {
 		return err
 	}
@@ -108,6 +172,18 @@ func (s CertSpec) Validate() error {
 	if s.RenewBefore <= 0 {
 		return fmt.Errorf("managed certificate %s: renew_before must be positive, "+
 			"or the certificate is only replaced after it has already expired", s.Subject)
+	}
+	// Refused here as well as at generation. issueLeafLocked enforces the
+	// key-strength policy on the public key it is handed, which is the
+	// structural guarantee -- but that fires after a pass has taken the subject
+	// lock and generated a key, once per interval, for ever. A spec that can
+	// never succeed should fail as configuration.
+	if err := ValidateKeyConfig(s.KeyConfig); err != nil {
+		return fmt.Errorf("managed certificate %s: %w", s.Subject, err)
+	}
+	if s.SupersedeAfter != nil && *s.SupersedeAfter < 0 {
+		return fmt.Errorf("managed certificate %s: revoke_after must not be negative "+
+			"(zero revokes the predecessor inside the reconcile pass)", s.Subject)
 	}
 	return nil
 }
@@ -667,10 +743,7 @@ func (c *CA) issueManagedUnderSubjectLock(ctx context.Context, m ManagedCert, re
 		currentPEM = pem.EncodeToMemory(&pem.Block{Type: "CERTIFICATE", Bytes: current.Raw})
 	}
 
-	leafCfg := c.LeafKeyConfig
-	if leafCfg.Algo == "" {
-		leafCfg = DefaultLeafKeyConfig
-	}
+	leafCfg := c.keyConfigFor(m.Spec)
 	// CPU-bound and touching no shared state, so outside c.mu -- but inside the
 	// subject lock, unlike GenerateWithOptions, because the key must not exist
 	// before this replica has established that it is the one issuing.
@@ -823,7 +896,8 @@ func (c *CA) issueManagedUnderSubjectLock(ctx context.Context, m ManagedCert, re
 		supersedeCtx, cancelSupersede := context.WithTimeout(
 			context.WithoutCancel(ctx), LockTimeout/2)
 		defer cancelSupersede()
-		if err := c.supersedeReplaced(supersedeCtx, subject, oldSerial); err != nil {
+		if err := c.supersedeReplacedAfter(supersedeCtx, subject, oldSerial,
+			c.supersedeAfterFor(m.Spec)); err != nil {
 			// Counted already -- crlUpdateFailures on the immediate path,
 			// supersedeFailures on the delayed one.
 			//

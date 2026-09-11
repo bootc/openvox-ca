@@ -25,6 +25,7 @@ package ca
 import (
 	"bytes"
 	"context"
+	"crypto/rsa"
 	"crypto/x509"
 	"encoding/pem"
 	"fmt"
@@ -233,6 +234,112 @@ var _ = Describe("Reconciling a managed certificate", func() {
 		Expect(issued).To(BeFalse(), "a certificate that satisfies its spec must not be reissued")
 		Expect(fake.saveCount()).To(Equal(1))
 		Expect(fake.stored().SerialNumber).To(Equal(first))
+	})
+
+	Describe("per-certificate settings", func() {
+		// Each entry can differ from the CA's defaults, and an unset field
+		// inherits rather than resetting to a built-in. Both halves matter: the
+		// first is the point, the second is what stops an entry that only sets
+		// a ttl quietly losing the fleet's key algorithm.
+		It("generates a key with the entry's own algorithm and size", func() {
+			// The CA is ECDSA P-256 throughout this file, so RSA here can only
+			// have come from the entry.
+			entry.Spec.KeyConfig = KeyConfig{Algo: KeyAlgoRSA, Size: 2048}
+			_, err := reconcile()
+			Expect(err).NotTo(HaveOccurred())
+
+			Expect(fake.stored().PublicKeyAlgorithm).To(Equal(x509.RSA))
+			rsaKey, ok := fake.stored().PublicKey.(*rsa.PublicKey)
+			Expect(ok).To(BeTrue())
+			Expect(rsaKey.N.BitLen()).To(Equal(2048))
+		})
+
+		It("inherits the CA's key configuration when the entry says nothing", func() {
+			_, err := reconcile()
+			Expect(err).NotTo(HaveOccurred())
+			Expect(fake.stored().PublicKeyAlgorithm).To(Equal(x509.ECDSA),
+				"an unset entry must take the CA's setting, not a built-in default")
+		})
+
+		It("honours a per-certificate supersession window", func() {
+			// The CA revokes inline; this entry wants an overlap.
+			myCA.SupersedeAfter = 0
+			window := 24 * time.Hour
+			entry.Spec.SupersedeAfter = &window
+
+			_, err := reconcile()
+			Expect(err).NotTo(HaveOccurred())
+			predecessor := fake.stored()
+
+			_, err = reconcileAt(dueWindow)
+			Expect(err).NotTo(HaveOccurred())
+
+			revoked, rerr := myCA.IsRevokedSerial(ctx, predecessor.SerialNumber)
+			Expect(rerr).NotTo(HaveOccurred())
+			Expect(revoked).To(BeFalse(), "the entry's window must delay the revocation")
+
+			entries, _, serr := myCA.readSuperseded(ctx)
+			Expect(serr).NotTo(HaveOccurred())
+			Expect(entries).To(HaveLen(1))
+			Expect(entries[0].Serial).To(Equal(serialHexStr(predecessor.SerialNumber)))
+		})
+
+		It("lets an entry ask for no overlap on a CA that grants one", func() {
+			// Zero is a value, not an absence -- which is why the field is a
+			// pointer. An entry setting it to zero on a CA whose default is 24h
+			// must revoke inline.
+			myCA.SupersedeAfter = 24 * time.Hour
+			none := time.Duration(0)
+			entry.Spec.SupersedeAfter = &none
+
+			_, err := reconcile()
+			Expect(err).NotTo(HaveOccurred())
+			predecessor := fake.stored()
+
+			_, err = reconcileAt(dueWindow)
+			Expect(err).NotTo(HaveOccurred())
+
+			revoked, rerr := myCA.IsRevokedSerial(ctx, predecessor.SerialNumber)
+			Expect(rerr).NotTo(HaveOccurred())
+			Expect(revoked).To(BeTrue(),
+				"an explicit zero must revoke inline, not inherit the CA's window")
+		})
+
+		It("inherits the CA's window when the entry says nothing", func() {
+			myCA.SupersedeAfter = 24 * time.Hour
+			_, err := reconcile()
+			Expect(err).NotTo(HaveOccurred())
+			predecessor := fake.stored()
+
+			_, err = reconcileAt(dueWindow)
+			Expect(err).NotTo(HaveOccurred())
+
+			revoked, rerr := myCA.IsRevokedSerial(ctx, predecessor.SerialNumber)
+			Expect(rerr).NotTo(HaveOccurred())
+			Expect(revoked).To(BeFalse(), "nil must inherit, not mean zero")
+		})
+	})
+
+	It("uses the configured names verbatim, whatever the CSR-path settings say", func() {
+		// Two settings that govern names on a submitted CSR must not reach a
+		// managed certificate, and both are asserted here rather than left to
+		// the call graph: AllowSubjectAltNames is what a *request* may ask for,
+		// and PromoteCNToSAN adds the Common Name when a request carries no
+		// names. A managed certificate's names come from a file an
+		// administrator wrote, so neither applies -- and both are set to the
+		// value that would change the outcome if they did.
+		myCA.AllowSubjectAltNames = false
+		myCA.PromoteCNToSAN = true
+		entry.Spec.DNSNames = []string{"alias.example.com"}
+
+		_, err := reconcile()
+		Expect(err).NotTo(HaveOccurred())
+
+		crt := fake.stored()
+		Expect(crt.DNSNames).To(ConsistOf("alias.example.com"),
+			"the configured names must be used exactly: no gate refusing a name that is "+
+				"not the certname, and no Common Name promoted in beside them")
+		Expect(crt.Subject.CommonName).To(Equal(subject))
 	})
 
 	It("issues a serverAuth-only certificate when the spec says so", func() {
