@@ -20,6 +20,7 @@ package main
 import (
 	"bytes"
 	"context"
+	"errors"
 
 	. "github.com/onsi/ginkgo/v2"
 	. "github.com/onsi/gomega"
@@ -89,6 +90,96 @@ var _ = Describe("resolveRuntime", func() {
 		// first use, so any such assertion passes whether validation runs
 		// before or after storage construction. Claiming to pin the ordering
 		// while proving nothing is worse than not claiming it.
+	})
+})
+
+var _ = Describe("caRuntime closer groups", func() {
+	// The split exists for one caller in one deployment shape: the isolated
+	// signer under an OpenBao Transit provider, which is finished with the
+	// store the moment ca.Init returns and is not finished with the token
+	// manager backing its key until the process exits.
+	//
+	// Everything here is about which group a closer lands in and when it runs,
+	// because a closer filed in the wrong group is invisible in every
+	// configuration that has no key provider at all -- which is every
+	// configuration in this suite except the ones that say otherwise.
+
+	// Closers that record, so the assertions are about order rather than about
+	// side effects some backend happens to have.
+	recorded := func(log *[]string) *caRuntime {
+		note := func(name string) func() error {
+			return func() error {
+				*log = append(*log, name)
+				return nil
+			}
+		}
+		return &caRuntime{
+			// Two store closers, because a single one cannot tell "reverse
+			// order" from "any order".
+			storeClosers: []func() error{note("store-first"), note("store-second")},
+			keyClosers:   []func() error{note("key")},
+		}
+	}
+
+	It("preserves the order a single reversed list produced", func() {
+		// resolveRuntime registers the backend before the key provider, so the
+		// one list it used to build released the provider's session first and
+		// the backend handle second. This is a regrouping and not a reordering:
+		// a provider torn down after the store it was resolved alongside would
+		// be a change to shutdown that nobody asked for and nothing else here
+		// would notice.
+		var log []string
+		rt := recorded(&log)
+		Expect(rt.Close()).To(Succeed())
+		Expect(log).To(Equal([]string{"key", "store-second", "store-first"}))
+	})
+
+	It("leaves the key group running when only the store is closed", func() {
+		// The Transit case in miniature, and the whole reason CloseStore is a
+		// split rather than an earlier Close. Get it wrong and the signer still
+		// comes up, still passes this suite, and fails on its first signature
+		// in the one deployment that configures a key provider.
+		var log []string
+		rt := recorded(&log)
+		Expect(rt.CloseStore()).To(Succeed())
+		Expect(log).To(Equal([]string{"store-second", "store-first"}))
+	})
+
+	It("does not run the store group twice when Close follows CloseStore", func() {
+		// The signer's actual sequence: CloseStore once Init returns, Close on
+		// the way out. Closing a backend handle twice is usually harmless;
+		// unlocking an instance lock twice is not, and holdInstanceLock files
+		// one in this very group.
+		var log []string
+		rt := recorded(&log)
+		Expect(rt.CloseStore()).To(Succeed())
+		Expect(rt.Close()).To(Succeed())
+		Expect(log).To(Equal([]string{"store-second", "store-first", "key"}))
+	})
+
+	It("runs every closer even when one fails, and reports the first failure", func() {
+		// A backend that fails to close must not strand the key provider's
+		// session, which is the resource that costs something to leak.
+		var log []string
+		boom := errors.New("backend close failed")
+		rt := &caRuntime{
+			storeClosers: []func() error{
+				func() error { log = append(log, "store"); return boom },
+			},
+			keyClosers: []func() error{
+				func() error { log = append(log, "key"); return nil },
+			},
+		}
+		Expect(rt.Close()).To(MatchError(boom))
+		Expect(log).To(Equal([]string{"key", "store"}))
+	})
+
+	It("is safe to close a runtime that was never built", func() {
+		// resolveRuntime's own failure paths call Close on a partially
+		// constructed runtime, and the zero value is the furthest that goes.
+		rt := &caRuntime{}
+		Expect(rt.CloseStore()).To(Succeed())
+		Expect(rt.Close()).To(Succeed())
 	})
 })
 
