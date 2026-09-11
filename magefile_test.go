@@ -551,6 +551,72 @@ linters:
 				ContainSubstring("every linter")))
 		})
 
+		// The rule-level path-except clause, which had no fixture at all:
+		// inverting its sense left every spec green. golangci-lint drops the
+		// rule for a file its path-except matches, and keeps it otherwise, so
+		// both senses need pinning.
+		It("still sees a carve-out whose path-except does not match the file", func() {
+			guarded := bytes.Replace(carveOut,
+				[]byte("      - path: "+nolintlintCarveOutPath+"\n"),
+				[]byte("      - path: "+nolintlintCarveOutPath+"\n        path-except: internal/ca/\n"), 1)
+			Expect(string(guarded)).To(ContainSubstring("path-except:"))
+			// Still the carve-out, so a moved pin must still be refused.
+			Expect(verifyNolintlintCarveOutIn(guarded, moved)).To(MatchError(
+				ContainSubstring("openvox-ca#313")))
+		})
+
+		It("ignores a rule whose path-except matches the file", func() {
+			exempt := bytes.Replace(carveOut,
+				[]byte("      - path: "+nolintlintCarveOutPath+"\n"),
+				[]byte("      - path: "+nolintlintCarveOutPath+"\n        path-except: "+nolintlintCarveOutPath+"\n"), 1)
+			// golangci-lint would not apply this rule to the file, so it is
+			// not a suppression and must not hold the pin.
+			Expect(verifyNolintlintCarveOutIn(exempt, moved)).To(Succeed())
+		})
+
+		It("rejects a rule path-except that is not a valid regexp", func() {
+			bad := bytes.Replace(carveOut,
+				[]byte("      - path: "+nolintlintCarveOutPath+"\n"),
+				[]byte("      - path: "+nolintlintCarveOutPath+"\n        path-except: 'internal/ca/['\n"), 1)
+			Expect(verifyNolintlintCarveOutIn(bad, ci)).To(MatchError(
+				ContainSubstring(`exclusion path-except "internal/ca/[" is not a valid regexp`)))
+		})
+
+		// The other outcome of the file-level paths-except loop: a list that
+		// DOES name the file exempts it from the file-level exclusion, so the
+		// ordinary rules analysis must run rather than the "every linter"
+		// refusal. Neutering this branch left every spec green.
+		It("does not treat a paths-except naming the file as excluding it", func() {
+			exempt := []byte(`
+linters:
+  exclusions:
+    paths-except:
+      - internal/ca/
+      - ` + nolintlintCarveOutPath + `
+    rules:
+      - path: ` + nolintlintCarveOutPath + `
+        linters:
+          - nolintlint
+        text: '` + nolintlintCarveOutText + `'
+`)
+			err := verifyNolintlintCarveOutIn(exempt, moved)
+			Expect(err).To(HaveOccurred())
+			Expect(err.Error()).NotTo(ContainSubstring("every linter"),
+				"the file is exempt from the file-level exclusion, so the rules analysis must decide")
+			Expect(err.Error()).To(ContainSubstring(movedPin))
+		})
+
+		It("rejects an exclusions.paths entry that is not a valid regexp", func() {
+			bad := []byte(`
+linters:
+  exclusions:
+    paths:
+      - 'internal/storage/['
+`)
+			Expect(verifyNolintlintCarveOutIn(bad, ci)).To(MatchError(
+				ContainSubstring(`exclusions.paths entry "internal/storage/[" is not a valid regexp`)))
+		})
+
 		// The parse floor. Without it an unreadable .golangci.yml would take
 		// the absent branch and be read as "carve-out removed".
 		It("reports a .golangci.yml it cannot parse", func() {
@@ -605,7 +671,7 @@ linters:
 		It("rejects an exclusion path that is not a valid regexp", func() {
 			bad := bytes.Replace(carveOut, []byte(nolintlintCarveOutPath), []byte(`internal/storage/[`), 1)
 			Expect(verifyNolintlintCarveOutIn(bad, ci)).To(MatchError(
-				ContainSubstring("not a valid regexp")))
+				ContainSubstring(`exclusion path "internal/storage/[" is not a valid regexp`)))
 		})
 	})
 })
