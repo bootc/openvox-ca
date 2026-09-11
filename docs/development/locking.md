@@ -292,6 +292,15 @@ is the one deliberate exception to rule 3 (keep expensive work outside the
 lock): the signature is inside the lock because the cache update it guards must
 be atomic with the issuance.
 
+Those seven are entry points, and most reach the seam through another. What is
+*automated* is narrower: issuanceseam_test.go pins that `issueLeafLocked` has
+exactly four **direct** callers — `signWithDuration`, `GenerateWithOptions`,
+`AutoRenew` and `issueManagedUnderSubjectLock`. The list above would stay
+true-looking if, say, `Renew` stopped routing through `signWithDuration`, and
+nothing would fail — which is the same shape as `ImportCertificate`, which sat
+in that list wrongly until a reviewer noticed by hand rather than a spec
+catching it.
+
 **The OCSP responder is not in that set, and the difference is worth stating
 because it used to be.** `AnswerOCSP` reads what it needs under `c.mu.RLock` —
 whether the serial is in `serialIndex`, the `cachedCRL` pointer, `CACert` and

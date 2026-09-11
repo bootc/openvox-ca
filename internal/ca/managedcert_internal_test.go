@@ -33,6 +33,7 @@ import (
 	"encoding/pem"
 	"math/big"
 	"net"
+	"net/url"
 	"time"
 
 	. "github.com/onsi/ginkgo/v2"
@@ -442,6 +443,41 @@ var _ = Describe("A managed-certificate spec", func() {
 		spec.DNSNames = nil
 		Expect(spec.Validate()).To(MatchError(
 			ContainSubstring("at least one subject alternative name is required")))
+	})
+
+	It("refuses a nil URI entry", func() {
+		// A nil *url.URL would be dereferenced in leafCarriesNames and in
+		// marshalling. The reconcile loop has no recover, so that is the
+		// process rather than one pass.
+		spec.URIs = []*url.URL{nil}
+		Expect(spec.Validate()).To(MatchError(ContainSubstring("a URI entry is nil")))
+	})
+
+	It("refuses an empty URI or email entry", func() {
+		// Both satisfy the at-least-one-name requirement while reaching the
+		// certificate as a name matching nothing, which is what that
+		// requirement exists to stop.
+		spec.URIs = []*url.URL{{}}
+		Expect(spec.Validate()).To(MatchError(ContainSubstring("a URI entry is empty")))
+
+		spec.URIs = nil
+		spec.EmailAddresses = []string{""}
+		Expect(spec.Validate()).To(MatchError(ContainSubstring("email address entry is empty")))
+	})
+
+	It("refuses a key configuration the CA's policy would reject", func() {
+		// issueLeafLocked enforces the policy structurally, but only after a
+		// pass has taken the subject lock and generated a key -- once per
+		// interval, for ever. A spec that can never succeed fails here instead.
+		spec.KeyConfig = KeyConfig{Algo: KeyAlgoRSA, Size: 1024}
+		Expect(spec.Validate()).To(MatchError(ContainSubstring("below the minimum")))
+	})
+
+	It("refuses a negative supersession window", func() {
+		// Zero is meaningful (revoke inline); negative is not.
+		neg := -time.Hour
+		spec.SupersedeAfter = &neg
+		Expect(spec.Validate()).To(MatchError(ContainSubstring("must not be negative")))
 	})
 
 	It("refuses a negative ttl", func() {

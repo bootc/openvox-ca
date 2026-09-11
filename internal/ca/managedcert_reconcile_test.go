@@ -25,6 +25,7 @@ package ca
 import (
 	"bytes"
 	"context"
+	"crypto/rand"
 	"crypto/rsa"
 	"crypto/x509"
 	"encoding/pem"
@@ -332,6 +333,58 @@ var _ = Describe("Reconciling a managed certificate", func() {
 			Expect(buf.String()).To(ContainSubstring("breaks any pin on the old key"))
 		})
 
+		It("refuses a reused key below the CA's key-strength policy", func() {
+			// The contract is that such a key is REFUSED, not quietly replaced:
+			// silently re-keying would defeat the pin the setting exists to
+			// provide. Both halves are asserted, since a later
+			// generate-on-failure fallback would satisfy only the first.
+			entry.Spec.ReuseKey = true
+			_, err := reconcile()
+			Expect(err).NotTo(HaveOccurred())
+			good := fake.stored()
+
+			weak, kerr := rsa.GenerateKey(rand.Reader, 1024)
+			Expect(kerr).NotTo(HaveOccurred())
+			fake.mu.Lock()
+			fake.keyPEM = pem.EncodeToMemory(&pem.Block{
+				Type:  "RSA PRIVATE KEY",
+				Bytes: x509.MarshalPKCS1PrivateKey(weak),
+			})
+			fake.mu.Unlock()
+
+			_, err = reconcileAt(dueWindow)
+			Expect(err).To(HaveOccurred(), "a weak reused key must fail the pass")
+			Expect(fake.stored().SerialNumber).To(Equal(good.SerialNumber),
+				"and must not be silently replaced with a fresh key")
+		})
+
+		It("does not reuse the key of a certificate that was revoked", func() {
+			// SECURITY: reissuing over the same key would hand back, with a
+			// fresh serial and a full lifetime, exactly the material an
+			// operator revoking for key disclosure was retiring -- and no CRL
+			// would list the replacement.
+			entry.Spec.ReuseKey = true
+			_, err := reconcile()
+			Expect(err).NotTo(HaveOccurred())
+			first := fake.stored()
+
+			Expect(myCA.Revoke(ctx, subject)).To(Succeed())
+
+			var buf bytes.Buffer
+			prev := slog.Default()
+			slog.SetDefault(slog.New(slog.NewTextHandler(&buf, &slog.HandlerOptions{
+				Level: slog.LevelDebug,
+			})))
+			defer slog.SetDefault(prev)
+
+			issued, err := reconcile()
+			Expect(err).NotTo(HaveOccurred())
+			Expect(issued).To(BeTrue())
+			Expect(fake.stored().PublicKey).NotTo(Equal(first.PublicKey),
+				"a revoked certificate must be replaced with a NEW key, whatever the pin says")
+			Expect(buf.String()).To(ContainSubstring("its certificate was revoked"))
+		})
+
 		It("honours a per-certificate supersession window", func() {
 			// The CA revokes inline; this entry wants an overlap.
 			myCA.SupersedeAfter = 0
@@ -456,6 +509,13 @@ var _ = Describe("Reconciling a managed certificate", func() {
 		Expect(err).NotTo(HaveOccurred())
 		Expect(issued).To(BeFalse(),
 			"a certificate carrying exactly the configured names must be current")
+
+		// The fixture is only meaningful if the two representations really
+		// differ: net.ParseIP yields the 16-byte IPv4-in-IPv6 form and x509
+		// marshals an IPv4 SAN in 4 bytes. If they ever coincide, a bytewise
+		// comparison would pass too and this spec would be testing nothing.
+		Expect(entry.Spec.IPAddresses[0]).To(HaveLen(16))
+		Expect(fake.stored().IPAddresses[0]).To(HaveLen(4))
 	})
 
 	It("reissues when a name type the spec wants is missing", func() {
@@ -471,6 +531,32 @@ var _ = Describe("Reconciling a managed certificate", func() {
 		Expect(err).NotTo(HaveOccurred())
 		Expect(issued).To(BeTrue(), "adding an IP SAN must trigger a reissue")
 		Expect(fake.stored().IPAddresses).To(HaveLen(1))
+	})
+
+	It("reissues when an email SAN the spec wants is missing", func() {
+		// One arm per type: with only the IP loop pinned, deleting the email
+		// or URI loop from leafCarriesNames failed nothing.
+		_, err := reconcile()
+		Expect(err).NotTo(HaveOccurred())
+
+		entry.Spec.EmailAddresses = []string{"ca@example.com"}
+		issued, err := reconcile()
+		Expect(err).NotTo(HaveOccurred())
+		Expect(issued).To(BeTrue(), "adding an email SAN must trigger a reissue")
+		Expect(fake.stored().EmailAddresses).To(ConsistOf("ca@example.com"))
+	})
+
+	It("reissues when a URI SAN the spec wants is missing", func() {
+		_, err := reconcile()
+		Expect(err).NotTo(HaveOccurred())
+
+		u, uerr := url.Parse("spiffe://example.com/ca")
+		Expect(uerr).NotTo(HaveOccurred())
+		entry.Spec.URIs = []*url.URL{u}
+		issued, err := reconcile()
+		Expect(err).NotTo(HaveOccurred())
+		Expect(issued).To(BeTrue(), "adding a URI SAN must trigger a reissue")
+		Expect(fake.stored().URIs).To(HaveLen(1))
 	})
 
 	It("issues a serverAuth-only certificate when the spec says so", func() {
