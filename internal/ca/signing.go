@@ -674,14 +674,16 @@ func defaultLeafExtKeyUsage() []x509.ExtKeyUsage {
 // index. ttl=0 means use the default certValidity. c.mu must be held by the
 // caller.
 //
-// eku=nil means the serverAuth+clientAuth pair every certificate this CA issued
-// before managed certificates existed, which is what the three CSR- and
-// operator-driven callers pass. It is a parameter because a managed certificate
-// must be able to be serverAuth-only: a clientAuth certificate for a name that
-// appears in puppet_server is a usable admin credential, so the CA's own
-// serving certificate must not carry one. Making that a parameter of the shared
-// tail rather than a second signing path keeps the key-strength policy, the
-// serial allocation and the inventory append in one place.
+// eku=nil means the serverAuth+clientAuth pair every certificate this CA issues,
+// which is what all four callers pass unless something asked otherwise. It is a
+// parameter so that a managed certificate CAN be narrower: clientAuth is what
+// makes a certificate usable as a CA client, so a deployment that knows its
+// certificate only ever answers handshakes can withhold it. Which certificates
+// want that is the configuring caller's decision, not this function's.
+//
+// Making the usage a parameter of the shared tail rather than a second signing
+// path keeps the key-strength policy, the serial allocation and the inventory
+// append in one place.
 //
 // This is the tail shared by signWithDuration (inputs come from a submitted
 // CSR, after CSR-specific validation), AutoRenew (inputs come from an
