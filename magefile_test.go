@@ -23,9 +23,11 @@ import (
 	"archive/tar"
 	"bytes"
 	"compress/gzip"
+	"encoding/json"
 	"io"
 	"os"
 	"path/filepath"
+	"regexp"
 	"runtime"
 	"strings"
 
@@ -321,7 +323,9 @@ var _ = Describe("verifyNolintlintCarveOut", func() {
 
 		present, err := nolintlintCarveOut(golangciSrc)
 		Expect(err).NotTo(HaveOccurred())
-		Expect(present).To(BeTrue(), "the carve-out is still in .golangci.yml, so this guard must still recognise it")
+		Expect(present).To(BeTrue(),
+			"the carve-out must either be present and recognised here, or removed together with "+
+				"verifyNolintlintCarveOut, these specs and the AGENTS.md paragraph (see openvox-ca#313)")
 
 		Expect(verifyNolintlintCarveOut()).To(Succeed())
 
@@ -330,7 +334,12 @@ var _ = Describe("verifyNolintlintCarveOut", func() {
 		// the rule and this guard demanding pin maintenance for nothing.
 		src, err := os.ReadFile(nolintlintCarveOutFile)
 		Expect(err).NotTo(HaveOccurred())
-		Expect(strings.Count(string(src), "//nolint:gosec // G703")).To(Equal(2),
+		// As wide as the suppression itself: the exclusion's text matches any
+		// unused gosec directive in this file whose explanation mentions G703,
+		// so counting one spelling would let a third directive in a different
+		// one be silenced without this floor noticing.
+		covered := regexp.MustCompile(`//nolint:\S*gosec\S*[^\n]*G703`)
+		Expect(covered.FindAllString(string(src), -1)).To(HaveLen(2),
 			"the carve-out protects exactly the two G703 directives in %s", nolintlintCarveOutFile)
 	})
 
@@ -411,7 +420,7 @@ linters:
 			respelt := bytes.Replace(carveOut,
 				[]byte(nolintlintCarveOutPath), []byte("internal/storage/filelock.go"), 1)
 			Expect(verifyNolintlintCarveOutIn(respelt, moved)).To(MatchError(
-				And(ContainSubstring("internal/storage/filelock.go"),
+				And(ContainSubstring(`has path "internal/storage/filelock.go"`),
 					ContainSubstring("nolintlintCarveOutPath"),
 					ContainSubstring("openvox-ca#313"))))
 		})
@@ -422,7 +431,7 @@ linters:
 			widened := bytes.Replace(carveOut,
 				[]byte(nolintlintCarveOutPath), []byte("internal/storage/"), 1)
 			Expect(verifyNolintlintCarveOutIn(widened, ci)).To(MatchError(
-				And(ContainSubstring("internal/storage/"),
+				And(ContainSubstring(`has path "internal/storage/"`),
 					ContainSubstring("nolintlintCarveOutPath"),
 					ContainSubstring("openvox-ca#313"))))
 		})
@@ -434,7 +443,7 @@ linters:
 			wide := bytes.Replace(carveOut,
 				[]byte("'"+nolintlintCarveOutText+"'"), []byte(`"G703"`), 1)
 			Expect(verifyNolintlintCarveOutIn(wide, ci)).To(MatchError(
-				And(ContainSubstring("G703"),
+				And(ContainSubstring(`has text "G703"`),
 					ContainSubstring("require-specific"),
 					ContainSubstring("openvox-ca#313"))))
 		})
@@ -450,7 +459,7 @@ linters:
 		// The other half of the predicate, which no fixture exercised before:
 		// an exclusion at this very path that does not name nolintlint is
 		// somebody else's rule.
-		It("ignores an exclusion on this path that does not name nolintlint", func() {
+		It("ignores an exclusion on this path that names a different linter", func() {
 			notNolintlint := bytes.Replace(carveOut, []byte("- nolintlint"), []byte("- gosec"), 1)
 			Expect(verifyNolintlintCarveOutIn(notNolintlint, moved)).To(Succeed())
 		})
@@ -483,6 +492,112 @@ linters:
 `)...)
 			Expect(verifyNolintlintCarveOutIn(doubled, ci)).To(MatchError(
 				ContainSubstring("must be the only one")))
+		})
+
+		// The sibling half of the linters predicate, and the axis round 4
+		// found: golangci-lint applies a rule with no `linters` key to EVERY
+		// linter, so this suppresses more than the carve-out does, not less.
+		It("rejects an exclusion with no linters key, which covers every linter", func() {
+			noLinters := []byte(`
+linters:
+  exclusions:
+    rules:
+      - path: ` + nolintlintCarveOutPath + `
+        text: '` + nolintlintCarveOutText + `'
+`)
+			Expect(string(noLinters)).NotTo(ContainSubstring("linters:\n          -"),
+				"the fixture must really have no linters list")
+			Expect(verifyNolintlintCarveOutIn(noLinters, moved)).To(MatchError(
+				And(ContainSubstring("names linters []"),
+					ContainSubstring("openvox-ca#313"))))
+		})
+
+		// Naming more linters than nolintlint is a wider suppression wearing
+		// the carve-out's shape.
+		It("rejects a carve-out that names extra linters", func() {
+			extra := bytes.Replace(carveOut,
+				[]byte("          - nolintlint\n"), []byte("          - nolintlint\n          - errcheck\n"), 1)
+			Expect(verifyNolintlintCarveOutIn(extra, ci)).To(MatchError(
+				And(ContainSubstring("errcheck"),
+					ContainSubstring("openvox-ca#313"))))
+		})
+
+		// exclusions.paths is a different config node with its own processor:
+		// a matching pattern drops the file for every linter. Reading that as
+		// "carve-out removed" would free the pin under a far wider suppression.
+		It("rejects a file-level exclusions.paths entry covering the file", func() {
+			viaPaths := []byte(`
+linters:
+  exclusions:
+    paths:
+      - internal/storage/filelock\.go
+`)
+			Expect(verifyNolintlintCarveOutIn(viaPaths, moved)).To(MatchError(
+				And(ContainSubstring("every linter"),
+					ContainSubstring("openvox-ca#313"))))
+		})
+
+		// paths-except is the same suppression stated in the negative: a
+		// non-empty list that does not name the file excludes it from
+		// everything.
+		It("rejects a paths-except list that omits the file", func() {
+			viaPathsExcept := []byte(`
+linters:
+  exclusions:
+    paths-except:
+      - internal/ca/
+`)
+			Expect(verifyNolintlintCarveOutIn(viaPathsExcept, moved)).To(MatchError(
+				ContainSubstring("every linter")))
+		})
+
+		// The parse floor. Without it an unreadable .golangci.yml would take
+		// the absent branch and be read as "carve-out removed".
+		It("reports a .golangci.yml it cannot parse", func() {
+			Expect(verifyNolintlintCarveOutIn([]byte("linters: [\n"), ci)).To(MatchError(
+				ContainSubstring(".golangci.yml:")))
+		})
+
+		// The premise recorded in golangciLintPinRe's comment -- that it and
+		// renovate's custom manager cannot disagree about which token is the
+		// pin -- checked against the real renovate.json rather than asserted.
+		It("reads the same pin token renovate's custom manager matches", func() {
+			renovateSrc, err := os.ReadFile("renovate.json")
+			Expect(err).NotTo(HaveOccurred())
+			var doc struct {
+				CustomManagers []struct {
+					DepNameTemplate string   `json:"depNameTemplate"`
+					MatchStrings    []string `json:"matchStrings"`
+				} `json:"customManagers"`
+			}
+			Expect(json.Unmarshal(renovateSrc, &doc)).To(Succeed())
+
+			var patterns []string
+			for _, m := range doc.CustomManagers {
+				if strings.Contains(m.DepNameTemplate, "golangci-lint") {
+					patterns = append(patterns, m.MatchStrings...)
+				}
+			}
+			Expect(patterns).NotTo(BeEmpty(),
+				"renovate must still own the golangci-lint pin; this guard's premise is that it does")
+
+			ciSrc, err := os.ReadFile(filepath.Join(".github", "workflows", "ci.yml"))
+			Expect(err).NotTo(HaveOccurred())
+			ours := golangciLintPinRe.FindSubmatch(ciSrc)
+			Expect(ours).NotTo(BeNil())
+
+			matched := false
+			for _, pattern := range patterns {
+				re, err := regexp.Compile(pattern)
+				if err != nil {
+					continue
+				}
+				if m := re.FindSubmatch(ciSrc); m != nil && bytes.Contains(m[0], ours[1]) {
+					matched = true
+				}
+			}
+			Expect(matched).To(BeTrue(),
+				"renovate and golangciLintPinRe must find the same pin token in ci.yml")
 		})
 
 		// An unparseable path would make golangci-lint reject the config; it

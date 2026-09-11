@@ -709,55 +709,135 @@ const nolintlintCarveOutText = `G703.*is unused for linter "gosec"`
 var golangciLintPinRe = regexp.MustCompile(
 	`go install github\.com/golangci/golangci-lint/v2/cmd/golangci-lint@(v\d+\.\d+\.\d+)`)
 
-// nolintlintCarveOut reports whether .golangci.yml still carries the nolintlint
-// carve-out for filelock.go, and refuses anything carve-out shaped that it
-// cannot recognise.
+// nolintlintCarveOutLinters is the exact `linters` list the carve-out is
+// expected to carry. A wider list is a wider suppression.
+var nolintlintCarveOutLinters = []string{"nolintlint"}
+
+// exclusionRule is the subset of a golangci-lint exclusion rule that decides
+// WHICH FILES AND LINTERS it applies to. `text` and `source` are per-issue
+// conditions and cannot make a rule stop covering a file, so they are not part
+// of the applicability question -- `text` is carried only so the recognised
+// rule's narrowness can be asserted.
+type exclusionRule struct {
+	Path       string   `yaml:"path"`
+	PathExcept string   `yaml:"path-except"`
+	Linters    []string `yaml:"linters"`
+	Text       string   `yaml:"text"`
+}
+
+// covers reports whether this rule drops issues from linter for file.
 //
-// It finds the rule the way golangci-lint does, by compiling each exclusion's
-// `path` and testing it against the real file path, rather than by comparing
-// the pattern's bytes. That distinction is the whole point: respelling the
-// pattern as internal/storage/filelock.go, or widening it to internal/storage/,
-// leaves the exclusion working exactly as before, and a byte comparison would
-// read both as "carve-out removed" and stop guarding with nothing red.
-//
-// Absence is a legitimate terminal state here -- deliberate removal is the
-// outcome the pin guard exists to make reachable -- but it must be real
-// absence. Anything that still excludes nolintlint on that file is an error,
-// not a false.
-func nolintlintCarveOut(golangciSrc []byte) (bool, error) {
-	type exclusionRule struct {
-		Path    string   `yaml:"path"`
-		Linters []string `yaml:"linters"`
-		Text    string   `yaml:"text"`
+// It is modelled directly on golangci-lint's own predicate rather than on a
+// list of ways the rule might have been widened -- see BaseRule.Match in
+// pkg/result/processors/base_rule.go of the pinned release, where each
+// condition is skipped when unset: `len(r.linters) != 0 && !r.matchLinter(...)`
+// and the same shape for path and path-except. Enumerating the ways instead of
+// modelling the predicate is how three successive versions of this guard each
+// missed a different one.
+func (r exclusionRule) covers(file, linter string) (bool, error) {
+	if len(r.Linters) != 0 && !slices.Contains(r.Linters, linter) {
+		return false, nil
 	}
+	if r.Path != "" {
+		re, err := regexp.Compile(r.Path)
+		if err != nil {
+			return false, fmt.Errorf("exclusion path %q is not a valid regexp: %w", r.Path, err)
+		}
+		if !re.MatchString(file) {
+			return false, nil
+		}
+	}
+	if r.PathExcept != "" {
+		re, err := regexp.Compile(r.PathExcept)
+		if err != nil {
+			return false, fmt.Errorf("exclusion path-except %q is not a valid regexp: %w", r.PathExcept, err)
+		}
+		if re.MatchString(file) {
+			return false, nil
+		}
+	}
+	return true, nil
+}
+
+// exclusionPathsCover reports whether the file-level `paths` / `paths-except`
+// lists drop every linter's issues for file. They are a separate node from
+// `rules`, applied by their own processor (ExclusionPaths.shouldPassIssue in
+// the pinned release): a `paths` pattern that matches drops the file outright,
+// and a non-empty `paths-except` that does not match does the same.
+func exclusionPathsCover(paths, pathsExcept []string, file string) (bool, error) {
+	for _, pattern := range paths {
+		re, err := regexp.Compile(pattern)
+		if err != nil {
+			return false, fmt.Errorf("exclusions.paths entry %q is not a valid regexp: %w", pattern, err)
+		}
+		if re.MatchString(file) {
+			return true, nil
+		}
+	}
+	if len(pathsExcept) == 0 {
+		return false, nil
+	}
+	for _, pattern := range pathsExcept {
+		re, err := regexp.Compile(pattern)
+		if err != nil {
+			return false, fmt.Errorf("exclusions.paths-except entry %q is not a valid regexp: %w", pattern, err)
+		}
+		if re.MatchString(file) {
+			return false, nil
+		}
+	}
+	return true, nil
+}
+
+// nolintlintCarveOut reports whether .golangci.yml still suppresses nolintlint
+// on filelock.go, and refuses any suppression that is not exactly the carve-out
+// this guard was written against.
+//
+// It asks golangci-lint's own question -- does this configuration drop
+// nolintlint issues for this file -- rather than looking for a rule that
+// matches ours byte for byte. That distinction is the whole point, and it has
+// been learned the hard way: respelling the pattern, widening it, dropping
+// `path`, dropping `linters`, or excluding the file at the `exclusions.paths`
+// level all leave nolintlint suppressed there while a byte comparison reads
+// "carve-out removed" and stops guarding the pin.
+//
+// Absence is a legitimate terminal state -- deliberate removal is the outcome
+// the pin guard exists to make reachable -- but it must be real absence.
+// Anything that still suppresses nolintlint on that file is an error, not a
+// false.
+func nolintlintCarveOut(golangciSrc []byte) (bool, error) {
 	var cfg struct {
 		Linters struct {
 			Exclusions struct {
-				Rules []exclusionRule `yaml:"rules"`
+				Rules       []exclusionRule `yaml:"rules"`
+				Paths       []string        `yaml:"paths"`
+				PathsExcept []string        `yaml:"paths-except"`
 			} `yaml:"exclusions"`
 		} `yaml:"linters"`
 	}
 	if err := yaml.Unmarshal(golangciSrc, &cfg); err != nil {
 		return false, fmt.Errorf(".golangci.yml: %w", err)
 	}
+	ex := cfg.Linters.Exclusions
+
+	wholeFile, err := exclusionPathsCover(ex.Paths, ex.PathsExcept, nolintlintCarveOutFile)
+	if err != nil {
+		return false, fmt.Errorf(".golangci.yml: %w", err)
+	}
+	if wholeFile {
+		return false, fmt.Errorf("linters.exclusions.paths / paths-except in .golangci.yml exclude %s "+
+			"from every linter, which suppresses nolintlint there far more widely than the carve-out does; "+
+			"this guard cannot hold the golangci-lint pin against a suppression it does not understand "+
+			"(see openvox-ca#313)", nolintlintCarveOutFile)
+	}
 
 	var covering []exclusionRule
-	for _, r := range cfg.Linters.Exclusions.Rules {
-		if !slices.Contains(r.Linters, "nolintlint") {
-			continue
-		}
-		// An exclusion with no `path` applies to every file, filelock.go
-		// included, so it covers the carve-out more widely than ours does.
-		// regexp.Compile("") matches everything, which is exactly that
-		// semantics -- skipping it here would read a wider suppression as
-		// "carve-out removed" and retire this guard in silence.
-		re, err := regexp.Compile(r.Path)
+	for _, r := range ex.Rules {
+		ok, err := r.covers(nolintlintCarveOutFile, "nolintlint")
 		if err != nil {
-			// golangci-lint would reject the config outright; say so here
-			// rather than silently treating it as not covering the file.
-			return false, fmt.Errorf(".golangci.yml: nolintlint exclusion path %q is not a valid regexp: %w", r.Path, err)
+			return false, fmt.Errorf(".golangci.yml: %w", err)
 		}
-		if re.MatchString(nolintlintCarveOutFile) {
+		if ok {
 			covering = append(covering, r)
 		}
 	}
@@ -767,20 +847,25 @@ func nolintlintCarveOut(golangciSrc []byte) (bool, error) {
 		return false, nil
 	case 1:
 	default:
-		return false, fmt.Errorf("%d nolintlint exclusion rules in .golangci.yml cover %s; "+
+		return false, fmt.Errorf("%d exclusion rules in .golangci.yml suppress nolintlint on %s; "+
 			"the carve-out guarded here must be the only one, or this guard cannot tell which it is "+
 			"(see openvox-ca#313)", len(covering), nolintlintCarveOutFile)
 	}
 
 	got := covering[0]
 	if got.Path != nolintlintCarveOutPath {
-		return false, fmt.Errorf("the nolintlint exclusion covering %s has path %q, but this guard was "+
-			"written against %q; if the rule was deliberately reshaped, update nolintlintCarveOutPath -- "+
-			"a path this guard does not recognise would stop it guarding the golangci-lint pin entirely "+
+		return false, fmt.Errorf("the exclusion suppressing nolintlint on %s has path %q, but this guard "+
+			"was written against %q; if the rule was deliberately reshaped, update nolintlintCarveOutPath "+
+			"-- a shape this guard does not recognise would stop it guarding the golangci-lint pin "+
 			"(see openvox-ca#313)", nolintlintCarveOutFile, got.Path, nolintlintCarveOutPath)
 	}
+	if !slices.Equal(got.Linters, nolintlintCarveOutLinters) {
+		return false, fmt.Errorf("the exclusion for %s names linters %v, but the carve-out is only "+
+			"acceptable at %v; naming more linters suppresses more than the one report this rule exists "+
+			"for (see openvox-ca#313)", nolintlintCarveOutFile, got.Linters, nolintlintCarveOutLinters)
+	}
 	if got.Text != nolintlintCarveOutText {
-		return false, fmt.Errorf("the nolintlint exclusion for %s has text %q, but the carve-out is only "+
+		return false, fmt.Errorf("the exclusion for %s has text %q, but the carve-out is only "+
 			"acceptable at %q; a wider match also silences require-specific and require-explanation on "+
 			"that file, so an unspecific //nolint there would suppress every linter on its line "+
 			"(see openvox-ca#313)", nolintlintCarveOutFile, got.Text, nolintlintCarveOutText)
@@ -814,9 +899,9 @@ func verifyNolintlintCarveOut() error {
 // the real files.
 //
 // It has an absolute floor on both sides rather than only comparing the two
-// inputs to each other. On the .golangci.yml side, nolintlintCarveOut refuses a
-// carve-out it cannot recognise instead of reading it as removed. On the ci.yml
-// side, a present carve-out MUST yield a parseable pin -- without that,
+// inputs to each other. On the .golangci.yml side, nolintlintCarveOut refuses
+// any suppression it cannot recognise instead of reading it as removed. On the
+// ci.yml side, a present carve-out MUST yield a parseable pin -- without that,
 // deleting the install line would read as "nothing to check" instead of as
 // drift.
 func verifyNolintlintCarveOutIn(golangciSrc, ciSrc []byte) error {

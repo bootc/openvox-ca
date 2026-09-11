@@ -207,11 +207,14 @@ linters:
       # REMOVE THIS RULE once the pinned golangci-lint ships a gosec containing
       # that fix -- and with it verifyNolintlintCarveOut in magefile.go and its
       # specs in magefile_test.go, which exist only to make this rule's removal
-      # condition reachable. Deleting the rule alone is silent, not red: that
-      # guard treats an absent carve-out as the outcome it was built to reach,
-      # so it would be left behind as dead code with nothing reporting it. The
-      # paragraph about this in AGENTS.md, under the golangci-lint pin, goes at
-      # the same time. See voxpupuli/openvox-ca#313.
+      # condition reachable, plus the paragraph about it in AGENTS.md under
+      # the golangci-lint pin. Delete this rule on its own and `mage dev:check`
+      # still passes -- the guard treats an absent carve-out as the outcome it
+      # was built to reach -- but `mage test:magefile` fails on "finds the real
+      # carve-out, and it matches the real golangci-lint pin", which asserts
+      # the rule is still here. Both run in CI's check job, so a partial
+      # removal is reported; it is reported by that spec rather than by the
+      # guard. See voxpupuli/openvox-ca#313.
       - path: internal/storage/filelock\.go
         linters:
           - nolintlint
