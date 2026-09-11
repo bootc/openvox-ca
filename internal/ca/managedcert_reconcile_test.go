@@ -549,7 +549,7 @@ var _ = Describe("Reconciling a managed certificate", func() {
 		})
 
 		It("does not retire a predecessor that is already on the CRL", func() {
-			// issueManagedLocked skips supersession on the revoked arm. Without
+			// issueManagedUnderSubjectLock skips supersession on the revoked arm. Without
 			// that guard the CA re-retires a serial the CRL already carries:
 			// harmless on the immediate path, but on the delayed one it appends
 			// a pending entry for a certificate that needs nothing further.
@@ -592,7 +592,7 @@ var _ = Describe("Reconciling a managed certificate", func() {
 			// next pass to reissue), and it must not revoke a credential it
 			// cannot prove is its own. So it does neither: it issues, and it
 			// leaves the incumbent exactly as it found it. The operator is told,
-			// which is what warnIfDisplacingLocked is for.
+			// which is what warnIfDisplacingUnderSubjectLock is for.
 			existing, err := myCA.GenerateWithOptions(ctx, subject, GenerateOptions{
 				DNSAltNames: []string{subject},
 			})
@@ -671,10 +671,15 @@ var _ = Describe("Reconciling a managed certificate", func() {
 		})
 
 		It("leaves a certificate with different usages alone too", func() {
-			// The complement of the spec above: an incumbent that does NOT look
-			// like anything this entry would issue is treated identically --
-			// issued over, not revoked. The two specs together say the CA never
-			// revokes on a resemblance test, in either direction.
+			// Deliberately NOT claiming this is the complement of the spec
+			// above. Both reach warnIfDisplacingUnderSubjectLock with an empty
+			// entry store, so `current` is nil and neither leafCarriesNames nor
+			// leafCarriesUsages is consulted on the incumbent -- the reconcile
+			// path makes no resemblance judgement at all, which is the point.
+			// The fixture varies anyway, so that a future change which DID start
+			// judging resemblance here has a second shape to fail on. The
+			// falsifiable resemblance case is "reissues when its own store was
+			// emptied", whose incumbent satisfies the spec by construction.
 			existing, err := myCA.GenerateWithOptions(ctx, subject, GenerateOptions{
 				DNSAltNames: []string{subject, "managed"},
 			})

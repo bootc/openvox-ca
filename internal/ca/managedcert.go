@@ -802,7 +802,7 @@ func (c *CA) issueManagedUnderSubjectLock(ctx context.Context, m ManagedCert, re
 	// Retire the predecessor -- the certificate the entry's own store held --
 	// now that its replacement is signed AND stored. This is the only
 	// certificate this path retires; one the CA held that the entry could not
-	// account for is reported by warnIfDisplacingLocked and left alone.
+	// account for is reported by warnIfDisplacingUnderSubjectLock and left alone.
 	//
 	// Only when we have one that is ours and not already revoked. A foreign
 	// certificate's serial must never reach our CRL -- it identifies a
