@@ -501,18 +501,16 @@ func (c *CA) reconcileManagedCert(ctx context.Context, m ManagedCert, now time.T
 				"subject", subject, "not_after", current.NotAfter.Format(time.RFC3339))
 			return nil
 		}
-		// Establish what the CA already holds for this name, and whose it is.
-		// A certificate that is not this entry's is refused rather than
-		// displaced; one that is, but that the entry's store no longer knows
-		// about, is retired alongside the issuance.
-		incumbent, err := c.managedIncumbentLocked(ctx, m, current)
-		if err != nil {
-			return err
-		}
+		// Report, before issuing, any certificate this CA holds for the name
+		// that the entry does not account for. The issuance proceeds either
+		// way -- refusing would stall the self-heal #242's failure table
+		// requires -- but a credential that stops being reachable by certname
+		// is not something to let pass silently.
+		c.warnIfDisplacingLocked(ctx, subject, current)
 
 		slog.Info("Issuing managed certificate", "subject", subject, "reason", reason.String())
 
-		did, err := c.issueManagedLocked(ctx, m, reason, current, incumbent)
+		did, err := c.issueManagedLocked(ctx, m, reason, current)
 		issued = did
 		return err
 	})
@@ -522,90 +520,83 @@ func (c *CA) reconcileManagedCert(ctx context.Context, m ManagedCert, now time.T
 	return issued, nil
 }
 
-// managedIncumbentLocked inspects what this CA already holds at cert/<subject>
-// and reports the certificate the issuance must retire, if any.
+// warnIfDisplacingLocked reports a certificate this CA holds for the subject
+// that the managed entry is about to replace and does not account for.
 //
 // issueLeafLocked ends in an unconditional SaveCert, so whatever is at
 // cert/<subject> is replaced. The predecessor the ordinary path retires is
 // `current`, which came from the entry's own store -- and on the absent,
 // unparseable and key-unusable arms that is either nothing or something older
-// than what the CA has on file. Left alone, the replaced certificate stays
-// valid, unrevoked, and unreachable by `revoke --certname`: a live credential
-// nothing can retire before it expires.
+// than the CA has on file. The replaced certificate then stays valid while the
+// CA's record points at its successor, so `revoke --certname` reaches the new
+// one and the old one is addressable only by serial.
 //
-// So the question is not "may I overwrite this" but "whose is it".
+// This says so, loudly, and then lets the issuance proceed. Three earlier
+// designs were tried and are recorded here because each is tempting:
 //
-//   - Nothing stored, or it is `current` itself, or it is already revoked.
-//     Nothing is being taken away. (nil, nil)
-//   - Stored bytes that will not decode or parse. Not a credential anybody can
-//     present, so there is nothing to protect and overwriting is the repair.
-//     (nil, nil)
-//   - A certificate that satisfies this entry's own spec. Indistinguishable
-//     from one this entry issued, because it is exactly what this entry issues:
-//     the store was emptied, or a pass died between signing and the store
-//     write. Return it, so the issuance retires it as a predecessor. This is
-//     the arm that keeps the mechanism self-healing, which #242's failure table
-//     requires of both cases.
-//   - A certificate that does NOT satisfy the spec. Something else owns this
-//     name -- a different CN, names this entry never asks for, usages it never
-//     issues. Refuse, because a certname belongs to one subject and quietly
-//     revoking a stranger's credential to take the name is worse than not
-//     issuing.
+//   - Refuse whenever the incumbent is not `current`. That is what the first
+//     version did, and it refused exactly the cases #242's failure table
+//     requires to self-heal -- a store emptied externally, a store whose
+//     contents will not parse, a pass that died between signing and the write
+//     -- because on all three the entry's store cannot account for anything.
+//     The entry then stalled for ever and the real certificate expired.
+//   - Retire the incumbent when it satisfies the entry's spec, on the reasoning
+//     that such a certificate is indistinguishable from one the entry issued.
+//     It is indistinguishable, and that is the problem: an ordinary agent
+//     certificate for the same certname satisfies the obvious managed spec
+//     exactly -- matching CN, the CN promoted to a DNS SAN, and the default
+//     serverAuth+clientAuth pair -- so the loop would revoke a node's live
+//     credential to take its name. A signature check does not separate them
+//     either; this CA issued both.
+//   - Mark managed issuances with an extension and adopt only what carries it.
+//     That is the only exact test, and it needs an OID. The Puppet arc is
+//     Puppet's, not this project's, so minting one there would be squatting on
+//     a namespace we do not own.
 //
-// A read failure refuses. The question is whether something is being destroyed,
-// and an unreadable answer is not a no -- the cost of refusing wrongly is a
-// pass that retries in fifteen minutes, and the cost of proceeding wrongly is a
-// live credential nothing will ever retire. That is why this reads through
-// GetCert and classifies its error rather than asking HasCert, which returns a
-// bare bool and cannot tell an absent certificate from an unreadable one; see
-// generate.go, which rejects HasCert on its replacement path for the same
-// reason.
+// So the CA revokes nothing it cannot prove is its to revoke, and the operator
+// gets the serial and the remedy instead. The certificate is not lost: it keeps
+// its inventory row, and `openvox-ca-ctl revoke --serial` addresses it.
 //
-// The caller must hold subject's lock, which is what makes the answer still
-// true by the time it is acted on.
-func (c *CA) managedIncumbentLocked(ctx context.Context, m ManagedCert,
-	current *x509.Certificate) (*x509.Certificate, error) {
-	subject := m.Spec.Subject
+// The caller must hold subject's lock.
+func (c *CA) warnIfDisplacingLocked(ctx context.Context, subject string, current *x509.Certificate) {
 	storedPEM, err := c.Storage.GetCert(ctx, subject)
 	if err != nil {
-		if errors.Is(err, fs.ErrNotExist) {
-			return nil, nil
+		if !errors.Is(err, fs.ErrNotExist) {
+			// Not fatal: the issuance is going ahead either way, and this is a
+			// diagnostic. Say that the check could not be made rather than
+			// implying there was nothing to report.
+			slog.Warn("Could not read the stored certificate for a managed subject; "+
+				"cannot say whether this issuance displaces one",
+				"subject", subject, "error", err)
 		}
-		return nil, fmt.Errorf("reading the stored certificate for %s, before replacing it: %w",
-			subject, err)
+		return
 	}
 	block, _ := pem.Decode(storedPEM)
 	if block == nil {
-		slog.Warn("Replacing an undecodable stored certificate for a managed subject",
-			"subject", subject)
-		return nil, nil
+		return
 	}
 	stored, err := x509.ParseCertificate(block.Bytes)
 	if err != nil {
-		slog.Warn("Replacing an unparseable stored certificate for a managed subject",
-			"subject", subject, "error", err)
-		return nil, nil
+		return
 	}
 	if current != nil && stored.SerialNumber.Cmp(current.SerialNumber) == 0 {
-		return nil, nil
+		return
 	}
 	revoked, err := c.IsRevokedSerial(ctx, stored.SerialNumber)
-	if err != nil {
-		return nil, fmt.Errorf("checking whether the stored certificate for %s is revoked, "+
-			"before replacing it: %w", subject, err)
+	if err == nil && revoked {
+		return
 	}
-	if revoked {
-		return nil, nil
-	}
-	if !leafCarriesNames(stored, m.Spec) || !leafCarriesUsages(stored, m.Spec) {
-		return nil, fmt.Errorf("refusing to issue a managed certificate for %s: a different, "+
-			"unrevoked certificate (serial %s) is already stored for that name, and it is not "+
-			"one this entry would have issued. A certname belongs to one subject; issuing here "+
-			"would overwrite that certificate while leaving it valid and unrevocable by name. "+
-			"Revoke or clean it first, or give the managed certificate a name of its own",
-			subject, serialHexStr(stored.SerialNumber))
-	}
-	return stored, nil
+	// SECURITY: a credential this CA issued stays valid while the record that
+	// names it is replaced, so by-name revocation will no longer reach it. That
+	// is an authorisation fact an operator has to be told, with the address they
+	// need to act on it.
+	// NIST 800-53: AU-2 (Event Logging), AC-6 (Least Privilege)
+	slog.Warn("A managed certificate is replacing a different certificate stored for its name; "+
+		"the replaced certificate stays valid and is no longer reachable by certname. "+
+		"Retire it with 'openvox-ca-ctl revoke --serial <hex> --force', or give the managed "+
+		"certificate a name of its own",
+		"subject", subject, "displaced_serial", serialHexStr(stored.SerialNumber),
+		"displaced_not_after", stored.NotAfter.UTC().Format(time.RFC3339))
 }
 
 // storedMaterialRevoked reports whether the certificate in certPEM is on this
@@ -645,7 +636,7 @@ func (c *CA) storedMaterialRevoked(ctx context.Context, certPEM []byte, subject 
 // cadir either. That is why RetainPrivateKeyInStorage has no equivalent on this
 // path -- there is nothing to opt out of.
 func (c *CA) issueManagedLocked(ctx context.Context, m ManagedCert, reason issueReason,
-	current, incumbent *x509.Certificate) (bool, error) {
+	current *x509.Certificate) (bool, error) {
 	subject := m.Spec.Subject
 
 	// The predecessor's bytes, kept so the CA's record can be put back if the
@@ -735,16 +726,32 @@ func (c *CA) issueManagedLocked(ctx context.Context, m ManagedCert, reason issue
 		// Put the CA's own record back. issueLeafLocked overwrote cert/<subject>
 		// before the store was asked, so it now names the revoked orphan while
 		// the certificate actually in service is the predecessor still sitting
-		// in the entry's store. Left that way, the next pass sees an incumbent
-		// it does not recognise, and an operator's `revoke --certname` resolves
-		// to the orphan and reports success having retired nothing.
+		// in the entry's store.
 		//
-		// Best effort, and the error says what is left behind either way: the
-		// predecessor's serial is named so it can be retired by hand, which is
-		// the remedy docs/metrics.md gives for the same shape on the renewal
-		// paths.
-		if current != nil {
-			if serr := c.Storage.SaveCert(ctx, subject, currentPEM); serr != nil {
+		// What this restores, precisely: the blob every reader of
+		// cert/<subject> consults -- certificate status, IsRevoked, and the
+		// next pass's displacement check. What it does NOT restore is
+		// `revoke --certname`, which resolves through the inventory
+		// (LatestSerialForSubject), whose newest row still names the orphan
+		// because issueLeafLocked appended it before the store was asked. So
+		// the predecessor's serial is logged unconditionally below, alongside
+		// the remedy that does reach it.
+		//
+		// Only when the predecessor is ours. On the not-ours arm `current` is a
+		// certificate this CA did not issue, and installing that in the CA's own
+		// certificate store would leave it serving material of unknown
+		// provenance with no inventory row -- which evictRevokedLocked would
+		// then read as ErrCertExists for ever, since a foreign serial can never
+		// reach this CA's CRL.
+		//
+		// Its own deadline, for the reason the revocation above gives: the
+		// likeliest cause of a failed store write is that it hung, and a repair
+		// sharing the spent budget cannot run in the one case it exists for.
+		if current != nil && reason != reasonNotOurs {
+			restoreCtx, cancelRestore := context.WithTimeout(
+				context.WithoutCancel(ctx), LockTimeout/2)
+			defer cancelRestore()
+			if serr := c.Storage.SaveCert(restoreCtx, subject, currentPEM); serr != nil {
 				slog.Error("A managed certificate could not be stored, and the CA's own record "+
 					"could not be put back; it now names a revoked certificate while the "+
 					"predecessor is still live",
@@ -752,32 +759,29 @@ func (c *CA) issueManagedLocked(ctx context.Context, m ManagedCert, reason issue
 					"error", serr)
 			}
 		}
+		if current != nil {
+			// Unconditional, including on the arm where the restore succeeded:
+			// that is the arm with no other trace of the predecessor's serial,
+			// and it is the serial an operator needs, because by-name
+			// revocation resolves to the orphan instead.
+			slog.Warn("A managed certificate could not be stored; the predecessor remains in "+
+				"service and by-name revocation will not reach it. Retire it with "+
+				"'openvox-ca-ctl revoke --serial <hex> --force' if it must go",
+				"subject", subject, "predecessor_serial", serialHexStr(current.SerialNumber))
+		}
 		return false, fmt.Errorf("writing the material for %s to its store: %w", subject, err)
 	}
 
-	// Retire the predecessor, now that its replacement is signed AND stored.
+	// Retire the predecessor -- the certificate the entry's own store held --
+	// now that its replacement is signed AND stored. This is the only
+	// certificate this path retires; one the CA held that the entry could not
+	// account for is reported by warnIfDisplacingLocked and left alone.
 	//
 	// Only when we have one that is ours and not already revoked. A foreign
 	// certificate's serial must never reach our CRL -- it identifies a
 	// different certificate under a different issuer -- and an already-revoked
 	// one needs nothing further. Best effort in every case: the replacement is
 	// written and a failure here must not undo it.
-	// The incumbent, when there is one, is a certificate this CA held for the
-	// name that the entry's own store did not know about -- the store was
-	// emptied, or a pass died between signing and the write. It is ours and it
-	// is live, so it is retired here rather than left as a credential nothing
-	// addresses. Before the incumbent is retired, and separately from `current`,
-	// because the two can both exist and be different certificates.
-	if incumbent != nil {
-		incumbentSerial := serialHexStr(incumbent.SerialNumber)
-		incCtx, cancelInc := context.WithTimeout(context.WithoutCancel(ctx), LockTimeout/2)
-		defer cancelInc()
-		if err := c.supersedeReplaced(incCtx, subject, incumbentSerial); err != nil {
-			slog.Warn("ReconcileManaged: failed to retire replaced certificate",
-				"subject", subject, "serial", incumbentSerial, "error", err)
-		}
-	}
-
 	if current != nil && reason != reasonNotOurs && reason != reasonRevoked {
 		oldSerial := serialHexStr(current.SerialNumber)
 		// Its own budget too, and for the same reason: by this point the pass

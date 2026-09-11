@@ -400,6 +400,21 @@ var _ = Describe("Reconciling a managed certificate", func() {
 			Expect(revoked).To(BeTrue(),
 				"the rollback inherited the cancelled context and never ran, so a certificate "+
 					"nobody can use is live until it expires")
+
+			// The record put-back is the other half of the repair, and it is on
+			// the same cancelled context. Asserted HERE rather than only on the
+			// fast-failure arm, because this is the shape where a shared
+			// deadline defeats it -- an assertion that only ever runs against a
+			// live context cannot tell the two implementations apart.
+			restored, gerr2 := store.GetCert(ctx, subject)
+			Expect(gerr2).NotTo(HaveOccurred())
+			rblock, _ := pem.Decode(restored)
+			Expect(rblock).NotTo(BeNil())
+			rcert, perr := x509.ParseCertificate(rblock.Bytes)
+			Expect(perr).NotTo(HaveOccurred())
+			Expect(rcert.SerialNumber).To(Equal(predecessor.SerialNumber),
+				"the record still names the revoked orphan, so the put-back inherited the "+
+					"cancelled context too")
 		})
 
 		It("leaves the predecessor valid and in the store", func() {
@@ -544,7 +559,12 @@ var _ = Describe("Reconciling a managed certificate", func() {
 		// a name that already has a certificate overwrites the CA's record of it
 		// while leaving it valid, unrevoked, and no longer reachable by
 		// `revoke --certname`: a live credential nothing can retire.
-		It("refuses rather than displacing it", func() {
+		It("issues anyway, and leaves the other certificate valid", func() {
+			// The mechanism must not stall (#242's failure table requires the
+			// next pass to reissue), and it must not revoke a credential it
+			// cannot prove is its own. So it does neither: it issues, and it
+			// leaves the incumbent exactly as it found it. The operator is told,
+			// which is what warnIfDisplacingLocked is for.
 			existing, err := myCA.GenerateWithOptions(ctx, subject, GenerateOptions{
 				DNSAltNames: []string{subject},
 			})
@@ -555,53 +575,50 @@ var _ = Describe("Reconciling a managed certificate", func() {
 			Expect(err).NotTo(HaveOccurred())
 
 			issued, err := reconcile()
-			Expect(err).To(MatchError(ContainSubstring("refusing to issue a managed certificate")))
-			Expect(issued).To(BeFalse())
-
-			// The incumbent is untouched: still stored, still valid. Both halves
-			// matter -- leaving it stored but revoked, or revoked but stored,
-			// would each be a way of losing it.
-			stored, err := store.GetCert(ctx, subject)
 			Expect(err).NotTo(HaveOccurred())
-			sblock, _ := pem.Decode(stored)
-			Expect(sblock).NotTo(BeNil())
-			still, err := x509.ParseCertificate(sblock.Bytes)
-			Expect(err).NotTo(HaveOccurred())
-			Expect(still.SerialNumber).To(Equal(incumbent.SerialNumber),
-				"the incumbent certificate must not be overwritten")
+			Expect(issued).To(BeTrue(), "the entry must not stall on a name already in use")
 
-			revoked, err := myCA.IsRevokedSerial(ctx, incumbent.SerialNumber)
-			Expect(err).NotTo(HaveOccurred())
-			Expect(revoked).To(BeFalse(), "and must not be revoked either")
+			// Not revoked. This is the assertion that matters: an ordinary agent
+			// certificate for this name satisfies any spec the entry could
+			// plausibly carry, so a mechanism that inferred ownership from the
+			// spec would retire a node's live credential here.
+			revoked, rerr := myCA.IsRevokedSerial(ctx, incumbent.SerialNumber)
+			Expect(rerr).NotTo(HaveOccurred())
+			Expect(revoked).To(BeFalse(),
+				"the CA must not revoke a certificate it cannot prove is the entry's")
 
-			Expect(fake.saveCount()).To(BeZero(), "nothing may reach the managed store")
+			entries, _, serr := myCA.readSuperseded(ctx)
+			Expect(serr).NotTo(HaveOccurred())
+			Expect(entries).To(BeEmpty(),
+				"nor schedule it for revocation, which is the same act with a delay")
 		})
 
-		It("proceeds once the incumbent has been revoked", func() {
-			// The refusal is about live credentials, not about the name having
-			// any history. This is also the arm a store write that failed after
-			// signing leaves behind, so refusing here would block the retry the
-			// mechanism depends on.
+		It("leaves a certificate with different usages alone too", func() {
+			// The complement of the spec above: an incumbent that does NOT look
+			// like anything this entry would issue is treated identically --
+			// issued over, not revoked. The two specs together say the CA never
+			// revokes on a resemblance test, in either direction.
 			existing, err := myCA.GenerateWithOptions(ctx, subject, GenerateOptions{
-				DNSAltNames: []string{subject},
+				DNSAltNames: []string{subject, "managed"},
 			})
 			Expect(err).NotTo(HaveOccurred())
 			block, _ := pem.Decode(existing.CertificatePEM)
 			Expect(block).NotTo(BeNil())
 			incumbent, err := x509.ParseCertificate(block.Bytes)
 			Expect(err).NotTo(HaveOccurred())
-			Expect(myCA.Revoke(ctx, subject)).To(Succeed())
-			wasRevoked, rerr := myCA.IsRevokedSerial(ctx, incumbent.SerialNumber)
-			Expect(rerr).NotTo(HaveOccurred())
-			Expect(wasRevoked).To(BeTrue(),
-				"the fixture only tests the revoked arm if the incumbent really is revoked")
+			Expect(incumbent.ExtKeyUsage).To(ContainElement(x509.ExtKeyUsageClientAuth))
 
+			entry.Spec.ExtKeyUsage = []x509.ExtKeyUsage{x509.ExtKeyUsageServerAuth}
 			issued, err := reconcile()
 			Expect(err).NotTo(HaveOccurred())
 			Expect(issued).To(BeTrue())
+
+			revoked, rerr := myCA.IsRevokedSerial(ctx, incumbent.SerialNumber)
+			Expect(rerr).NotTo(HaveOccurred())
+			Expect(revoked).To(BeFalse())
 		})
 
-		It("reissues and retires the incumbent when its own store was emptied", func() {
+		It("reissues when its own store was emptied", func() {
 			// #242's failure table: "Store contents deleted externally | The
 			// load in step 1 catches it; next pass reissues." The CA still
 			// holds the certificate this entry issued last pass, so a guard
@@ -622,12 +639,13 @@ var _ = Describe("Reconciling a managed certificate", func() {
 			Expect(issued).To(BeTrue(), "the entry must self-heal, not stall")
 			Expect(fake.stored().SerialNumber).NotTo(Equal(previous.SerialNumber))
 
-			// And the certificate it displaced is retired rather than left as a
-			// live credential nothing addresses.
-			revoked, rerr := myCA.IsRevokedSerial(ctx, previous.SerialNumber)
-			Expect(rerr).NotTo(HaveOccurred())
-			Expect(revoked).To(BeTrue(),
-				"the displaced certificate is still live and no longer reachable by name")
+			// The certificate it displaced keeps its inventory row, so it stays
+			// addressable by serial even though the CA's record for the name now
+			// points at the replacement.
+			sub, serr := store.SubjectForSerial(ctx, serialHexStr(previous.SerialNumber))
+			Expect(serr).NotTo(HaveOccurred())
+			Expect(sub).To(Equal(subject),
+				"the displaced certificate must remain addressable by serial")
 		})
 
 		It("reissues when its own store holds bytes that will not parse", func() {

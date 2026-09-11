@@ -240,6 +240,22 @@ var _ = Describe("The leaf backdate and reconcile interval settings", func() {
 			"the documented precedence is environment over file")
 	})
 
+	It("refuses a backdate beyond the ceiling", func() {
+		// The ceiling is not only about absurd values. time.Duration(n) *
+		// time.Second multiplies by a billion in int64 nanoseconds, so a
+		// mistyped extra few zeroes wraps, and a wrapped product that lands
+		// positive passes every `> 0` guard downstream and reaches issuance.
+		setEnv("PUPPET_CA_LEAF_BACKDATE_SEC", "31536000")
+		_, err := loadServerConfig("")
+		Expect(err).To(MatchError(ContainSubstring("leaf_backdate_sec must not exceed")))
+
+		clearServerEnv()
+		setEnv("PUPPET_CA_LEAF_BACKDATE_SEC", "99999999999")
+		_, err = loadServerConfig("")
+		Expect(err).To(MatchError(ContainSubstring("leaf_backdate_sec must not exceed")),
+			"a value large enough to wrap the nanosecond multiply must be refused before it can")
+	})
+
 	It("defaults the reconcile interval, and takes a configured one", func() {
 		cfg, err := loadServerConfig("")
 		Expect(err).NotTo(HaveOccurred())

@@ -254,7 +254,9 @@ type CA struct {
 	// ago as not yet valid, and keeps refusing until its clock is fixed. Raise
 	// it only for a fleet that cannot run NTP.
 	//
-	// It applies to every certificate this CA issues, not only to managed ones.
+	// It applies to every leaf this CA issues -- from a CSR, generated, renewed
+	// or managed -- not only to managed ones. It does NOT reach the CA's own
+	// certificate, which bootstrapCA backdates a fixed 24 hours.
 	LeafBackdate time.Duration
 
 	// ExternalSigner, when non-nil, is used instead of loading the CA private
