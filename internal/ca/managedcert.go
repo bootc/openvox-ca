@@ -27,6 +27,8 @@ import (
 	"fmt"
 	"io/fs"
 	"log/slog"
+	"net"
+	"net/url"
 	"slices"
 	"time"
 )
@@ -72,11 +74,29 @@ type CertSpec struct {
 	//     from a file an administrator wrote. checkSubjectAltNames is reached
 	//     only from signWithDuration, which issuanceseam_test.go pins.
 	//
-	// Requiring at least one is what stops the first of those becoming a trap.
-	// With no promotion and no names, the certificate carries no SAN extension
-	// at all, and RFC 2818 clients ignore the Common Name -- so it would be
-	// refused for every name including its own, while looking well-formed.
+	// Requiring at least one name of some kind is what stops the first of those
+	// becoming a trap. With no promotion and no names, the certificate carries
+	// no SAN extension at all, and RFC 2818 clients ignore the Common Name --
+	// so it would be refused for every name including its own, while looking
+	// well-formed.
 	DNSNames []string
+
+	// IPAddresses, EmailAddresses and URIs are the other three subjectAltName
+	// types, carried with the same semantics as DNSNames: used exactly as
+	// configured, never promoted into, never gated.
+	//
+	// issueLeafLocked has supported all four since before managed certificates
+	// existed, and AutoRenew carries all four forward. A managed certificate
+	// that could only be named by DNS would be the odd one out -- and an IP SAN
+	// is the case that makes it concrete, since a component reached at a fixed
+	// address has nothing else to be named by.
+	IPAddresses []net.IP
+
+	// EmailAddresses are rfc822Name SAN entries.
+	EmailAddresses []string
+
+	// URIs are uniformResourceIdentifier SAN entries.
+	URIs []*url.URL
 
 	// ExtKeyUsage is what the certificate may be used for. Nil means the
 	// serverAuth+clientAuth pair every other issuance path uses.
@@ -114,6 +134,28 @@ type CertSpec struct {
 	// with the fleet: a component whose clients are all modern can take an
 	// ECDSA key where agent certificates stay on RSA for compatibility.
 	KeyConfig KeyConfig
+
+	// ReuseKey reissues against the private key already in the entry's store
+	// rather than generating a fresh one. False (the zero value) re-keys on
+	// every renewal, which is the better default: a key that is replaced
+	// regularly is one a disclosure stops mattering about.
+	//
+	// True exists for the cases where the key is the identity rather than an
+	// implementation detail — a TLSA record or an SPKI pin names the key, and
+	// re-keying breaks it. That is uncommon but real, and it is a decision the
+	// configuration makes rather than one this mechanism should foreclose.
+	//
+	// Two consequences worth knowing. This is the only path in the tree that
+	// reads a leaf private key back: nothing else has any use for one, which is
+	// what makes `SavePrivateKey` write-only. It stays true that no leaf key
+	// reaches the backing store — the read is from the entry's own store, and
+	// the key is dropped when the issuance returns.
+	//
+	// And KeyConfig describes what to *generate*. A reused key keeps whatever
+	// algorithm and size it already has, so the two settings do not interact:
+	// changing KeyConfig under ReuseKey takes effect only when there is no key
+	// to reuse.
+	ReuseKey bool
 
 	// SupersedeAfter is how long this certificate's predecessor stays valid
 	// after a replacement is issued. Nil inherits the CA's SupersedeAfter.
@@ -158,13 +200,28 @@ func (s CertSpec) Validate() error {
 	if err := ValidateSubject(s.Subject); err != nil {
 		return err
 	}
-	if len(s.DNSNames) == 0 {
-		return fmt.Errorf("managed certificate %s: at least one DNS name is required; "+
-			"a certificate with no subjectAltName is refused by every RFC 2818 client, "+
-			"including for its own certname", s.Subject)
+	if len(s.DNSNames)+len(s.IPAddresses)+len(s.EmailAddresses)+len(s.URIs) == 0 {
+		return fmt.Errorf("managed certificate %s: at least one subject alternative name "+
+			"is required -- DNS, IP, email or URI; a certificate with none is refused by "+
+			"every RFC 2818 client, including for its own certname", s.Subject)
 	}
 	if err := validateDNSAltNames(s.DNSNames); err != nil {
 		return err
+	}
+	for _, ip := range s.IPAddresses {
+		// A nil or zero-length net.IP marshals into an empty SAN entry rather
+		// than failing, so it would produce a certificate carrying a name that
+		// matches nothing. Refused as configuration.
+		if len(ip) == 0 {
+			return fmt.Errorf("managed certificate %s: an IP address entry is empty; "+
+				"an unparsed address reaches the certificate as a name matching nothing",
+				s.Subject)
+		}
+	}
+	for _, u := range s.URIs {
+		if u == nil {
+			return fmt.Errorf("managed certificate %s: a URI entry is nil", s.Subject)
+		}
 	}
 	if s.TTL < 0 {
 		return fmt.Errorf("managed certificate %s: ttl must not be negative", s.Subject)
@@ -438,12 +495,39 @@ func publicKeysEqual(a, b crypto.PublicKey) bool {
 // *narrow* a certificate on the next pass would drop names something may still
 // be dialling, without the certificate having done anything wrong. Widening is
 // what the spec asks for; narrowing waits for natural renewal.
+// All four SAN types are checked, not just DNS. A type the decision ignored
+// would be a setting an operator could change with no effect until natural
+// expiry -- decorative configuration, which is the same defect as an extended
+// key usage that never takes hold.
 func leafCarriesNames(leaf *x509.Certificate, want CertSpec) bool {
 	if leaf.Subject.CommonName != want.Subject {
 		return false
 	}
 	for _, name := range want.DNSNames {
 		if !slices.Contains(leaf.DNSNames, name) {
+			return false
+		}
+	}
+	for _, want := range want.IPAddresses {
+		// Compared with net.IP.Equal rather than slices.Contains: the same
+		// address has more than one representation (a 4-byte form and a
+		// 16-byte IPv4-in-IPv6 form), and x509 parsing does not promise which
+		// one comes back. Bytewise equality would report a mismatch on every
+		// pass and reissue for ever.
+		if !slices.ContainsFunc(leaf.IPAddresses, want.Equal) {
+			return false
+		}
+	}
+	for _, addr := range want.EmailAddresses {
+		if !slices.Contains(leaf.EmailAddresses, addr) {
+			return false
+		}
+	}
+	for _, u := range want.URIs {
+		target := u.String()
+		if !slices.ContainsFunc(leaf.URIs, func(got *url.URL) bool {
+			return got != nil && got.String() == target
+		}) {
 			return false
 		}
 	}
@@ -591,7 +675,7 @@ func (c *CA) reconcileManagedCert(ctx context.Context, m ManagedCert, now time.T
 
 		slog.Info("Issuing managed certificate", "subject", subject, "reason", reason.String())
 
-		did, err := c.issueManagedUnderSubjectLock(ctx, m, reason, current)
+		did, err := c.issueManagedUnderSubjectLock(ctx, m, reason, current, keyPEM)
 		issued = did
 		return err
 	})
@@ -733,7 +817,7 @@ func (c *CA) storedMaterialRevoked(ctx context.Context, certPEM []byte, subject 
 // cadir either. That is why RetainPrivateKeyInStorage has no equivalent on this
 // path -- there is nothing to opt out of.
 func (c *CA) issueManagedUnderSubjectLock(ctx context.Context, m ManagedCert, reason issueReason,
-	current *x509.Certificate) (bool, error) {
+	current *x509.Certificate, storedKeyPEM []byte) (bool, error) {
 	subject := m.Spec.Subject
 
 	// The predecessor's bytes, kept so the CA's record can be put back if the
@@ -743,13 +827,12 @@ func (c *CA) issueManagedUnderSubjectLock(ctx context.Context, m ManagedCert, re
 		currentPEM = pem.EncodeToMemory(&pem.Block{Type: "CERTIFICATE", Bytes: current.Raw})
 	}
 
-	leafCfg := c.keyConfigFor(m.Spec)
 	// CPU-bound and touching no shared state, so outside c.mu -- but inside the
 	// subject lock, unlike GenerateWithOptions, because the key must not exist
 	// before this replica has established that it is the one issuing.
-	key, err := generateKey(leafCfg)
+	key, err := c.issuanceKeyFor(m, storedKeyPEM)
 	if err != nil {
-		return false, fmt.Errorf("generating a key for %s: %w", subject, err)
+		return false, err
 	}
 	keyPEM, err := marshalPrivateKeyPEM(key)
 	if err != nil {
@@ -761,7 +844,12 @@ func (c *CA) issueManagedUnderSubjectLock(ctx context.Context, m ManagedCert, re
 		defer c.mu.Unlock()
 		return c.issueLeafLocked(ctx, subject,
 			pkix.Name{CommonName: subject}, key.Public(),
-			subjectAltNames{DNSNames: m.Spec.DNSNames}, nil,
+			subjectAltNames{
+				DNSNames:       m.Spec.DNSNames,
+				IPAddresses:    m.Spec.IPAddresses,
+				EmailAddresses: m.Spec.EmailAddresses,
+				URIs:           m.Spec.URIs,
+			}, nil,
 			m.Spec.ExtKeyUsage, m.Spec.TTL)
 	}()
 	if err != nil {
@@ -912,6 +1000,52 @@ func (c *CA) issueManagedUnderSubjectLock(ctx context.Context, m ManagedCert, re
 		}
 	}
 	return true, nil
+}
+
+// issuanceKeyFor returns the key this issuance signs against: the one already in
+// the entry's store when ReuseKey asks for it, and a freshly generated one
+// otherwise.
+//
+// Falling back to generating is right on exactly one arm — there is nothing to
+// reuse. On a first issuance the store is empty by definition, so an entry with
+// ReuseKey set still has to start somewhere, and that is not worth a warning.
+//
+// A key that is present but will not parse is a different matter and is said
+// out loud: the operator asked for this certificate's key to be pinned, and it
+// is about to stop being the key it was. Generating anyway is still the right
+// action -- refusing would leave the certificate to expire over a key nobody
+// can use -- but silently is not.
+//
+// A reused key that is below the CA's key-strength policy is refused, not
+// quietly replaced. issueLeafLocked runs validatePublicKey over whatever public
+// key it is handed, so the refusal needs no code here; the effect is that such
+// an entry fails every pass until the operator fixes it. That is the right way
+// round: silently re-keying would defeat the pin the setting exists to provide,
+// and a pin the CA abandons without saying so is worse than one it refuses.
+func (c *CA) issuanceKeyFor(m ManagedCert, storedKeyPEM []byte) (crypto.Signer, error) {
+	subject := m.Spec.Subject
+	if m.Spec.ReuseKey && len(storedKeyPEM) > 0 {
+		block, _ := pem.Decode(storedKeyPEM)
+		if block == nil {
+			slog.Warn("Cannot reuse the stored private key for a managed certificate: "+
+				"it is not PEM. Generating a new one, which breaks any pin on the old key",
+				"subject", subject)
+		} else if key, err := parsePrivateKeyDER(block.Type, block.Bytes); err != nil {
+			slog.Warn("Cannot reuse the stored private key for a managed certificate. "+
+				"Generating a new one, which breaks any pin on the old key",
+				"subject", subject, "error", err)
+		} else {
+			slog.Debug("Reissuing a managed certificate against its existing key",
+				"subject", subject)
+			return key, nil
+		}
+	}
+
+	key, err := generateKey(c.keyConfigFor(m.Spec))
+	if err != nil {
+		return nil, fmt.Errorf("generating a key for %s: %w", subject, err)
+	}
+	return key, nil
 }
 
 // certSerialFromPEM returns the canonical serial of the first certificate in

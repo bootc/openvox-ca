@@ -32,6 +32,7 @@ import (
 	"crypto/x509/pkix"
 	"encoding/pem"
 	"math/big"
+	"net"
 	"time"
 
 	. "github.com/onsi/ginkgo/v2"
@@ -417,13 +418,30 @@ var _ = Describe("A managed-certificate spec", func() {
 		Expect(spec.Validate()).To(MatchError(ContainSubstring("renew_before must be positive")))
 	})
 
-	It("refuses a spec with no DNS names", func() {
+	It("accepts a spec named only by IP", func() {
+		// The requirement is a name of some kind, not a DNS name. A component
+		// reached at a fixed address has nothing else to be named by.
+		spec.DNSNames = nil
+		spec.IPAddresses = []net.IP{net.ParseIP("192.0.2.10")}
+		Expect(spec.Validate()).To(Succeed())
+	})
+
+	It("refuses an IP entry that did not parse", func() {
+		// net.ParseIP returns nil for a malformed address, and a nil net.IP
+		// marshals into an empty SAN entry rather than failing -- so the
+		// certificate would carry a name matching nothing.
+		spec.IPAddresses = []net.IP{net.ParseIP("not-an-address")}
+		Expect(spec.Validate()).To(MatchError(ContainSubstring("IP address entry is empty")))
+	})
+
+	It("refuses a spec with no names of any kind", func() {
 		// With no CN promotion on this path, an empty list yields a certificate
 		// carrying no subjectAltName extension at all -- refused by every RFC
 		// 2818 client for every name, including its own certname, while looking
 		// perfectly well-formed. Refused as configuration instead.
 		spec.DNSNames = nil
-		Expect(spec.Validate()).To(MatchError(ContainSubstring("at least one DNS name is required")))
+		Expect(spec.Validate()).To(MatchError(
+			ContainSubstring("at least one subject alternative name is required")))
 	})
 
 	It("refuses a negative ttl", func() {

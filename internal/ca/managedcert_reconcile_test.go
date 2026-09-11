@@ -31,6 +31,8 @@ import (
 	"fmt"
 	"log/slog"
 	"math/big"
+	"net"
+	"net/url"
 	"os"
 	"path/filepath"
 	"sync"
@@ -261,6 +263,75 @@ var _ = Describe("Reconciling a managed certificate", func() {
 				"an unset entry must take the CA's setting, not a built-in default")
 		})
 
+		It("reissues against the stored key when ReuseKey is set", func() {
+			// The case the setting exists for: a TLSA record or an SPKI pin
+			// names the key, so re-keying breaks it.
+			entry.Spec.ReuseKey = true
+			_, err := reconcile()
+			Expect(err).NotTo(HaveOccurred())
+			first := fake.stored()
+
+			issued, err := reconcileAt(dueWindow)
+			Expect(err).NotTo(HaveOccurred())
+			Expect(issued).To(BeTrue())
+
+			second := fake.stored()
+			Expect(second.SerialNumber).NotTo(Equal(first.SerialNumber),
+				"the fixture is only meaningful if a new certificate was issued")
+			Expect(second.PublicKey).To(Equal(first.PublicKey),
+				"the replacement must carry the same public key, or the pin is broken")
+		})
+
+		It("re-keys on every renewal by default", func() {
+			// The zero value, and the better default: a key replaced regularly
+			// is one a disclosure stops mattering about.
+			_, err := reconcile()
+			Expect(err).NotTo(HaveOccurred())
+			first := fake.stored()
+
+			_, err = reconcileAt(dueWindow)
+			Expect(err).NotTo(HaveOccurred())
+
+			Expect(fake.stored().PublicKey).NotTo(Equal(first.PublicKey))
+		})
+
+		It("generates when there is no key to reuse", func() {
+			// A first issuance has an empty store by definition, so an entry
+			// with ReuseKey set still has to start somewhere.
+			entry.Spec.ReuseKey = true
+			issued, err := reconcile()
+			Expect(err).NotTo(HaveOccurred())
+			Expect(issued).To(BeTrue())
+			Expect(fake.keyPEM).NotTo(BeEmpty())
+		})
+
+		It("generates, loudly, when the stored key cannot be parsed", func() {
+			// Refusing would leave the certificate to expire over a key nobody
+			// can use. Generating is right; doing it silently is not, because
+			// the pin the operator asked for is about to stop holding.
+			entry.Spec.ReuseKey = true
+			_, err := reconcile()
+			Expect(err).NotTo(HaveOccurred())
+			first := fake.stored()
+
+			fake.mu.Lock()
+			fake.keyPEM = []byte("-----BEGIN EC PRIVATE KEY-----\nnope\n-----END EC PRIVATE KEY-----\n")
+			fake.mu.Unlock()
+
+			var buf bytes.Buffer
+			prev := slog.Default()
+			slog.SetDefault(slog.New(slog.NewTextHandler(&buf, &slog.HandlerOptions{
+				Level: slog.LevelDebug,
+			})))
+			defer slog.SetDefault(prev)
+
+			issued, err := reconcile()
+			Expect(err).NotTo(HaveOccurred())
+			Expect(issued).To(BeTrue(), "an unusable key must not stall the certificate")
+			Expect(fake.stored().PublicKey).NotTo(Equal(first.PublicKey))
+			Expect(buf.String()).To(ContainSubstring("breaks any pin on the old key"))
+		})
+
 		It("honours a per-certificate supersession window", func() {
 			// The CA revokes inline; this entry wants an overlap.
 			myCA.SupersedeAfter = 0
@@ -340,6 +411,66 @@ var _ = Describe("Reconciling a managed certificate", func() {
 			"the configured names must be used exactly: no gate refusing a name that is "+
 				"not the certname, and no Common Name promoted in beside them")
 		Expect(crt.Subject.CommonName).To(Equal(subject))
+	})
+
+	It("carries every subject alternative name type, not only DNS", func() {
+		// issueLeafLocked has supported all four since before managed
+		// certificates existed, and AutoRenew carries all four forward. An IP
+		// SAN is the case that makes it concrete: a component reached at a
+		// fixed address has nothing else to be named by.
+		entry.Spec.IPAddresses = []net.IP{net.ParseIP("192.0.2.10"), net.ParseIP("2001:db8::1")}
+		entry.Spec.EmailAddresses = []string{"ca@example.com"}
+		u, uerr := url.Parse("spiffe://example.com/ca")
+		Expect(uerr).NotTo(HaveOccurred())
+		entry.Spec.URIs = []*url.URL{u}
+
+		_, err := reconcile()
+		Expect(err).NotTo(HaveOccurred())
+
+		crt := fake.stored()
+		Expect(crt.IPAddresses).To(HaveLen(2))
+		Expect(crt.IPAddresses[0].Equal(net.ParseIP("192.0.2.10"))).To(BeTrue())
+		Expect(crt.IPAddresses[1].Equal(net.ParseIP("2001:db8::1"))).To(BeTrue())
+		Expect(crt.EmailAddresses).To(ConsistOf("ca@example.com"))
+		Expect(crt.URIs).To(HaveLen(1))
+		Expect(crt.URIs[0].String()).To(Equal("spiffe://example.com/ca"))
+	})
+
+	It("does not reissue a certificate that already carries every name type", func() {
+		// The other half, and the one that catches a comparison which cannot
+		// recognise its own output. net.IP has a 4-byte and a 16-byte form for
+		// the same address, and x509 does not promise which comes back -- a
+		// bytewise comparison reissues on every pass, for ever, which is the
+		// failure renewWindowFor exists to prevent arriving by another door.
+		entry.Spec.IPAddresses = []net.IP{net.ParseIP("192.0.2.10")}
+		entry.Spec.EmailAddresses = []string{"ca@example.com"}
+		u, uerr := url.Parse("spiffe://example.com/ca")
+		Expect(uerr).NotTo(HaveOccurred())
+		entry.Spec.URIs = []*url.URL{u}
+
+		issued, err := reconcile()
+		Expect(err).NotTo(HaveOccurred())
+		Expect(issued).To(BeTrue())
+
+		issued, err = reconcile()
+		Expect(err).NotTo(HaveOccurred())
+		Expect(issued).To(BeFalse(),
+			"a certificate carrying exactly the configured names must be current")
+	})
+
+	It("reissues when a name type the spec wants is missing", func() {
+		// An IP added to the configuration must take effect, or the setting is
+		// decorative -- the same defect as a usage that never takes hold.
+		_, err := reconcile()
+		Expect(err).NotTo(HaveOccurred())
+		first := fake.stored()
+		Expect(first.IPAddresses).To(BeEmpty())
+
+		entry.Spec.IPAddresses = []net.IP{net.ParseIP("192.0.2.10")}
+		issued, err := reconcile()
+		Expect(err).NotTo(HaveOccurred())
+		Expect(issued).To(BeTrue(), "adding an IP SAN must trigger a reissue")
+		Expect(fake.stored().IPAddresses).To(HaveLen(1))
 	})
 
 	It("issues a serverAuth-only certificate when the spec says so", func() {
