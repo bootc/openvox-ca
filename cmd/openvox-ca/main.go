@@ -1313,7 +1313,14 @@ func initSignerKeyWith(ctx context.Context, cfg *serverConfig, resolve runtimeRe
 	// so there is no later allocation to reuse the pages the indexes occupied.
 	// It is the difference between a transient peak and a persistent RSS
 	// against the tree's divided GOMEMLIMIT.
+	//
+	// Logged at Debug because it is unconditional — there is no branch here for
+	// an operator to tell apart, unlike the memory-budget decisions launcher.go
+	// reports. What it answers is the question profiling cannot: whether this
+	// build reached the release path at all.
 	debug.FreeOSMemory()
+	slog.Debug("Released the signer's initialisation state",
+		"store_closed", true, "os_memory_reclaimed", true)
 
 	return key, rt, nil
 }

@@ -112,6 +112,36 @@ func runClosers(group *[]func() error) error {
 // test can substitute a provider that fails as only a real backend would.
 type runtimeResolver func(ctx context.Context, cfg *serverConfig) (*caRuntime, error)
 
+// keyProviderResolver builds the CA key provider and returns the closer that
+// releases the session behind it.
+//
+// The closer rather than the *openbao.TokenManager that owns it, because
+// releasing the session is the only thing resolveRuntime does with it. Naming
+// the narrower thing is what lets a spec supply one.
+type keyProviderResolver func(ctx context.Context, cfg *serverConfig) (closeSession func() error, provider ca.KeyProvider, err error)
+
+// newKeyProvider is the seam resolveRuntime reaches the key backend through. A
+// variable so a spec can drive its success path; it is the real thing
+// everywhere else.
+//
+// The assignment it feeds decides whether the store/key split is correct at
+// all — the session's closer must join the key-lifetime group, or CloseStore
+// tears down the token manager the signer signs every certificate with. Nothing
+// could reach it: every test that configures OpenBao points at a deliberately
+// unreachable address so newOpenBaoKeyProvider fails, which is right for what
+// those specs assert and leaves this branch unexecuted with err == nil. The
+// assignment was therefore invisible — a mutation filing it under storeClosers
+// compiled, passed the whole suite, and broke Transit in production. Same
+// reason as logCloseErrOut: a branch nothing can drive is a branch nothing can
+// defend.
+var newKeyProvider keyProviderResolver = func(ctx context.Context, cfg *serverConfig) (func() error, ca.KeyProvider, error) {
+	tm, provider, err := newOpenBaoKeyProvider(ctx, cfg)
+	if err != nil {
+		return nil, nil, err
+	}
+	return tm.Close, provider, nil
+}
+
 // resolveRuntime builds the storage service and, when one is configured, the CA
 // key provider, from an already-resolved server configuration.
 //
@@ -153,13 +183,15 @@ func resolveRuntime(ctx context.Context, cfg *serverConfig, withKeyProvider bool
 	rt.storeClosers = append(rt.storeClosers, store.Backend().Close)
 
 	if withKeyProvider && cfg.UsesOpenBao() {
-		tm, provider, err := newOpenBaoKeyProvider(ctx, cfg)
+		closeSession, provider, err := newKeyProvider(ctx, cfg)
 		if err != nil {
 			_ = rt.Close()
 			return nil, fmt.Errorf("initialising OpenBao key provider: %w", err)
 		}
 		rt.KeyProvider = provider
-		rt.keyClosers = append(rt.keyClosers, tm.Close)
+		// The key-lifetime group, not the store's: the signer goes on signing
+		// through this session long after CloseStore has released the backend.
+		rt.keyClosers = append(rt.keyClosers, closeSession)
 	}
 
 	return rt, nil
