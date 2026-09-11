@@ -417,6 +417,15 @@ var _ = Describe("A managed-certificate spec", func() {
 		Expect(spec.Validate()).To(MatchError(ContainSubstring("renew_before must be positive")))
 	})
 
+	It("refuses a spec with no DNS names", func() {
+		// With no CN promotion on this path, an empty list yields a certificate
+		// carrying no subjectAltName extension at all -- refused by every RFC
+		// 2818 client for every name, including its own certname, while looking
+		// perfectly well-formed. Refused as configuration instead.
+		spec.DNSNames = nil
+		Expect(spec.Validate()).To(MatchError(ContainSubstring("at least one DNS name is required")))
+	})
+
 	It("refuses a negative ttl", func() {
 		// Not merely nonsense: issueLeafLocked's `if ttl > 0` would silently
 		// discard it and substitute the CA default, so without this arm a
