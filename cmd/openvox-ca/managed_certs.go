@@ -37,23 +37,29 @@ import (
 // puppetca_leaf_certificate_not_after_timestamp_seconds covers its expiry and
 // the shipped expiry alerts cover it with no new series.
 //
-// Two outcomes that reasoning does not reach:
+// One outcome that reasoning does not reach: an entry that has never issued at
+// all -- a store that never accepts a write. There is no series for a
+// certificate that does not exist, so no PromQL comparison can match its
+// absence; the Kubernetes exporter has the same hole and closes it with a
+// dedicated "not running" rule. The managed mechanism needs the equivalent.
 //
-//   - An entry that has never issued at all -- a store that never accepts a
-//     write. There is no series for a certificate that does not exist, so no
-//     PromQL comparison can match its absence; the Kubernetes exporter has the
-//     same hole and closes it with a dedicated "not running" rule.
-//   - A certificate a managed issuance displaced. It stays valid but it is no
-//     longer at cert/<subject>, and the leaf series are built per subject by
-//     walking ListCerts -- so its expiry series simply stops being exported and
-//     the shipped expiry alerts can never fire for it. This is the worse of the
-//     two: a live credential that leaves the series it was in, rather than one
-//     that never enters them, and its only trace is a Warn line that does not
-//     repeat, because the next pass finds the store and the record in
-//     agreement and never re-checks.
+// Displacement is NOT a second such outcome, though it reads like one. When a
+// managed issuance replaces a certificate the CA already held for that name,
+// the subject keeps its expiry series without interruption -- the new
+// certificate is at cert/<subject> and in the inventory like any other, so
+// ListCerts finds it and the shipped expiry alerts apply to it as normal. What
+// stops being exported is the *displaced* certificate's own expiry series, and
+// that is not a loss: an expiry alert for a certificate an operator has
+// deliberately replaced is noise, not signal. It is supposed to expire.
 //
-// The managed mechanism needs the equivalent of that "not running" rule, and
-// something durable for the displacement.
+// What displacement does leave is narrower and not a metrics problem. The
+// displaced certificate stays valid, keeps its inventory row, and is no longer
+// what `revoke --certname` resolves to -- so retiring it early needs its
+// serial, which warnIfDisplacingUnderSubjectLock logs at the time along with
+// the remedy. An operator who missed that line can still find it as a second
+// inventory row under one subject. That is a discoverability wrinkle in a
+// situation the operator configured and was warned about, which is why it gets
+// a log line rather than a series.
 //
 // It is not added here because nothing configures a managed certificate yet: a
 // counter would be permanently zero on every deployment, and docs/metrics.md
