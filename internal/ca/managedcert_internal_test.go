@@ -28,6 +28,7 @@ import (
 	"crypto/ecdsa"
 	"crypto/elliptic"
 	"crypto/rand"
+	"crypto/rsa"
 	"crypto/x509"
 	"crypto/x509/pkix"
 	"encoding/pem"
@@ -445,6 +446,18 @@ var _ = Describe("A managed-certificate spec", func() {
 			ContainSubstring("at least one subject alternative name is required")))
 	})
 
+	It("refuses more non-DNS names than the DNS cap allows", func() {
+		// The DNS names are bounded by validateDNSAltNames; nothing downstream
+		// bounds the other three, and the count is what reaches the certificate.
+		many := make([]net.IP, maxDNSAltNames+1)
+		for i := range many {
+			many[i] = net.ParseIP("192.0.2.1")
+		}
+		spec.IPAddresses = many
+		Expect(spec.Validate()).To(MatchError(
+			ContainSubstring("too many non-DNS alternative names")))
+	})
+
 	It("refuses a nil URI entry", func() {
 		// A nil *url.URL would be dereferenced in leafCarriesNames and in
 		// marshalling. The reconcile loop has no recover, so that is the
@@ -491,6 +504,58 @@ var _ = Describe("A managed-certificate spec", func() {
 	It("allows a ttl of zero, which inherits the CA's configured leaf lifetime", func() {
 		spec.TTL = 0
 		Expect(spec.Validate()).To(Succeed())
+	})
+})
+
+var _ = Describe("Resolving the leaf key configuration", func() {
+	// The bug leafKeyConfig exists to prevent: `leaf_key_size: 4096` with no
+	// `leaf_key_algo` yields KeyConfig{Algo: "", Size: 4096}, which the server
+	// accepts at startup. The old generate.go rule tested Algo alone and
+	// discarded the size, issuing RSA 2048, while the managed path honoured it
+	// and issued RSA 4096 -- two key sizes on one CA.
+	//
+	// Both call sites are pinned, because one resolver serving two paths is only
+	// safe while both actually use it.
+	var (
+		ctx  context.Context
+		myCA *CA
+	)
+
+	BeforeEach(func() {
+		ctx = context.Background()
+		myCA = New(storage.New(GinkgoT().TempDir()), AutosignConfig{Mode: "off"}, "puppet.test")
+		myCA.CAKeyConfig = KeyConfig{Algo: KeyAlgoECDSA, Size: 256}
+		// Size without Algo: the historical bug's exact input.
+		myCA.LeafKeyConfig = KeyConfig{Size: 4096}
+		Expect(myCA.Init(ctx)).To(Succeed())
+	})
+
+	It("honours a size configured without an algorithm", func() {
+		Expect(myCA.leafKeyConfig()).To(Equal(KeyConfig{Size: 4096}),
+			"dropping the Size test here silently downgrades every leaf to the default")
+	})
+
+	It("reaches GenerateWithOptions, which used to discard the size", func() {
+		res, err := myCA.Generate(ctx, "generated.test", []string{"generated.test"})
+		Expect(err).NotTo(HaveOccurred())
+		block, _ := pem.Decode(res.CertificatePEM)
+		Expect(block).NotTo(BeNil())
+		crt, perr := x509.ParseCertificate(block.Bytes)
+		Expect(perr).NotTo(HaveOccurred())
+		rsaKey, ok := crt.PublicKey.(*rsa.PublicKey)
+		Expect(ok).To(BeTrue(), "an empty Algo means RSA")
+		Expect(rsaKey.N.BitLen()).To(Equal(4096),
+			"the configured size must reach the generated key, not be replaced by the default")
+	})
+
+	It("reaches the managed path through keyConfigFor", func() {
+		Expect(myCA.keyConfigFor(CertSpec{})).To(Equal(KeyConfig{Size: 4096}))
+	})
+
+	It("still prefers an entry's own setting over the CA's", func() {
+		Expect(myCA.keyConfigFor(CertSpec{
+			KeyConfig: KeyConfig{Algo: KeyAlgoECDSA, Size: 384},
+		})).To(Equal(KeyConfig{Algo: KeyAlgoECDSA, Size: 384}))
 	})
 })
 

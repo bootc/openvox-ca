@@ -95,6 +95,9 @@ memory_budget_percent: 0     # share of a cgroup ceiling the tree may claim; 0 =
 ca_key_algo: ""       # "rsa" (default) or "ecdsa"
 ca_key_size: 0        # RSA: 2048/3072/4096 (default 4096); ECDSA: 256/384/521 (default 256)
 leaf_key_algo: ""     # "rsa" (default) or "ecdsa"
+# Either key may be set without the other: a size with no algorithm means that
+# size with the default algorithm (RSA). A size the chosen algorithm does not
+# accept is refused at startup.
 leaf_key_size: 0      # RSA: 2048/3072/4096 (default 2048); ECDSA: 256/384/521 (default 256)
 # CA certificate subject fields (applied only when bootstrapping a new CA).
 ca_subject_org: ""

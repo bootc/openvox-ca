@@ -30,6 +30,7 @@ import (
 	"crypto/x509"
 	"encoding/pem"
 	"fmt"
+	"io/fs"
 	"log/slog"
 	"math/big"
 	"net"
@@ -217,11 +218,18 @@ var _ = Describe("Reconciling a managed certificate", func() {
 			Expect(os.IsNotExist(statErr)).To(BeTrue(),
 				"a managed certificate's key must not be written to the cadir")
 
-			entries, err := os.ReadDir(filepath.Join(storeDir, "private"))
-			if err == nil {
-				for _, e := range entries {
-					Expect(e.Name()).NotTo(ContainSubstring(subject))
-				}
+			// The whole assertion is a negative, so a discarded read error would
+			// make it pass by never looking. fs.ErrNotExist is the one arm that
+			// proves the point rather than failing to test it: no private
+			// directory at all is the strongest form of "no key was written".
+			entries, rerr := os.ReadDir(filepath.Join(storeDir, "private"))
+			if rerr != nil {
+				Expect(rerr).To(MatchError(fs.ErrNotExist),
+					"the only acceptable read failure here is an absent directory; "+
+						"anything else means this assertion looked at nothing")
+			}
+			for _, e := range entries {
+				Expect(e.Name()).NotTo(ContainSubstring(subject))
 			}
 		})
 	})

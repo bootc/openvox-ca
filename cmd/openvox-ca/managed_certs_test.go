@@ -256,6 +256,22 @@ var _ = Describe("The leaf backdate and reconcile interval settings", func() {
 			"a value large enough to wrap the nanosecond multiply must be refused before it can")
 	})
 
+	It("refuses a reconcile interval beyond the ceiling", func() {
+		// Worse than the backdate's overflow, which is why it is bounded too: a
+		// wrapped product that lands non-positive reaches time.NewTicker, which
+		// panics inside the reconcile goroutine with nothing to recover it --
+		// a config typo taking the whole server down.
+		setEnv("PUPPET_CA_MANAGED_CERT_INTERVAL_SEC", "31536000")
+		_, err := loadServerConfig("")
+		Expect(err).To(MatchError(ContainSubstring("managed_cert_interval_sec must not exceed")))
+
+		clearServerEnv()
+		setEnv("PUPPET_CA_MANAGED_CERT_INTERVAL_SEC", "99999999999")
+		_, err = loadServerConfig("")
+		Expect(err).To(MatchError(ContainSubstring("managed_cert_interval_sec must not exceed")),
+			"applyServerEnv's n > 0 gate does not block a value large enough to wrap")
+	})
+
 	It("defaults the reconcile interval, and takes a configured one", func() {
 		cfg, err := loadServerConfig("")
 		Expect(err).NotTo(HaveOccurred())
