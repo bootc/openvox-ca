@@ -606,6 +606,22 @@ linters:
 			Expect(err.Error()).To(ContainSubstring(movedPin))
 		})
 
+		// The fourth compile-error arm, and the one missed when the other
+		// three were closed: swallowing it left all 183 specs green while an
+		// uncompilable paths-except entry would have been skipped, and a list
+		// that then matched nothing would have read as excluding the file from
+		// every linter.
+		It("rejects an exclusions.paths-except entry that is not a valid regexp", func() {
+			bad := []byte(`
+linters:
+  exclusions:
+    paths-except:
+      - 'internal/ca/['
+`)
+			Expect(verifyNolintlintCarveOutIn(bad, ci)).To(MatchError(
+				ContainSubstring(`exclusions.paths-except entry "internal/ca/[" is not a valid regexp`)))
+		})
+
 		It("rejects an exclusions.paths entry that is not a valid regexp", func() {
 			bad := []byte(`
 linters:
