@@ -131,6 +131,36 @@ stub_path_without() {
     printf '%s' "$d"
 }
 
+# A stub PATH carrying a deterministic stand-in for diff.
+#
+# assert_files_identical is a dispatch on diff's exit status -- 0 identical, 1
+# differing, anything higher could-not-answer -- so what these specs must control
+# is that status, not diff's own comparison. Driving it with a stand-in also makes
+# them host-independent: a bare CentOS Stream 10 has no diff at all (the very
+# thing this PR is about), and specs relying on the host's diff failed there while
+# passing on macOS and Ubuntu. The real-diff rc=0 path is covered by the container
+# suite, which runs the assertion against genuine diffutils.
+stub_path_with_fake_diff() {
+    local d; d=$(stub_path_without "diff")
+    cat > "$d/diff" <<'FAKEDIFF'
+#!/bin/bash
+# Stand-in for `diff -q A B`: exit 0 when the contents match, 1 when they do not.
+#
+# Reads the files with bash's own $(< file) and nothing else. It must not call a
+# single external command: it runs with the stub directory AS the whole PATH, and
+# every command in there that the helper only looks for is a generated `exit 0`
+# script. An earlier version used `cat` and so compared two empty strings, which
+# made a differing pair report as identical -- the stub PATH turning a spec green
+# for a reason unrelated to the code under test.
+while [ "${1#-}" != "$1" ]; do shift; done
+if [ "$(< "$1")" = "$(< "$2")" ]; then exit 0; fi
+printf 'Files %s and %s differ\n' "$1" "$2"
+exit 1
+FAKEDIFF
+    chmod +x "$d/diff"
+    printf '%s' "$d"
+}
+
 printf '# test/fixture-commands.sh regression suite\n\n'
 
 # -- 1: the contract is satisfied by this host (sanity: the rest means nothing
@@ -314,21 +344,25 @@ case "$_out" in
     *) fail "fixture_missing_assert fails, counting one failure, when a command was missing" "$_out" ;;
 esac
 
-# -- 10: the commands that must never leave the contract ------------------------
-# The size check alone cannot catch a deliberate symmetric edit -- deleting an
-# entry and decrementing FIXTURE_COMMANDS_EXPECTED together passes it. These are
-# the entries whose loss would retire a known failure, asserted by name so that
-# removing one means editing this suite and saying why.
-# shellcheck disable=SC1090
-_missing_required=$(bash -c ". '$HELPER'
-for c in diff curl openssl python3 find sed grep bash sh mktemp; do
-    case \" \${FIXTURE_COMMANDS[*]} \" in *\" \$c \"*) ;; *) printf '%s ' \"\$c\" ;; esac
-done")
-if [ -z "$_missing_required" ]; then
-    pass "the contract still names every command a known failure depends on"
+# -- 10: the contract's exact membership ---------------------------------------
+# The size check cannot catch a deliberate symmetric edit -- deleting an entry and
+# decrementing FIXTURE_COMMANDS_EXPECTED together satisfies it -- nor a
+# count-preserving substitution, such as curl becoming wget. So membership is
+# pinned here, as a set.
+#
+# All 28, not a chosen subset. An earlier version locked 10 and read as though it
+# locked the contract: a guard covering part of a set is indistinguishable from
+# one covering the set, and the eighteen unlisted entries could have been
+# substituted freely. The duplication is the point -- changing the contract now
+# means changing this list and saying why in the commit.
+_expected_contract="bash basename cat chmod cp curl cut date diff dirname find grep head ls mkdir mktemp openssl python3 rm sed seq sh sleep sort tail touch tr wc"
+_actual_contract=$(bash -c ". '$HELPER'; printf '%s\n' \"\${FIXTURE_COMMANDS[@]}\"" | sort | tr '\n' ' ' | sed 's/ $//')
+_expected_sorted=$(printf '%s\n' $_expected_contract | sort | tr '\n' ' ' | sed 's/ $//')
+if [ "$_actual_contract" = "$_expected_sorted" ]; then
+    pass "the contract's membership is exactly what this suite pins"
 else
-    fail "the contract still names every command a known failure depends on" \
-         "absent from FIXTURE_COMMANDS: $_missing_required"
+    fail "the contract's membership is exactly what this suite pins" \
+         "only in contract: $(comm -13 <(printf '%s\n' $_expected_sorted) <(printf '%s\n' $_actual_contract) | tr '\n' ' ')| only pinned here: $(comm -23 <(printf '%s\n' $_expected_sorted) <(printf '%s\n' $_actual_contract) | tr '\n' ' ')"
 fi
 
 # -- 11: the handler's message cannot satisfy any of the suite's output greps ---
@@ -340,12 +374,22 @@ fi
 # The alternation is DERIVED from the suite rather than copied into this file. A
 # hand-written copy covered five of the twelve assertions and would have stayed
 # green while the handler's wording drifted into one of the other seven.
-_patterns=$(grep -oE "grep -q[i]*E '[^']+'" "$_here/integration-compose.sh" \
-    | sed "s/.*E '//; s/'$//" | tr '|' '\n' | sort -u | paste -sd '|' -)
-_npat=$(grep -cE "grep -q[i]*E '" "$_here/integration-compose.sh")
-# Proved usable, not merely non-empty: a pattern set that grep refuses would make
-# every comparison below vacuous.
-if [ -z "$_patterns" ] || ! printf 'error\n' | grep -qiE -e "$_patterns"; then
+# Both quote styles. An earlier version matched only single quotes and so missed
+# integration-compose.sh:347, `grep -qiE "signed|Signed"` -- 12 of 13. The count
+# comparison below is what makes that class of miss fail rather than shrink the
+# guard silently.
+_extracted=$(grep -oE "grep -q[i]*E ('[^']+'|\"[^\"]+\")" "$_here/integration-compose.sh")
+_nfound=$(printf '%s\n' "$_extracted" | grep -c .)
+_ntotal=$(grep -cE "grep -q[i]*E " "$_here/integration-compose.sh")
+_patterns=$(printf '%s\n' "$_extracted" \
+    | sed -E "s/.*E ('|\")//; s/('|\")\$//" | tr '|' '\n' | sort -u | paste -sd '|' -)
+# Three ways the extraction itself can be wrong, each of which would make the
+# comparison below vacuous: it found nothing, it found fewer assertions than the
+# file contains (a quoting style it does not match), or grep refuses the set.
+if [ "$_nfound" -ne "$_ntotal" ]; then
+    fail "the handler's message matches none of the suite's output greps" \
+         "extracted $_nfound of $_ntotal grep assertions; a quoting style is unmatched, so the check is incomplete"
+elif [ -z "$_patterns" ] || ! printf 'error\n' | grep -qiE -e "$_patterns"; then
     fail "the handler's message matches none of the suite's output greps" \
          "extracted pattern set is empty or unusable by grep: [$_patterns]"
 else
@@ -357,11 +401,77 @@ else
     # the dishonesty this file exists to catch, committed by the catcher.
     if printf '%s' "$_msg" | grep -qiE -e "$_patterns"; then
         fail "the handler's message matches none of the suite's output greps" \
-             "matches one of the $_npat assertions' patterns: $_msg"
+             "matches one of the $_ntotal assertions' patterns: $_msg"
     else
         pass "the handler's message matches none of the suite's output greps"
     fi
 fi
+
+# -- 12: assert_files_identical -- all three branches -------------------------
+# This is the assertion #316 exists to fix, and in the container only its rc=0
+# branch ever runs: the imported bytes are always identical there, so rc=1 and
+# rc>=2 are dead in CI exactly as the collapsed `diff -q` line was before the
+# defect was found. A wrong comparison, or a message that swallowed diff's
+# stderr, would reproduce that defect with nothing to catch it. So all three are
+# driven here.
+_tap_harness='T=0; FAILURES=0
+pass() { T=$((T+1)); printf "ok %d - %s\n" "$T" "$1"; }
+fail() { T=$((T+1)); FAILURES=$((FAILURES+1)); printf "not ok %d - %s\n" "$T" "$1"
+         [ -n "${2:-}" ] && printf "  # %s\n" "$2"; return 0; }'
+
+printf 'same\n' > "$WORK_DIR/afi-a"
+printf 'same\n' > "$WORK_DIR/afi-b"
+printf 'different\n' > "$WORK_DIR/afi-c"
+
+_fakediff_path=$(stub_path_with_fake_diff)
+
+# rc=0
+_out=$(PATH="$_fakediff_path" run_helper "$_tap_harness
+assert_files_identical 'cert matches source' '$WORK_DIR/afi-a' '$WORK_DIR/afi-b' 'they differ'
+echo FAILURES=\$FAILURES")
+case "$_out" in
+    *"not ok 1"*) fail "assert_files_identical passes on identical files" "reported a failure: $_out" ;;
+    *"ok 1 - cert matches source"*FAILURES=0*) pass "assert_files_identical passes on identical files" ;;
+    *) fail "assert_files_identical passes on identical files" "$_out" ;;
+esac
+
+# rc=1 -- must report the CONTENT mismatch, using the caller's detail
+_out=$(PATH="$_fakediff_path" run_helper "$_tap_harness
+assert_files_identical 'cert matches source' '$WORK_DIR/afi-a' '$WORK_DIR/afi-c' 'imported cert differs from the source'
+echo FAILURES=\$FAILURES")
+case "$_out" in
+    *"not ok 1 - cert matches source"*"imported cert differs from the source"*FAILURES=1*)
+        pass "assert_files_identical reports a content mismatch when the files differ" ;;
+    *) fail "assert_files_identical reports a content mismatch when the files differ" "$_out" ;;
+esac
+
+# rc=127 -- must NOT claim the files differ. The stub directory IS the whole
+# PATH: prepending would leave the real diff reachable and prove nothing.
+_nodiff_path=$(stub_path_without "diff")
+_out=$(PATH="$_nodiff_path" run_helper "$_tap_harness
+assert_files_identical 'cert matches source' '$WORK_DIR/afi-a' '$WORK_DIR/afi-b' 'imported cert differs from the source'
+echo FAILURES=\$FAILURES")
+case "$_out" in
+    *"imported cert differs"*)
+        fail "assert_files_identical blames diff, not the files, when diff is absent" \
+             "it claimed the files differ: $_out" ;;
+    *"not ok 1 - cert matches source"*"diff could not run (exit 127)"*FAILURES=1*)
+        pass "assert_files_identical blames diff, not the files, when diff is absent" ;;
+    *) fail "assert_files_identical blames diff, not the files, when diff is absent" "$_out" ;;
+esac
+
+# The captured stderr must survive into the detail, because that is what names
+# the cause. Note what it actually says: because this helper is sourced, Bash
+# routes the unresolvable `diff` to command_not_found_handle, so the detail
+# carries the FIXTURE diagnostic -- which names the command AND the file to edit
+# -- rather than Bash's bare "command not found". Asserting the actionable half
+# rather than a particular shell's wording.
+case "$_out" in
+    *"diff could not run"*"diff is not installed"*"test/Dockerfile.run"*)
+        pass "the failure detail carries diff's stderr, naming the command and the file to edit" ;;
+    *) fail "the failure detail carries diff's stderr, naming the command and the file to edit" \
+            "detail did not name the cause: $_out" ;;
+esac
 
 # -- Results ------------------------------------------------------------------
 printf '\n1..%d\n' "$T"

@@ -58,7 +58,9 @@ FROM quay.io/centos/centos:stream10
 # This list is enforced at runtime, not taken on trust: test/fixture-commands.sh
 # carries the same set as commands and both in-container suites assert it before
 # doing any work. Declaring a package here without adding its commands there
-# leaves the check blind, so change the two together. The mutations that prove
+# leaves the check blind, and the contract also carries its own expected size --
+# so adding a command is three edits: the package here, the entry there, and
+# FIXTURE_COMMANDS_EXPECTED alongside it. The mutations that prove
 # those guards still fail are registered in docs/development/testing.md,
 # "Fixture image command contract".
 #

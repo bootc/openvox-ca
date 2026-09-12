@@ -35,9 +35,11 @@
 # disguised as a defect in the thing under test.
 #
 # This is the command-level half of a pair. test/Dockerfile.run declares the
-# *packages*; this declares the *commands* those packages have to deliver.
-# Changing one without the other either leaves the check blind or fails the
-# preflight, which is the intended coupling. The lists are deliberately the
+# *packages*; this declares the *commands* those packages have to deliver, and
+# FIXTURE_COMMANDS_EXPECTED below declares how many. Adding a command therefore
+# means three edits, not two -- the package, the entry, and the count -- and
+# leaving any of them out either blinds the check or fails the preflight, which
+# is the intended coupling. The lists are deliberately the
 # union across every suite that runs in the image: it describes the image's
 # contract, not any one script's needs.
 #
@@ -209,6 +211,38 @@ fixture_missing_assert() {
         pass "$desc"
     else
         fail "$desc" "$_missing"
+    fi
+    return 0
+}
+
+# assert_files_identical DESC FILE_A FILE_B [DIFFER_DETAIL]
+#
+# One TAP assertion over `diff`, reading its exit status instead of collapsing it.
+# diff answers 0 for identical, 1 for differing, and >= 2 when it could not
+# answer at all -- 127 when the binary is absent entirely. The idiom this
+# replaces, `diff -q A B >/dev/null 2>&1 && pass || fail`, maps every one of
+# those onto "the files differ": that is how a dropped diffutils package
+# presented as a certificate-content mismatch on files that were byte for byte
+# identical, and it is the defect #316 exists to fix.
+#
+# It lives in this file, rather than inline in the suite that calls it, for one
+# reason: the branches that matter only run when something has already gone
+# wrong, so in the container they never execute. Here they can be driven
+# host-side, and test/fixture-commands-test.sh drives all three. An untested
+# rc comparison, or a message that swallowed diff's stderr, would reproduce the
+# original defect in new clothes with nothing to catch it.
+#
+# Uses the caller's pass/fail, as fixture_missing_assert does.
+assert_files_identical() {
+    local desc="$1" a="$2" b="$3" differ="${4:-}" _err _rc
+    _err=$(diff -q "$a" "$b" 2>&1 >/dev/null)
+    _rc=$?
+    if [ "$_rc" -eq 0 ]; then
+        pass "$desc"
+    elif [ "$_rc" -eq 1 ]; then
+        fail "$desc" "${differ:-$a and $b differ}"
+    else
+        fail "$desc" "diff could not run (exit $_rc): ${_err:-no stderr}"
     fi
     return 0
 }

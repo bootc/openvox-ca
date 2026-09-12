@@ -803,25 +803,13 @@ openvox-ca-ctl import \
     && pass "openvox-ca-ctl import creates private/ca_key.pem" \
     || fail "openvox-ca-ctl import creates private/ca_key.pem"
 
-# Verify the imported cert is identical to what we passed in.
-#
-# diff's exit status is read rather than collapsed: 0 is identical, 1 is
-# differing, and anything higher means diff could not answer -- 127 when the
-# binary is absent entirely. `>/dev/null 2>&1 && pass || fail` maps all of those
-# onto "the files differ", which is how a dropped diffutils package presented as
-# a certificate-content mismatch on byte-identical files (#316). stderr is kept
-# so the failure can say which of the two it was.
-_imp_diff_err=$(diff -q "$_IMP_DIR/ca.crt" "$_IMP_DEST/ca_crt.pem" 2>&1 >/dev/null)
-_imp_diff_rc=$?
-if [ "$_imp_diff_rc" -eq 0 ]; then
-    pass "openvox-ca-ctl import cert file matches source"
-elif [ "$_imp_diff_rc" -eq 1 ]; then
-    fail "openvox-ca-ctl import cert file matches source" \
-         "imported cert differs from the source passed to --cert-bundle"
-else
-    fail "openvox-ca-ctl import cert file matches source" \
-         "diff could not run (exit $_imp_diff_rc): ${_imp_diff_err:-no stderr}"
-fi
+# Verify the imported cert is identical to what we passed in. The comparison is
+# assert_files_identical, from test/fixture-commands.sh, which distinguishes
+# "the files differ" from "diff could not answer" -- see the note there, and
+# test/fixture-commands-test.sh, which exercises all three of its branches.
+assert_files_identical "openvox-ca-ctl import cert file matches source" \
+    "$_IMP_DIR/ca.crt" "$_IMP_DEST/ca_crt.pem" \
+    "imported cert differs from the source passed to --cert-bundle"
 
 # A CA can be started from the imported directory
 openvox-ca-ctl setup --cadir "$_IMP_DEST" --hostname "existing" >/dev/null 2>&1

@@ -231,19 +231,22 @@ not either published image, and its package list exists for the suites rather
 than for `openvox-ca` — which needs none of it, being statically linked.
 
 The contract is split across two files on purpose, and they have to move
-together:
+together — three declarations in all:
 
 - **`test/Dockerfile.run`** declares the **packages**, each annotated with the
   commands it provides.
 - **`test/fixture-commands.sh`** declares the **commands** those packages must
-  deliver, and asserts them. `require_fixture_commands` runs before either
+  deliver and **how many** there should be (`FIXTURE_COMMANDS_EXPECTED`), and
+  asserts both. `require_fixture_commands` runs before either
   in-container suite does any work; `command_not_found_handle` catches a command
   nobody wrote down, on a path nobody enumerated; `fixture_missing_assert` turns
   what it caught into one TAP assertion at the end of the run.
 
-**Adding a command to an in-container script means adding it to both files.**
-Declaring a package without adding its commands leaves the check blind; adding a
-command without its package fails the preflight. Six scripts run in the image —
+**Adding a command to an in-container script means three edits: the providing
+package in `test/Dockerfile.run`, the entry in `FIXTURE_COMMANDS`, and the
+`FIXTURE_COMMANDS_EXPECTED` count beside it.** Declaring a package without adding
+its commands leaves the check blind; adding a command without its package fails
+the preflight; adding one without bumping the count fails the size check. Six scripts run in the image —
 `test/integration-compose.sh`, `test/migration/migration-test.sh`, the
 `test/migration/http-helpers.sh` it sources, the two
 `docker/puppet/ca-entrypoint*.sh`, and `test/fixture-commands.sh` itself — and two
