@@ -130,21 +130,31 @@ BRANCHES=(
   local/integration-setup
 
   origin/feature/316-separate-fixture-image  # PR #323 — issue #316
+  origin/docs/copyright-header-convention  # PR #343
 
-  # #312 collides with BOTH neighbours and sits between them deliberately:
-  # with #327 on cmd/openvox-ca/runtime.go, and with #322 on
-  # docs/development/locking.md. The locking.md collision is DISJOINT ROWS of
-  # the lock-name table — #312 changes hmac-key, capability-probe and
-  # store-instance; #322 changes crl and subject:<name>. Keep both sides, one
-  # row each; do not pick a side.
+  # Two hubs now have THREE collision partners each, so no linear order makes
+  # either adjacent to all of them — adjacency is best-effort from here, and
+  # the hard constraints win where they compete.
+  #
+  # #312 collides with #327 (cmd/openvox-ca/runtime.go) and with both #322 and
+  # #336 (docs/development/locking.md). The locking.md collision is the
+  # lock-name table, resolved ROW BY ROW: take whichever side carries the newer
+  # claim for each row rather than picking a side. #336 inherits #322's rows,
+  # being stacked on it, so the same resolution serves both.
   origin/feature/306-signer-drops-store   # PR #327 — issue #306
   origin/feature/188-rebuild-inventory-hmac  # PR #312 — issue #188
   origin/feature/242-managed-certificates  # PR #322 — issue #242
 
-  # #282 likewise collides with both neighbours: with #325 on magefile_test.go
-  # and with #266 on magefile.go. #266 must follow #282 regardless — it wires
-  # release.yml to call `mage build:packages`, which #282 provides, and its own
-  # PR body says so.
+  # STACKED on #322 and must follow it — its own PR body says so, and #322's
+  # head is an ancestor of it.
+  origin/feature/243-component-certificate-stores  # PR #336 — issue #243
+
+  # #282 also has three partners: #325 (magefile_test.go), #266 (magefile.go)
+  # and #336 (README.md, packaging/systemd/openvox-ca.service). It sits between
+  # the first two; #336 is upstream of it and out of reach.
+  #
+  # #266 must follow #282 regardless — it wires release.yml to call
+  # `mage build:packages`, which #282 provides, and its own PR body says so.
   origin/fix/313-nolintlint-g703-flake    # PR #325 — issue #313
   origin/feature/package-payload          # PR #282
   origin/feature/release-packaging        # PR #266
