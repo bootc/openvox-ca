@@ -600,6 +600,38 @@ var _ = Describe("Reconciling a managed certificate", func() {
 		Expect(fake.saveCount()).To(BeZero())
 	})
 
+	It("reconciles one entry through the exported call", func() {
+		// The exported entry point exists so a caller needing one certificate
+		// does not pay N LockTimeout budgets for the rest -- the case that
+		// matters is a certificate that gates a listener binding. It must behave
+		// exactly as a pass inside ReconcileManaged, so this asserts the whole
+		// contract and not merely that it compiles.
+		issued, err := myCA.ReconcileManagedCert(ctx, entry)
+		Expect(err).NotTo(HaveOccurred())
+		Expect(issued).To(BeTrue())
+		Expect(fake.stored().Subject.CommonName).To(Equal(subject))
+		Expect(store.HasCert(ctx, subject)).To(BeTrue(),
+			"the certificate must be recorded like any other issuance")
+
+		// And it is idempotent in the same way: a second call finds the
+		// certificate current rather than issuing again.
+		issued, err = myCA.ReconcileManagedCert(ctx, entry)
+		Expect(err).NotTo(HaveOccurred())
+		Expect(issued).To(BeFalse())
+	})
+
+	It("validates the entry in the exported call too", func() {
+		// A caller reaching one entry directly must not skip the refusals a
+		// pass inside ReconcileManaged applies.
+		bad := entry
+		bad.Spec.DNSNames = nil
+		bad.Spec.IPAddresses = nil
+		issued, err := myCA.ReconcileManagedCert(ctx, bad)
+		Expect(err).To(MatchError(
+			ContainSubstring("at least one subject alternative name is required")))
+		Expect(issued).To(BeFalse())
+	})
+
 	It("refuses an entry with no store configured, without panicking", func() {
 		// A nil Load would be called inside the subject lock, and
 		// reconcileManagedOnce has no recover -- so the panic would take the

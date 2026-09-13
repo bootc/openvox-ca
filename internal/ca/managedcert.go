@@ -588,6 +588,32 @@ func leafCarriesUsages(leaf *x509.Certificate, want CertSpec) bool {
 	return slices.Equal(got, wanted)
 }
 
+// ReconcileManagedCert reconciles ONE entry: load, decide, and issue if the
+// decision says so. It reports whether it issued.
+//
+// Exported because a caller can need one certificate and not the rest, and
+// paying for the rest is not free. Each entry's work is bounded by its own
+// LockTimeout, so a full ReconcileManaged over N entries can take up to N of
+// those budgets — and a caller that needs a certificate before it can do
+// something else, such as bind a listener, would spend that whole time waiting
+// on entries irrelevant to it. This keeps that cost at exactly one budget
+// however many certificates a deployment configures.
+//
+// A caller doing that should not expect the background loop's own first pass to
+// be free afterwards: it runs immediately at startup and will re-take the same
+// lock and re-read the same store moments later, finding the certificate
+// current and doing nothing. That is one redundant acquisition per entry, not a
+// correctness problem, but it is the reason to reconcile the one entry that
+// gates startup rather than to reach for the whole set.
+//
+// Same contract as a pass inside ReconcileManaged in every other respect: the
+// entry's spec is validated, the work is serialised on that subject's cluster
+// lock, and a replica that loses the race reads what the winner wrote and does
+// nothing. The caller must NOT hold c.mu.
+func (c *CA) ReconcileManagedCert(ctx context.Context, m ManagedCert) (bool, error) {
+	return c.reconcileManagedCert(ctx, m, time.Now().UTC())
+}
+
 // ReconcileManaged runs one pass over c.ManagedCerts, issuing whatever is due.
 // It reports how many certificates it issued.
 //
@@ -613,7 +639,7 @@ func (c *CA) ReconcileManaged(ctx context.Context) (int, error) {
 	issued := 0
 	var firstErr error
 	for _, m := range c.ManagedCerts {
-		did, err := c.reconcileManagedCert(ctx, m, time.Now().UTC())
+		did, err := c.ReconcileManagedCert(ctx, m)
 		if err != nil {
 			slog.Warn("Managed certificate not reconciled",
 				"subject", m.Spec.Subject, "error", err)
