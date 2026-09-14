@@ -297,9 +297,12 @@ response, or a certificate found in the cadir — quote it.** `import-cert`'s
 summary, `checkHTTP`'s error body and `sign --all`'s list are all quoted
 because the *server* chose theirs, and `setup`'s CN line because it reports a
 subject read back off whatever certificate is already in the cadir. Each has a
-spec that fails if the quoting is removed — the last is
-`cmd/openvox-ca-ctl/setup_test.go`, "quotes a subject read off disk so it
-cannot forge a line", which pins both of that line's branches.
+spec that fails if the quoting is removed. The last needs two, because `setup`
+prints that line from either of two branches and a spec reaches only one of
+them: in `cmd/openvox-ca-ctl/setup_test.go`, "quotes a subject read off disk so
+it cannot forge a line" seeds an existing CA and so pins the load branch, and
+"names the subject of the CA it has just created" pins the bootstrap branch.
+Dropping either `%q` fails one of the two and neither fails the other.
 
 Worded on provenance rather than on who chose the value, because the operator's
 own flags are values this process did not choose either, and those are out of
