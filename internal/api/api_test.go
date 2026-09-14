@@ -1428,6 +1428,47 @@ var _ = Describe("API Workflow", func() {
 			Expect(rr.Body.String()).To(ContainSubstring("never-signed-node"))
 		})
 
+		// The leak guard belongs here rather than beside the spec above, and the
+		// difference is the whole point: for a subject that was simply never
+		// listed, the backends synthesise the not-exist themselves and the cause
+		// names no path, so wrapping it there would leak nothing and an
+		// assertion there would pass whatever the code did. A lost inventory is
+		// the case where the cause is a real *fs.PathError, so it is the only
+		// place the invariant can actually be tested.
+		It("does not leak the storage path into the 404 body when the inventory is lost", func() {
+			subject := "inventory-lost-node"
+			csrPEM, err := testutil.GenerateCSR(subject)
+			Expect(err).NotTo(HaveOccurred())
+			_, err = myCA.SaveRequest(context.Background(), subject, csrPEM)
+			Expect(err).NotTo(HaveOccurred())
+			_, err = myCA.Sign(context.Background(), subject)
+			Expect(err).NotTo(HaveOccurred())
+
+			// Both files: with the integrity MAC left behind the missing blob
+			// fails verification instead, which is a different, counted branch
+			// answering 409 -- and this spec would then pass without ever
+			// reaching the arm it exists to guard.
+			inv := myCA.Storage.InventoryPath()
+			Expect(os.Remove(inv)).To(Succeed())
+			Expect(os.Remove(filepath.Join(filepath.Dir(inv), ".inventory.hmac"))).To(Succeed())
+
+			body, _ := json.Marshal(api.PutStatusBody{DesiredState: "revoked"})
+			req := httptest.NewRequest("PUT", "/certificate_status/"+subject, bytes.NewReader(body))
+			rr := httptest.NewRecorder()
+			mux.ServeHTTP(rr, req)
+
+			Expect(rr.Code).To(Equal(http.StatusNotFound),
+				"a lost inventory reaches the same sentinel, so it answers 404 too")
+			// The invariant the whole design rests on. The sentinel is returned
+			// unwrapped so this cause -- which names a filesystem path -- stays
+			// in the log; restoring the natural-looking wrap
+			// fmt.Errorf("%w: %s: %w", ErrSubjectUnknown, subject, err) serves
+			// that path to any admin-tier caller, and only this assertion
+			// notices. The by-serial specs pin theirs the same way.
+			Expect(rr.Body.String()).NotTo(ContainSubstring(tmpDir),
+				"a CA-side cause may name storage paths; it must stay in the log")
+		})
+
 		// The twin of the above, and the reason the fix cannot simply test for
 		// fs.ErrNotExist at the handler. Every Backend.Get wraps os.ErrNotExist
 		// when a key is absent (storage.Backend's documented contract), so a

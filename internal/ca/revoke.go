@@ -168,9 +168,12 @@ func (c *CA) revokeLocked(ctx context.Context, subject string) error {
 		// signal -- since the read goes through ReadInventory; the structured
 		// backends (SQL, etcd, redis) answer from an indexed lookup, which
 		// verifies nothing, so there the counted cases are connection and query
-		// failures. An *absent* inventory on a blob backend
-		// reaches fs.ErrNotExist and is classed as never-issued, so it is not
-		// counted either. It matters
+		// failures. An *absent* inventory on a blob backend reaches
+		// fs.ErrNotExist, and is classed as never-issued rather than counted,
+		// only when its integrity MAC is absent too; with the MAC present the
+		// read fails verification and is counted by the sentence above. See
+		// ErrSubjectUnknown's godoc, which is where that rule is written out.
+		// It matters
 		// because Clean swallows this error and deletes anyway, so without the
 		// increment a clean silently became delete-without-revoke with one WARN
 		// line and a flat counter, leaving the alert the mixin ships unable to
@@ -195,17 +198,25 @@ func (c *CA) revokeLocked(ctx context.Context, subject string) error {
 			// Log the cause rather than wrap it: the returned value reaches an
 			// HTTP response body, and the underlying error names a storage
 			// path. The security reason applies to the response, not to the
-			// log, so this is WARN rather than debug -- before this sentinel
-			// existed the cause travelled inside the returned error and reached
-			// the WARN both callers already emit (the handler's "Revoke failed"
-			// and Clean's "deleting the certificate anyway"), and debug would
-			// have demoted it below the shipped default verbosity. This arm
+			// log, so the cause is logged here instead of being lost -- before
+			// this sentinel existed it travelled inside the returned error and
+			// reached the WARN both callers already emit (the handler's "Revoke
+			// failed" and Clean's "deleting the certificate anyway"). This arm
 			// moves no counter and now answers 404, so without a default-level
 			// line a lost inventory would be invisible in production: every
 			// revoke would report the subject absent and nothing would say why.
-			// No new log-line class -- both callers log this same event anyway,
-			// this only keeps the cause alongside it.
-			slog.Warn("No inventory entry for subject; revocation cannot proceed",
+			//
+			// Info, not Warn, and the level is the whole argument. Verbosity 0
+			// maps to LevelInfo, so this is in production logs either way; what
+			// Warn would add is a second WARN for every mistyped certname,
+			// beside the one each caller already emits, for a client error the
+			// API now answers 404. The line only carries something the caller's
+			// does not in the rare case -- a lost inventory, where the error is
+			// a real *fs.PathError; in the common one the backends synthesise
+			// the not-exist and it names no path. Level cannot be chosen per
+			// case: the structured backends synthesise *fs.PathError too (with
+			// Path set to the subject), so errors.As cannot tell them apart.
+			slog.Info("No inventory entry for subject; revocation cannot proceed",
 				"subject", subject, "error", err)
 			return fmt.Errorf("%w: %s", ErrSubjectUnknown, subject)
 		}

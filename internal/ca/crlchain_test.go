@@ -529,7 +529,7 @@ var _ = Describe("CRL chain read failures", func() {
 
 		var buf bytes.Buffer
 		orig := slog.Default()
-		slog.SetDefault(slog.New(slog.NewTextHandler(&buf, &slog.HandlerOptions{Level: slog.LevelWarn})))
+		slog.SetDefault(slog.New(slog.NewTextHandler(&buf, &slog.HandlerOptions{Level: slog.LevelInfo})))
 		defer slog.SetDefault(orig)
 
 		Expect(myCA.Clean(ctx, "orphaned.example.com")).To(Succeed(),
@@ -538,12 +538,32 @@ var _ = Describe("CRL chain read failures", func() {
 		_, err = store.GetCert(ctx, "orphaned.example.com")
 		Expect(err).To(HaveOccurred(), "the certificate must be gone from storage")
 
-		Expect(buf.String()).To(ContainSubstring("no inventory entry"),
-			"the WARN must say what was actually observed")
-		Expect(buf.String()).NotTo(ContainSubstring("has been issued"),
+		// Isolate the record before asserting on it. Clean's own warning embeds
+		// the returned error, so a buffer-wide check for the message text --
+		// or for the absence of "has been issued" -- passes whether or not the
+		// line under test was emitted at all. Only the storage path
+		// distinguishes the two records, so scope to the one that should carry
+		// it and the assertions test what their messages claim.
+		var line string
+		for _, l := range strings.Split(buf.String(), "\n") {
+			if strings.Contains(l, "No inventory entry for subject") {
+				line = l
+				break
+			}
+		}
+		Expect(line).NotTo(BeEmpty(),
+			"revokeLocked must log the cause at or above the shipped default verbosity")
+
+		Expect(line).To(ContainSubstring(store.InventoryPath()),
+			"the cause is the only thing separating a lost inventory from a typo'd certname")
+		Expect(line).NotTo(ContainSubstring("has been issued"),
 			"it must not claim an issuance history: the certificate it is deleting is proof otherwise")
-		Expect(buf.String()).To(ContainSubstring(store.InventoryPath()),
-			"the cause must reach WARN; it is the only thing separating a lost inventory from a typo")
+
+		// Clean's own warning must stay truthful too -- it is the one an
+		// operator actually reads about a certificate that was deleted while
+		// still valid, and it renders the sentinel verbatim.
+		Expect(buf.String()).To(ContainSubstring("stays a valid credential until it expires"))
+		Expect(buf.String()).NotTo(ContainSubstring("has been issued"))
 	})
 
 	It("reads the stored blob once per re-sign, not once per purpose", func() {
