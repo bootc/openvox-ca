@@ -1415,8 +1415,16 @@ var _ = Describe("API Workflow", func() {
 			// Assert the body too, for the reason the by-serial spec gives:
 			// ServeMux answers 404 for any path it has no pattern for, so a
 			// status-only assertion would survive this route being deleted.
-			// Anchored to the sentinel so rewording it moves the spec as well.
+			//
+			// Two assertions, deliberately. The sentinel one proves this 404
+			// came from the ErrSubjectUnknown arm rather than from the mux, but
+			// it cannot detect the sentinel being reworded -- expectation and
+			// actual are both derived from it, so it would follow the message
+			// anywhere, including to one that tells an operator nothing (and an
+			// empty sentinel would satisfy it vacuously). The literal is what
+			// pins the operator-visible text, matching the by-serial specs.
 			Expect(rr.Body.String()).To(ContainSubstring(ca.ErrSubjectUnknown.Error()))
+			Expect(rr.Body.String()).To(ContainSubstring("no inventory entry"))
 			Expect(rr.Body.String()).To(ContainSubstring("never-signed-node"))
 		})
 

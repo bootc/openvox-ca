@@ -137,9 +137,12 @@ func (c *CA) Revoke(ctx context.Context, subject string) error {
 // branch through revokeLocked with a certificate in storage (see the hasCert
 // arm in signing.go), and emits this text into an operator warning about
 // deleting that certificate. "No certificate has been issued" would be false
-// there, and on a blob backend an absent inventory blob is indistinguishable
-// from an absent entry in a readable one, so the message does not claim an
-// issuance history the CA cannot see.
+// there. A blob backend can reach it without an issuance history too, when the
+// inventory has gone missing along with its integrity MAC: that is
+// indistinguishable here from an absent entry in a readable inventory. (With
+// the MAC still present the missing blob fails verification instead and leaves
+// by a different, counted branch, so it is the pair going together that lands
+// here.) So the message does not claim an issuance history the CA cannot see.
 var ErrSubjectUnknown = errors.New("no inventory entry for this subject")
 
 // revokeLocked performs the actual CRL read-modify-write. The cluster CRL
@@ -191,11 +194,19 @@ func (c *CA) revokeLocked(ctx context.Context, subject string) error {
 		if errors.Is(err, fs.ErrNotExist) {
 			// Log the cause rather than wrap it: the returned value reaches an
 			// HTTP response body, and the underlying error names a storage
-			// path. Without this the cause is recorded nowhere -- this arm
-			// deliberately does not touch the counter, and the handler logs
-			// only what it is given -- which on a blob backend would leave a
-			// lost inventory looking exactly like an unknown subject.
-			slog.Debug("No inventory entry for subject", "subject", subject, "error", err)
+			// path. The security reason applies to the response, not to the
+			// log, so this is WARN rather than debug -- before this sentinel
+			// existed the cause travelled inside the returned error and reached
+			// the WARN both callers already emit (the handler's "Revoke failed"
+			// and Clean's "deleting the certificate anyway"), and debug would
+			// have demoted it below the shipped default verbosity. This arm
+			// moves no counter and now answers 404, so without a default-level
+			// line a lost inventory would be invisible in production: every
+			// revoke would report the subject absent and nothing would say why.
+			// No new log-line class -- both callers log this same event anyway,
+			// this only keeps the cause alongside it.
+			slog.Warn("No inventory entry for subject; revocation cannot proceed",
+				"subject", subject, "error", err)
 			return fmt.Errorf("%w: %s", ErrSubjectUnknown, subject)
 		}
 		c.crlUpdateFailures.Add(1)

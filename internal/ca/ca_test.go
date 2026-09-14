@@ -640,8 +640,10 @@ var _ = Describe("CA Revocation", func() {
 		// a merely queued revocation can raise the mixin's alert. The whole
 		// claim turns on a spent deadline not being fs.ErrNotExist, which is
 		// the one branch of revokeLocked's split nothing else exercises -- the
-		// two specs above pin never-issued (uncounted) and a corrupt CRL
-		// (counted). An expired context reproduces it without the wait.
+		// no-inventory-entry spec in this Describe pins the uncounted side and
+		// the corrupt-CRL spec pins the counted one, and the unreadable-CRL
+		// twin between them fails after that split rather than at it. An
+		// expired context reproduces it without the wait.
 		csrPEM, err := testutil.GenerateCSR("revoke-deadline-node")
 		Expect(err).NotTo(HaveOccurred())
 		_, err = myCA.SaveRequest(context.Background(), "revoke-deadline-node", csrPEM)
