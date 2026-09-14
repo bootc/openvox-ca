@@ -145,6 +145,13 @@ openvox-ca-ctl reissue-crl
 openvox-ca-ctl generate --certname agent.example.com
 openvox-ca-ctl generate --certname agent.example.com --dns alt.example.com --out-dir /etc/ssl
 
+# --dns is repeatable as well as comma-separated, and the two forms may be
+# mixed. These two are the same request, and take the same arity as `openvox-ca
+# generate --dns` (below) -- the same flag on the same subcommand name in the
+# other binary.
+openvox-ca-ctl generate --certname agent.example.com --dns a.example.com,b.example.com
+openvox-ca-ctl generate --certname agent.example.com --dns a.example.com --dns b.example.com
+
 # Import a certificate issued outside this CA's normal flow (e.g. migrated
 # from a legacy CA sharing this CA's key)
 openvox-ca-ctl import-cert --certname legacy-node.example.com --cert-file legacy-node_cert.pem

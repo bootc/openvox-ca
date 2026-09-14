@@ -495,7 +495,8 @@ func newCleanCmd() *cobra.Command {
 }
 
 func newGenerateCmd() *cobra.Command {
-	var certname, outDir, dns string
+	var certname, outDir string
+	var dnsNames []string
 	cmd := &cobra.Command{
 		Use:          "generate",
 		Short:        "Generate a server-side key+cert pair",
@@ -507,8 +508,20 @@ func newGenerateCmd() *cobra.Command {
 			}
 
 			path := "/puppet-ca/v1/generate/" + certname
-			if dns != "" {
-				path += "?dns=" + strings.ReplaceAll(dns, ",", "&dns=")
+			// url.Values rather than substituting "&dns=" for every comma in
+			// the raw flag value. That substitution could not tell a separator
+			// between names from one inside a name, so a single --dns carrying
+			// an "&" split into two SANs; Encode() percent-escapes each name
+			// instead, and one flag stays one name. Only "dns" goes in here, so
+			// Encode()'s key sort cannot reorder the list -- it preserves the
+			// order of values within a key, which is the order the operator
+			// typed and the order the server adds them to the SAN set.
+			if len(dnsNames) > 0 {
+				q := url.Values{}
+				for _, name := range dnsNames {
+					q.Add("dns", name)
+				}
+				path += "?" + q.Encode()
 			}
 
 			code, body, err := c.post(path, nil)
@@ -544,7 +557,14 @@ func newGenerateCmd() *cobra.Command {
 	}
 	cmd.Flags().StringVar(&certname, "certname", "", "Subject name to generate")
 	cmd.Flags().StringVar(&outDir, "out-dir", ".", "Directory to save the private key file")
-	cmd.Flags().StringVar(&dns, "dns", "", "Comma-separated DNS alt names")
+	// StringSliceVar, matching "openvox-ca generate" exactly: same flag name,
+	// same subcommand name, same arity. As a scalar this was last-wins, so
+	// "--dns a.example.com --dns b.example.com" was accepted and issued a
+	// certificate carrying only the second name -- an ambiguous request
+	// answered with a wrong artefact rather than with a refusal. The help text
+	// is the sibling's word for word, because the two being readable side by
+	// side is the point.
+	cmd.Flags().StringSliceVar(&dnsNames, "dns", nil, "DNS alt names (repeatable, or comma-separated)")
 	_ = cmd.MarkFlagRequired("certname")
 	return cmd
 }

@@ -1518,6 +1518,37 @@ echo "$_san_text" | grep -qF "alt2-${RUN_ID}.example.com" \
     || fail "openvox-ca-ctl generate --dns: second SAN present in cert" \
            "SAN not found in cert extensions"
 
+# --- 19f2: a repeated --dns keeps every name, as `openvox-ca generate` does ---
+# The comma form above always worked. A repeated flag was accepted and all but
+# the last value silently discarded, so the certificate came back well-formed
+# and wrong for the earlier names -- which only shows up when TLS fails for one
+# of them. Both names, from the compiled binary against a live server.
+_GEN_REP="gen-rep-${RUN_ID}.example.com"
+_GEN_REP_DIR="$WORK_DIR/genout-rep"
+mkdir -p "$_GEN_REP_DIR"
+_rep_cert=$($CTL generate --certname "$_GEN_REP" \
+    --dns "rep1-${RUN_ID}.example.com" \
+    --dns "rep2-${RUN_ID}.example.com" \
+    --out-dir "$_GEN_REP_DIR" 2>/dev/null) || true
+
+# Asserted separately from the SANs, as 19f does: without it a `generate` that
+# failed outright would be reported as two missing names, which points at the
+# flag rather than at the command that never ran.
+[ -n "$_rep_cert" ] \
+    && pass "openvox-ca-ctl generate: repeated --dns outputs certificate" \
+    || fail "openvox-ca-ctl generate: repeated --dns outputs certificate" "output was empty"
+
+echo "$_rep_cert" > "$WORK_DIR/dns_rep.crt"
+_rep_san=$(openssl x509 -noout -text -in "$WORK_DIR/dns_rep.crt" 2>/dev/null) || true
+echo "$_rep_san" | grep -qF "rep1-${RUN_ID}.example.com" \
+    && pass "openvox-ca-ctl generate: repeated --dns keeps the first name" \
+    || fail "openvox-ca-ctl generate: repeated --dns keeps the first name" \
+           "an earlier --dns was discarded"
+echo "$_rep_san" | grep -qF "rep2-${RUN_ID}.example.com" \
+    && pass "openvox-ca-ctl generate: repeated --dns keeps the last name" \
+    || fail "openvox-ca-ctl generate: repeated --dns keeps the last name" \
+           "SAN not found in cert extensions"
+
 # --- 19g: openvox-ca-ctl over mTLS (--ca-cert, --client-cert, --client-key) ---
 # Reuses the Phase 1/Phase 2 pattern from Group 18 but drives the TLS
 # connection through openvox-ca-ctl itself rather than raw curl.
