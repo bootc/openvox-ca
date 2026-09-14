@@ -177,12 +177,17 @@ func (c *CA) revokeLocked(ctx context.Context, subject string) error {
 		// wrapping fs.ErrNotExist, so one check covers every backend.
 		//
 		// Converted to ErrSubjectUnknown here rather than passed through,
-		// exactly as revokeSerialCheckedLocked does with ErrSerialUnknown: this
-		// is the only frame that knows the fs.ErrNotExist means "never issued"
-		// rather than "a blob is missing", and a caller inspecting the wrapped
-		// error downstream cannot tell those apart. The counter split is
-		// unchanged — a never-issued subject is not a CRL update failure, so
-		// this arm still does not increment.
+		// exactly as revokeSerialCheckedLocked does with ErrSerialUnknown.
+		// What this frame knows, and no caller downstream can recover, is
+		// *which read* produced the fs.ErrNotExist: the inventory lookup above,
+		// rather than one of the CRL reads that follow. Both wrap the same
+		// sentinel, so an errors.Is further out would conflate a subject the
+		// inventory does not list with a CA that has lost its CRL. It does not
+		// distinguish an absent entry from an absent inventory — see
+		// ErrSubjectUnknown's godoc, which is why the message does not claim
+		// one. The counter split is unchanged: a subject the inventory does not
+		// list is not a CRL update failure, so this arm still does not
+		// increment.
 		if errors.Is(err, fs.ErrNotExist) {
 			// Log the cause rather than wrap it: the returned value reaches an
 			// HTTP response body, and the underlying error names a storage
