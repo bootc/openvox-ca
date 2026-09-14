@@ -1403,9 +1403,37 @@ var _ = Describe("API Workflow", func() {
 	})
 
 	Context("PUT /certificate_status revoke when no cert exists", func() {
-		It("should return 409 when revoking a subject that was never signed", func() {
+		// 404, matching the signed arm of this same handler immediately above
+		// and the by-serial revoke's ErrSerialUnknown. A subject the CA never
+		// issued is an absent resource, not a conflict with the CA's state.
+		It("should return 404 when revoking a subject that was never signed", func() {
 			body, _ := json.Marshal(api.PutStatusBody{DesiredState: "revoked"})
 			req := httptest.NewRequest("PUT", "/certificate_status/never-signed-node", bytes.NewReader(body))
+			rr := httptest.NewRecorder()
+			mux.ServeHTTP(rr, req)
+			Expect(rr.Code).To(Equal(http.StatusNotFound))
+		})
+
+		// The twin of the above, and the reason the fix cannot simply test for
+		// fs.ErrNotExist at the handler. Every Backend.Get wraps os.ErrNotExist
+		// when a key is absent (storage.Backend's documented contract), so a
+		// missing CRL blob reaches this handler carrying the same
+		// fs.ErrNotExist as an unknown subject does. Answering 404 here would
+		// tell an operator their node is unknown when its certificate is
+		// present and it is the CA that has lost its CRL.
+		It("should still return 409 when the subject exists but the CRL is unreadable", func() {
+			subject := "crl-gone-node"
+			csrPEM, err := testutil.GenerateCSR(subject)
+			Expect(err).NotTo(HaveOccurred())
+			_, err = myCA.SaveRequest(context.Background(), subject, csrPEM)
+			Expect(err).NotTo(HaveOccurred())
+			_, err = myCA.Sign(context.Background(), subject)
+			Expect(err).NotTo(HaveOccurred())
+
+			Expect(os.Remove(myCA.Storage.CRLPath())).To(Succeed())
+
+			body, _ := json.Marshal(api.PutStatusBody{DesiredState: "revoked"})
+			req := httptest.NewRequest("PUT", "/certificate_status/"+subject, bytes.NewReader(body))
 			rr := httptest.NewRecorder()
 			mux.ServeHTTP(rr, req)
 			Expect(rr.Code).To(Equal(http.StatusConflict))

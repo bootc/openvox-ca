@@ -121,6 +121,18 @@ func (c *CA) Revoke(ctx context.Context, subject string) error {
 	})
 }
 
+// ErrSubjectUnknown is returned by Revoke for a subject this CA has no
+// inventory entry for — it was never issued a certificate.
+//
+// The by-subject counterpart to ErrSerialUnknown, and a sentinel for the same
+// reason: absence has to be distinguishable from failure at the API boundary,
+// which answers it 404 rather than 409. It cannot be left to the caller to
+// recognise fs.ErrNotExist, because every Backend.Get wraps that when a key is
+// absent, so a missing CRL blob reaches the same caller carrying the same
+// error — and a CA that has lost its CRL must not report the subject as
+// unknown. This value is the one place that distinction is recorded.
+var ErrSubjectUnknown = errors.New("no certificate has been issued for this subject")
+
 // revokeLocked performs the actual CRL read-modify-write. The cluster CRL
 // lock and c.mu must both be held by the caller.
 func (c *CA) revokeLocked(ctx context.Context, subject string) error {
@@ -154,9 +166,18 @@ func (c *CA) revokeLocked(ctx context.Context, subject string) error {
 		// otherwise page someone.
 		// Both the blob and the SQL inventory report a missing subject by
 		// wrapping fs.ErrNotExist, so one check covers every backend.
-		if !errors.Is(err, fs.ErrNotExist) {
-			c.crlUpdateFailures.Add(1)
+		//
+		// Converted to ErrSubjectUnknown here rather than passed through,
+		// exactly as revokeSerialCheckedLocked does with ErrSerialUnknown: this
+		// is the only frame that knows the fs.ErrNotExist means "never issued"
+		// rather than "a blob is missing", and a caller inspecting the wrapped
+		// error downstream cannot tell those apart. The counter split is
+		// unchanged — a never-issued subject is not a CRL update failure, so
+		// this arm still does not increment.
+		if errors.Is(err, fs.ErrNotExist) {
+			return fmt.Errorf("%w: %s", ErrSubjectUnknown, subject)
 		}
+		c.crlUpdateFailures.Add(1)
 		return fmt.Errorf("could not find certificate for subject %s: %w", subject, err)
 	}
 

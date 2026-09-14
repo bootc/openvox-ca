@@ -344,6 +344,15 @@ func (s *Server) handlePutStatus(w http.ResponseWriter, r *http.Request) {
 				http.Error(w, err.Error(), http.StatusConflict)
 				return
 			}
+			// A subject this CA never issued is an absent resource, not a
+			// conflict with its state: 404, matching the signed arm above, the
+			// by-serial revoke's ErrSerialUnknown, and Puppet Server. Tested
+			// via the sentinel rather than fs.ErrNotExist, which every backend
+			// also returns for an absent blob — a missing CRL must stay 409.
+			if errors.Is(err, ca.ErrSubjectUnknown) {
+				http.Error(w, err.Error(), http.StatusNotFound)
+				return
+			}
 			http.Error(w, "conflict", http.StatusConflict)
 			return
 		}
