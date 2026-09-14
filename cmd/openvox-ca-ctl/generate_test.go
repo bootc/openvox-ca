@@ -121,6 +121,12 @@ var _ = Describe("generate subcommand --dns", func() {
 		// stray parameter would quietly change what a plain `generate` mints.
 		run()
 
+		// The positive fact first. gotQuery and gotDNS are reset to their zero
+		// values in the BeforeEach, so on their own they are satisfied by the
+		// recorder's initial state and cannot tell a bare-path request from no
+		// request at all. Asserting the path says the stub was actually
+		// reached, which is what makes the two emptiness checks mean something.
+		Expect(gotPath).To(Equal("/puppet-ca/v1/generate/node1.example.com"))
 		Expect(gotQuery).To(BeEmpty())
 		Expect(gotDNS).To(BeEmpty())
 	})

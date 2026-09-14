@@ -119,8 +119,16 @@ var _ = Describe("setup subcommand output", func() {
 		// compatibility surface. Asserted here so that reporting the real
 		// subject cannot quietly become an opportunity to restyle it.
 		Expect(cert.Subject.CommonName).To(Equal("Puppet CA: bootstrapped.example.com"))
-		Expect(out).To(ContainSubstring(cert.Subject.CommonName))
 		Expect(out).To(ContainSubstring(caDir))
+
+		// strconv.Quote, not the bare CN: both branches print through %q, and
+		// AGENTS.md and the CodeQL exclusion both now record that setup's CN
+		// line is pinned by a spec. A ContainSubstring of the bare name is
+		// satisfied by the unquoted rendering too, so it would have left that
+		// claim true of only the load path -- and the CodeQL exclusion would
+		// go on suppressing alerts here after a later change dropped the %q.
+		Expect(out).To(ContainSubstring(strconv.Quote(cert.Subject.CommonName)),
+			"the subject must appear, escaped, on this path too:\n%s", out)
 
 		// The verb, pinned on this path as well as on the load path. Without
 		// the pair below the CN and the cadir are all that is asserted, and

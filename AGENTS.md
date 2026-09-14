@@ -292,18 +292,21 @@ Output that is operator-facing but not `slog` — such as
 response, which nothing re-validates. `import-cert`'s summary lines are the
 worked example, and `cmd/openvox-ca-ctl/importcert_test.go` pins them.
 
-**The rule of thumb: if this process did not choose the value, quote it.**
-`import-cert`'s summary, `checkHTTP`'s error body and `sign --all`'s list are
-all quoted because the *server* chose theirs, and `setup`'s CN line because it
-reports a subject read back off whatever certificate is in the cadir. Each has
-a spec that fails if the quoting is removed — the last is
+**The rule of thumb: if the value came from outside this invocation — a server
+response, or a certificate found in the cadir — quote it.** `import-cert`'s
+summary, `checkHTTP`'s error body and `sign --all`'s list are all quoted
+because the *server* chose theirs, and `setup`'s CN line because it reports a
+subject read back off whatever certificate is already in the cadir. Each has a
+spec that fails if the quoting is removed — the last is
 `cmd/openvox-ca-ctl/setup_test.go`, "quotes a subject read off disk so it
-cannot forge a line".
+cannot forge a line", which pins both of that line's branches.
 
-A server response is the commonest such value but not the boundary, which is
-why the rule is worded as it is: the governing instruction is the paragraph
-above, and a CA certificate found on disk has passed `ca.ValidateSubject` no
-more than a decoded response body has.
+Worded on provenance rather than on who chose the value, because the operator's
+own flags are values this process did not choose either, and those are out of
+scope — see the first exception below. A server response is the commonest thing
+arriving from outside but not the boundary: a CA certificate sitting in the
+cadir has passed `ca.ValidateSubject` no more than a decoded response body has,
+which is what the paragraph above actually keys on.
 
 Two kinds of unquoted output are deliberately left alone, for two *different*
 reasons:
