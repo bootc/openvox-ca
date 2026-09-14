@@ -121,8 +121,8 @@ func (c *CA) Revoke(ctx context.Context, subject string) error {
 	})
 }
 
-// ErrSubjectUnknown is returned by Revoke for a subject this CA has no
-// inventory entry for — it was never issued a certificate.
+// ErrSubjectUnknown is returned by Revoke for a subject the inventory has no
+// entry for.
 //
 // The by-subject counterpart to ErrSerialUnknown, and a sentinel for the same
 // reason: absence has to be distinguishable from failure at the API boundary,
@@ -131,7 +131,16 @@ func (c *CA) Revoke(ctx context.Context, subject string) error {
 // absent, so a missing CRL blob reaches the same caller carrying the same
 // error — and a CA that has lost its CRL must not report the subject as
 // unknown. This value is the one place that distinction is recorded.
-var ErrSubjectUnknown = errors.New("no certificate has been issued for this subject")
+//
+// Worded for what was observed rather than for what it usually implies. The
+// common case is a subject that was never issued, but Clean reaches this same
+// branch through revokeLocked with a certificate in storage (see the hasCert
+// arm in signing.go), and emits this text into an operator warning about
+// deleting that certificate. "No certificate has been issued" would be false
+// there, and on a blob backend an absent inventory blob is indistinguishable
+// from an absent entry in a readable one, so the message does not claim an
+// issuance history the CA cannot see.
+var ErrSubjectUnknown = errors.New("no inventory entry for this subject")
 
 // revokeLocked performs the actual CRL read-modify-write. The cluster CRL
 // lock and c.mu must both be held by the caller.
@@ -175,6 +184,13 @@ func (c *CA) revokeLocked(ctx context.Context, subject string) error {
 		// unchanged — a never-issued subject is not a CRL update failure, so
 		// this arm still does not increment.
 		if errors.Is(err, fs.ErrNotExist) {
+			// Log the cause rather than wrap it: the returned value reaches an
+			// HTTP response body, and the underlying error names a storage
+			// path. Without this the cause is recorded nowhere -- this arm
+			// deliberately does not touch the counter, and the handler logs
+			// only what it is given -- which on a blob backend would leave a
+			// lost inventory looking exactly like an unknown subject.
+			slog.Debug("No inventory entry for subject", "subject", subject, "error", err)
 			return fmt.Errorf("%w: %s", ErrSubjectUnknown, subject)
 		}
 		c.crlUpdateFailures.Add(1)

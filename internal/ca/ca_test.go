@@ -28,6 +28,7 @@ import (
 	"encoding/asn1"
 	"encoding/pem"
 	"errors"
+	"io/fs"
 	"math/big"
 	"os"
 	"path/filepath"
@@ -572,13 +573,43 @@ var _ = Describe("CA Revocation", func() {
 	})
 
 	It("returns an error when revoking a subject with no inventory entry", func() {
-		Expect(myCA.Revoke(context.Background(), "never-signed")).To(HaveOccurred())
+		// Pinned to the sentinel, not merely to "an error": ErrSubjectUnknown
+		// is what the API layer turns into a 404, so an opaque assertion here
+		// would let the status code regress without a red test.
+		Expect(myCA.Revoke(context.Background(), "never-signed")).
+			To(MatchError(ca.ErrSubjectUnknown))
 		// Not counted. The CRL-update counter drives the mixin's alert, and a
 		// typo'd certname is an operator mistake, not a CA fault -- so the
 		// exclusion for a never-issued subject is pinned here, beside the error
 		// that identifies it.
 		Expect(myCA.CRLUpdateFailures()).To(BeNumerically("==", 0),
 			"a subject that was never issued must not raise the CRL-failure alert")
+	})
+
+	It("does not report an unreadable CRL as an unknown subject", func() {
+		// The twin of the spec above, and the one that keeps the API layer's
+		// 404 honest. Backend.Get wraps fs.ErrNotExist for any absent key, so
+		// a missing CRL blob reaches Revoke carrying the same fs.ErrNotExist an
+		// absent inventory entry does. Asserting both halves here -- the
+		// premise (fs.ErrNotExist is present) and the discrimination
+		// (ErrSubjectUnknown is not) -- is what stops the two collapsing back
+		// into one branch: the API spec can only see the resulting status code,
+		// which is also the revoked arm's unconditional fall-through.
+		csrPEM, err := testutil.GenerateCSR("crl-missing-node")
+		Expect(err).NotTo(HaveOccurred())
+		_, err = myCA.SaveRequest(context.Background(), "crl-missing-node", csrPEM)
+		Expect(err).NotTo(HaveOccurred())
+		_, err = myCA.Sign(context.Background(), "crl-missing-node")
+		Expect(err).NotTo(HaveOccurred())
+
+		Expect(os.Remove(store.CRLPath())).To(Succeed())
+
+		err = myCA.Revoke(context.Background(), "crl-missing-node")
+		Expect(err).To(HaveOccurred())
+		Expect(err).To(MatchError(fs.ErrNotExist),
+			"the premise: an absent CRL blob still reaches the caller as fs.ErrNotExist")
+		Expect(err).NotTo(MatchError(ca.ErrSubjectUnknown),
+			"a CA that has lost its CRL must not report the subject as unknown")
 	})
 
 	It("counts a CRL-update failure when a revocation cannot amend the CRL", func() {

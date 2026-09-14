@@ -1412,6 +1412,12 @@ var _ = Describe("API Workflow", func() {
 			rr := httptest.NewRecorder()
 			mux.ServeHTTP(rr, req)
 			Expect(rr.Code).To(Equal(http.StatusNotFound))
+			// Assert the body too, for the reason the by-serial spec gives:
+			// ServeMux answers 404 for any path it has no pattern for, so a
+			// status-only assertion would survive this route being deleted.
+			// Anchored to the sentinel so rewording it moves the spec as well.
+			Expect(rr.Body.String()).To(ContainSubstring(ca.ErrSubjectUnknown.Error()))
+			Expect(rr.Body.String()).To(ContainSubstring("never-signed-node"))
 		})
 
 		// The twin of the above, and the reason the fix cannot simply test for
