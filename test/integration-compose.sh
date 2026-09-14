@@ -18,9 +18,18 @@
 #
 # Output: TAP format.  Exit 0 when all pass, exit 1 if any fail.
 #
-# Prerequisites inside the container: curl, openssl, openvox-ca-ctl
+# Prerequisites inside the container are declared as packages in
+# test/Dockerfile.run and as commands in test/fixture-commands.sh, which this
+# script asserts before running anything.
 
 set -uo pipefail
+
+# Asserted before anything else, including the mktemp below: a command missing
+# from the image should fail once, by name, rather than once per assertion
+# disguised as a defect in the thing under test. See test/fixture-commands.sh.
+# shellcheck source=test/fixture-commands.sh
+. "$(dirname "${BASH_SOURCE[0]}")/fixture-commands.sh"
+require_fixture_commands || exit 1
 
 # -- Configuration ------------------------------------------------------------
 CA_URL="${CA_URL:-http://openvox-ca:8140}"
@@ -106,7 +115,7 @@ submit_csr() {
 }
 
 # -- Cleanup ------------------------------------------------------------------─
-cleanup() { rm -rf "$WORK_DIR"; }
+cleanup() { rm -rf "$WORK_DIR"; fixture_missing_cleanup; }
 trap cleanup EXIT
 
 # ═════════════════════════════════════════════════════════════════════════════
@@ -114,7 +123,11 @@ trap cleanup EXIT
 # ═════════════════════════════════════════════════════════════════════════════
 printf '# openvox-ca integration tests (multi-host via compose)\n'
 printf '# CA URL: %s   (resolved across compose network)\n' "$CA_URL"
-printf '# Test-runner container: %s\n' "$(hostname)"
+# $HOSTNAME rather than $(hostname): bash sets it, so the banner costs no
+# external command. `hostname` is not installed in this image and never was --
+# the substitution failed silently on every CI run, printing a blank, which is
+# precisely the kind of miss the handler in test/fixture-commands.sh now reports.
+printf '# Test-runner container: %s\n' "${HOSTNAME:-unknown}"
 printf '\n'
 
 if ! curl -sf "${CA_URL}/puppet-ca/v1/certificate/ca" -o "$WORK_DIR/ca.pem" 2>/dev/null; then
@@ -790,10 +803,13 @@ openvox-ca-ctl import \
     && pass "openvox-ca-ctl import creates private/ca_key.pem" \
     || fail "openvox-ca-ctl import creates private/ca_key.pem"
 
-# Verify the imported cert is identical to what we passed in
-diff -q "$_IMP_DIR/ca.crt" "$_IMP_DEST/ca_crt.pem" >/dev/null 2>&1 \
-    && pass "openvox-ca-ctl import cert file matches source" \
-    || fail "openvox-ca-ctl import cert file matches source"
+# Verify the imported cert is identical to what we passed in. The comparison is
+# assert_files_identical, from test/fixture-commands.sh, which distinguishes
+# "the files differ" from "diff could not answer" -- see the note there, and
+# test/fixture-commands-test.sh, which exercises all three of its branches.
+assert_files_identical "openvox-ca-ctl import cert file matches source" \
+    "$_IMP_DIR/ca.crt" "$_IMP_DEST/ca_crt.pem" \
+    "imported cert differs from the source passed to --cert-bundle"
 
 # A CA can be started from the imported directory
 openvox-ca-ctl setup --cadir "$_IMP_DEST" --hostname "existing" >/dev/null 2>&1
@@ -2142,6 +2158,11 @@ rm -rf "$_REN_DIR"
 # ═════════════════════════════════════════════════════════════════════════════
 # Results
 # ═════════════════════════════════════════════════════════════════════════════
+# Anything Bash could not resolve during the run, as an assertion rather than a
+# line of stderr nobody reads. Last, so it covers every path above it. Shared
+# with migration-test.sh so the two cannot report differently.
+fixture_missing_assert
+
 printf '\n1..%d\n' "$T"
 printf '# Results: %d passed, %d failed out of %d\n' \
     $(( T - FAILURES )) "$FAILURES" "$T"
