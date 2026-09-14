@@ -75,16 +75,44 @@ func seedExistingCA(caDir, hostname string) {
 // must come off the certificate rather than the flag, and the verb, which must
 // not assert an initialisation that did not happen.
 var _ = Describe("setup subcommand output", func() {
+	var cfg string
+
+	BeforeEach(func() {
+		saveCtlGlobals()
+		clearCtlEnv()
+		// The --config flag is what actually isolates these specs, and it is
+		// not interchangeable with clearCtlEnv above. `setup` reaches
+		// PersistentPreRunE like every other subcommand, which resolves a
+		// config file and fails the command outright if it cannot be parsed;
+		// on a machine that really runs openvox-ca that resolves to the host's
+		// own /etc/puppet-ca/ctl.yaml. clearCtlEnv does not cover this, because
+		// PUPPET_CA_CTL_CONFIG is deliberately absent from ctlEnvVars -- that
+		// list is the vars applyCtlEnv reads, and the config path is resolved
+		// before them. Only an explicit --config outranks both the environment
+		// variable and the host file.
+		//
+		// clearCtlEnv and saveCtlGlobals are here for the reason the sibling
+		// spec files have them -- no spec should leave the package globals
+		// holding values the next one inherits -- not because they close the
+		// hole above.
+		cfg = writeTempCtlConfig("")
+	})
+
+	// runSetup drives the subcommand through the root, as an operator does.
+	runSetup := func(args ...string) string {
+		GinkgoHelper()
+		out, err := captureStdout(append([]string{"setup", "--config", cfg}, args...))
+		Expect(err).NotTo(HaveOccurred(), "setup")
+		return out
+	}
+
 	It("names the subject of the CA it has just created", func() {
 		// The bootstrap path, and the control for the load-path specs below:
 		// here the CN genuinely is derived from --hostname, so a fix that
 		// simply stopped printing anything useful would fail this.
 		caDir := GinkgoT().TempDir()
 
-		out, err := captureStdout([]string{
-			"setup", "--cadir", caDir, "--hostname", "bootstrapped.example.com",
-		})
-		Expect(err).NotTo(HaveOccurred(), "setup")
+		out := runSetup("--cadir", caDir, "--hostname", "bootstrapped.example.com")
 
 		cert, _ := caOnDisk(caDir)
 		// The "Puppet CA: " prefix is minted into the subject and is Puppet
@@ -93,6 +121,16 @@ var _ = Describe("setup subcommand output", func() {
 		Expect(cert.Subject.CommonName).To(Equal("Puppet CA: bootstrapped.example.com"))
 		Expect(out).To(ContainSubstring(cert.Subject.CommonName))
 		Expect(out).To(ContainSubstring(caDir))
+
+		// The verb, pinned on this path as well as on the load path. Without
+		// the pair below the CN and the cadir are all that is asserted, and
+		// both appear in the other branch's line too -- so collapsing the two
+		// branches into an unconditional "Existing CA found" would satisfy
+		// every other assertion in this file.
+		Expect(out).To(ContainSubstring("CA initialized"),
+			"the bootstrap path must report an initialisation:\n%s", out)
+		Expect(out).NotTo(ContainSubstring("Existing CA found"),
+			"nothing was found; this CA was just created:\n%s", out)
 	})
 
 	Context("against a cadir that already holds a CA", func() {
@@ -112,11 +150,7 @@ var _ = Describe("setup subcommand output", func() {
 			seedExistingCA(caDir, seededHost)
 			_, before = caOnDisk(caDir)
 
-			var err error
-			out, err = captureStdout([]string{
-				"setup", "--cadir", caDir, "--hostname", flagHost,
-			})
-			Expect(err).NotTo(HaveOccurred(), "setup over an existing CA")
+			out = runSetup("--cadir", caDir, "--hostname", flagHost)
 		})
 
 		It("reports the subject it loaded, not the --hostname it was passed", func() {
@@ -159,10 +193,7 @@ var _ = Describe("setup subcommand output", func() {
 		Expect(cert.Subject.CommonName).To(ContainSubstring("\n"),
 			"the fixture must actually carry the control character, or this spec asserts nothing")
 
-		out, err := captureStdout([]string{
-			"setup", "--cadir", caDir, "--hostname", "unused.example.com",
-		})
-		Expect(err).NotTo(HaveOccurred(), "setup over an existing CA")
+		out := runSetup("--cadir", caDir, "--hostname", "unused.example.com")
 
 		Expect(out).To(ContainSubstring(strconv.Quote(cert.Subject.CommonName)),
 			"the subject must appear, escaped:\n%s", out)

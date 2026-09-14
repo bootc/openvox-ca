@@ -159,6 +159,18 @@ openvox-ca-ctl import-cert --certname legacy-node.example.com --cert-file legacy
 # Bootstrap a new CA offline (no server required)
 openvox-ca-ctl setup --cadir /etc/puppetlabs/puppet/ssl --hostname puppet.example.com
 
+# A cadir that already holds a CA is loaded, not re-bootstrapped, and the run
+# reports which happened:
+#
+#   CA initialized in <cadir> (CN: "Puppet CA: puppet.example.com")
+#   Existing CA found in <cadir> (CN: "Puppet CA: whatever-it-was")
+#
+# On the second, --hostname has no effect: the CN is fixed when a CA is
+# bootstrapped, once and permanently (see the `hostname` setting in
+# configuration.md), so the CN reported is the one on the certificate found
+# there and not the one asked for. Pointing setup at the wrong --cadir
+# therefore names the CA that is really in it.
+
 # Import an external CA cert/key offline
 openvox-ca-ctl import \
   --cadir      /etc/puppetlabs/puppet/ssl \

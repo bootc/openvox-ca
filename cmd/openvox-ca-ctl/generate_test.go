@@ -39,11 +39,13 @@ import (
 // as a control, because a fix that broke it would otherwise pass unnoticed.
 var _ = Describe("generate subcommand --dns", func() {
 	var (
-		gotDNS   []string
-		gotQuery string
-		srv      *httptest.Server
-		cfg      string
-		outDir   string
+		gotDNS    []string
+		gotQuery  string
+		gotMethod string
+		gotPath   string
+		srv       *httptest.Server
+		cfg       string
+		outDir    string
 	)
 
 	BeforeEach(func() {
@@ -55,11 +57,17 @@ var _ = Describe("generate subcommand --dns", func() {
 		clearCtlEnv()
 		cfg = writeTempCtlConfig("")
 		outDir = GinkgoT().TempDir()
-		gotDNS, gotQuery = nil, ""
+		gotDNS, gotQuery, gotMethod, gotPath = nil, "", "", ""
 
 		srv = httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 			gotDNS = r.URL.Query()["dns"]
 			gotQuery = r.URL.RawQuery
+			// The query is appended to the same string that carries the route
+			// and the certname, so recording only the query would let a
+			// mutation of either survive every spec here. The stub answers 200
+			// to any request, and the specs below assert nothing but the error
+			// being nil, so nothing else would notice.
+			gotMethod, gotPath = r.Method, r.URL.Path
 			w.WriteHeader(http.StatusOK)
 			_, _ = w.Write([]byte(`{"private_key":"KEY","certificate":"CERT"}`))
 		}))
@@ -85,6 +93,11 @@ var _ = Describe("generate subcommand --dns", func() {
 		// failed against it.
 		Expect(gotDNS).To(Equal([]string{"a.example.com", "b.example.com"}),
 			"a repeated --dns must not discard earlier values; raw query was %q", gotQuery)
+
+		// The route the query was appended to, pinned once here rather than in
+		// every spec: the certname belongs in the path, and this is a POST.
+		Expect(gotMethod).To(Equal("POST"))
+		Expect(gotPath).To(Equal("/puppet-ca/v1/generate/node1.example.com"))
 	})
 
 	It("still splits the comma-separated form", func() {
