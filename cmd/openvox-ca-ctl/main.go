@@ -644,6 +644,24 @@ func newSetupCmd() *cobra.Command {
 			}
 			defer func() { _ = instanceLock.Unlock() }()
 
+			// Init either bootstraps a new CA or loads one that is already
+			// there, and reports which only to the log. Ask the store first, so
+			// the success line below can say which of the two happened.
+			//
+			// The check is not racy here even though it is two operations:
+			// setup addresses a local directory through the filesystem backend,
+			// which has no distributed locking and so admits exactly one
+			// instance, and the instance lock taken above is held across both.
+			// Nothing can put a CA in the cadir in the gap. Given that, a
+			// successful Init with a certificate already present loaded it --
+			// Init's fast path -- and a successful Init with none bootstrapped
+			// one, because every other combination (cert without key, key
+			// without cert) is refused rather than returning nil.
+			existingCA, err := store.HasCACert(cmd.Context())
+			if err != nil {
+				return fmt.Errorf("checking for an existing CA in %s: %w", absDir, err)
+			}
+
 			myCA := ca.New(store, ca.AutosignConfig{Mode: "off"}, hostname)
 			myCA.EncryptCAKey = encryptKey
 			myCA.KeyPassphrase = ca.KeyPassphraseConfig{
@@ -652,7 +670,24 @@ func newSetupCmd() *cobra.Command {
 			if err := myCA.Init(cmd.Context()); err != nil {
 				return err
 			}
-			fmt.Printf("CA initialized in %s (CN: Puppet CA: %s)\n", absDir, hostname)
+
+			// The subject in force, read back off the certificate, rather than
+			// one assembled from --hostname. On the load path --hostname has no
+			// effect at all -- the CN is fixed when a CA is bootstrapped, once
+			// and permanently -- so echoing it named a CA that existed nowhere,
+			// and did so on stdout while the truthful log line went to stderr.
+			//
+			// %q because on that path this value comes off a certificate found
+			// in the cadir rather than from anything this process chose, which
+			// is exactly the case AGENTS.md's escaping rule covers: a control
+			// character in a subject would otherwise write its own line of
+			// operator-facing output.
+			subject := myCA.CACert.Subject.CommonName
+			if existingCA {
+				fmt.Printf("Existing CA found in %s (CN: %q)\n", absDir, subject)
+			} else {
+				fmt.Printf("CA initialized in %s (CN: %q)\n", absDir, subject)
+			}
 			return nil
 		},
 	}
