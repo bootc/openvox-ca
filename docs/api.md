@@ -440,7 +440,7 @@ certificate goes away:
   work and which `clean` leaves uncounted on every backend, since it takes that
   lock directly rather than through the counted helper; not a re-sign that
   failed on a faulty `crl_chain_file`, which deliberately moves
-  [`puppetca_crl_chain_refresh_failures_total`](metrics.md#crl) instead so that
+  [`puppetca_crl_chain_refresh_failures_total`](metrics.md#upstream-crl-chain) instead so that
   counter's runbook stays "check the file"; not a revocation that found no
   inventory entry for the subject; and not a failed delete at all. The no-inventory-entry exclusion is the one `clean` swallows
   rather than surfaces: it revokes only when a certificate is in storage, so
