@@ -6,6 +6,7 @@ name: Container images
 #
 # Triggers:
 #   * Push to main            -> build + push the rolling "edge" (and "main") tags.
+#   * Push to integration     -> build + push the rolling "integration" tag.
 #   * Release tags (v*)        -> build + push versioned + latest tags.
 #   * Manual (workflow_dispatch) -> build, push only if the "push" input is set.
 #   * Pull requests, always    -> build every variant on both architectures as a
@@ -26,6 +27,7 @@ on:
   push:
     branches:
       - main
+      - integration
     tags:
       - "v*"
   pull_request:
@@ -481,7 +483,7 @@ jobs:
             latest=auto
             suffix=${{ matrix.variant.suffix }},onlatest=true
           tags: |
-            type=edge
+            type=edge,branch=main
             type=semver,pattern={{version}}
             type=semver,pattern={{major}}.{{minor}}
             type=semver,pattern={{major}},enable=${{ !startsWith(github.ref_name, 'v0.') }}
