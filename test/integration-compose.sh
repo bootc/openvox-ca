@@ -811,12 +811,53 @@ assert_files_identical "openvox-ca-ctl import cert file matches source" \
     "$_IMP_DIR/ca.crt" "$_IMP_DEST/ca_crt.pem" \
     "imported cert differs from the source passed to --cert-bundle"
 
-# A CA can be started from the imported directory
-openvox-ca-ctl setup --cadir "$_IMP_DEST" --hostname "existing" >/dev/null 2>&1
-# (setup on an existing dir loads successfully; the CA key/cert is already there)
+# A CA can be started from the imported directory. This is also the only place
+# the compiled binary meets setup's LOAD path -- the cadir already holds the
+# imported CA -- so the line it prints is asserted here rather than discarded.
+# That line is the whole of the fix: setup used to build it from --hostname on
+# both paths and so named a CA that existed nowhere. --hostname is deliberately
+# "existing", which is not the imported CA's CN, so echoing the flag would show
+# up as a mismatch rather than coinciding with the right answer.
+_IMP_SETUP_OUT=$(openvox-ca-ctl setup --cadir "$_IMP_DEST" --hostname "existing" 2>/dev/null) || true
+
 [ -f "$_IMP_DEST/ca_crt.pem" ] \
     && pass "CA directory usable after import (cert file still present)" \
     || fail "CA directory usable after import (cert file still present)"
+
+grep -qF "Existing CA found" <<< "$_IMP_SETUP_OUT" \
+    && pass "openvox-ca-ctl setup reports an existing CA rather than claiming to initialise one" \
+    || fail "openvox-ca-ctl setup reports an existing CA rather than claiming to initialise one" \
+           "output: $_IMP_SETUP_OUT"
+
+grep -qF "CA initialized" <<< "$_IMP_SETUP_OUT" \
+    && fail "openvox-ca-ctl setup must not claim initialisation on the load path" \
+            "output: $_IMP_SETUP_OUT" \
+    || pass "openvox-ca-ctl setup must not claim initialisation on the load path"
+
+# The CN reported must be the one on the certificate that is actually there.
+# Asserted against the subject read back off the cert with openssl rather than
+# against a string built here, so the expected value and the printed one do not
+# come from the same place. The imported CA's CN is "Imported Test CA" (12b's
+# openssl config above); --hostname was "existing", which appears in neither.
+_IMP_CN=$(openssl x509 -in "$_IMP_DEST/ca_crt.pem" -noout -subject 2>/dev/null \
+    | sed -n 's/.*CN *= *//p') || true
+
+[ -n "$_IMP_CN" ] \
+    && pass "read the imported CA's subject back off disk" \
+    || fail "read the imported CA's subject back off disk" "openssl returned no CN"
+
+# -- because the pattern is derived: a CN beginning with a dash would otherwise
+# be parsed as an option and the assertion would pass on grep's own failure.
+grep -qF -- "$_IMP_CN" <<< "$_IMP_SETUP_OUT" \
+    && pass "openvox-ca-ctl setup names the CA actually on disk" \
+    || fail "openvox-ca-ctl setup names the CA actually on disk" \
+           "expected CN $_IMP_CN in: $_IMP_SETUP_OUT"
+
+# The exact string the pre-fix code produced from --hostname.
+grep -qF "Puppet CA: existing" <<< "$_IMP_SETUP_OUT" \
+    && fail "openvox-ca-ctl setup must not synthesise a CN from --hostname" \
+            "output: $_IMP_SETUP_OUT" \
+    || pass "openvox-ca-ctl setup must not synthesise a CN from --hostname"
 
 # Import with mismatched key must fail
 _BAD_DIR=$(mktemp -d)

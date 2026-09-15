@@ -168,6 +168,11 @@ var _ = Describe("setup subcommand output", func() {
 				"the CN printed must be the one on the certificate:\n%s", out)
 			Expect(out).NotTo(ContainSubstring(flagHost),
 				"--hostname has no effect on the load path, so echoing it names a CA that exists nowhere:\n%s", out)
+			// Both branches print absDir through the same argument, so covering
+			// it on one and not the other leaves a mutation that swaps the path
+			// on this branch alone uncaught.
+			Expect(out).To(ContainSubstring(caDir),
+				"the cadir printed must be the one that was addressed:\n%s", out)
 		})
 
 		It("does not claim to have initialised a CA it only loaded", func() {
@@ -185,6 +190,40 @@ var _ = Describe("setup subcommand output", func() {
 			_, after := caOnDisk(caDir)
 			Expect(after).To(Equal(before), "setup must not replace an existing CA")
 		})
+	})
+
+	It("refuses when it cannot tell whether a CA is already there", func() {
+		// The probe's error branch. It decides which of the two success lines
+		// is printed, so a failure it swallowed would report the wrong one --
+		// and reporting the wrong one is the whole of #353.
+		//
+		// An unreadable cadir, not a cadir that is a regular file: the
+		// instance lock is taken BEFORE this probe and creates a `locks`
+		// subdirectory, so a file fails at `creating same-host lock directory`
+		// and never reaches HasCACert. That spec would pass on an error raised
+		// two statements earlier. An unreadable directory only downgrades the
+		// lock to a warning, so it is the fixture that actually lands here.
+		caDir := GinkgoT().TempDir()
+		Expect(os.Chmod(caDir, 0000)).To(Succeed())
+		// Restore before Ginkgo's own cleanup, which cannot remove a 0000 dir.
+		DeferCleanup(func() { _ = os.Chmod(caDir, 0o755) })
+
+		if _, err := os.ReadDir(caDir); err == nil {
+			Skip("this user can read a 0000 directory (running as root), so the probe cannot be made to fail")
+		}
+
+		_, err := captureStdout([]string{"setup", "--config", cfg, "--cadir", caDir, "--hostname", "unused.example.com"})
+
+		Expect(err).To(MatchError(ContainSubstring("checking for an existing CA in")),
+			"the probe's failure must be reported as itself, not swallowed into a success line")
+		Expect(err).To(MatchError(ContainSubstring(caDir)))
+
+		// Readable again before asserting on the contents: BeAnExistingFile
+		// cannot stat inside a 0000 directory, so it reports "permission
+		// denied" rather than "absent" and would fail whatever setup did.
+		Expect(os.Chmod(caDir, 0o755)).To(Succeed())
+		Expect(filepath.Join(caDir, "ca_crt.pem")).NotTo(BeAnExistingFile(),
+			"a refused setup must not have bootstrapped a CA")
 	})
 
 	It("quotes a subject read off disk so it cannot forge a line", func() {
