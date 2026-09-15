@@ -1428,6 +1428,43 @@ var _ = Describe("API Workflow", func() {
 			Expect(rr.Body.String()).To(ContainSubstring("never-signed-node"))
 		})
 
+		// The same 404, deliberately, for a subject the CA has heard of. A
+		// pending CSR is not a certificate and puts nothing in the inventory,
+		// so revoke finds exactly what it finds for a name nobody has ever
+		// sent: nothing to revoke. The sameness is the point of pinning it.
+		//
+		// It is also the case a later change is most likely to get wrong,
+		// because the two arms of this handler disagree about the same subject
+		// on purpose: `signed` SIGNS a pending CSR (204), while `revoked`
+		// answers 404 for it. Anyone reading "there is a CSR here, so the
+		// subject is not unknown" into the revoke arm turns this into a 409 and
+		// breaks parity with the never-heard-of case, with nothing else to
+		// catch it.
+		It("should return the same 404 when the subject has only a pending CSR", func() {
+			subject := "requested-only-node"
+			csrPEM, err := testutil.GenerateCSR(subject)
+			Expect(err).NotTo(HaveOccurred())
+			_, err = myCA.SaveRequest(context.Background(), subject, csrPEM)
+			Expect(err).NotTo(HaveOccurred())
+
+			// Precondition: the CSR really is queued, so this spec is not
+			// silently re-testing the never-signed case above.
+			status := httptest.NewRecorder()
+			mux.ServeHTTP(status, httptest.NewRequest("GET", "/certificate_status/"+subject, nil))
+			Expect(status.Code).To(Equal(http.StatusOK))
+			Expect(status.Body.String()).To(ContainSubstring("requested"))
+
+			body, _ := json.Marshal(api.PutStatusBody{DesiredState: "revoked"})
+			req := httptest.NewRequest("PUT", "/certificate_status/"+subject, bytes.NewReader(body))
+			rr := httptest.NewRecorder()
+			mux.ServeHTTP(rr, req)
+
+			Expect(rr.Code).To(Equal(http.StatusNotFound),
+				"a queued request is not a certificate; revoke has nothing to retire")
+			Expect(rr.Body.String()).To(ContainSubstring(ca.ErrSubjectUnknown.Error()))
+			Expect(rr.Body.String()).To(ContainSubstring(subject))
+		})
+
 		// The leak guard belongs here rather than beside the spec above, and the
 		// difference is the whole point: for a subject that was simply never
 		// listed, the backends synthesise the not-exist themselves and the cause
