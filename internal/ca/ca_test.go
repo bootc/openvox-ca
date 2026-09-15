@@ -607,12 +607,23 @@ var _ = Describe("CA Revocation", func() {
 			"the record must name the subject it could not find")
 		Expect(line).NotTo(ContainSubstring(store.InventoryPath()),
 			"an unlisted subject must not name a storage path; that absence is what docs/api.md tells operators to read")
+		// Pin the level in both directions. The capture filter already catches
+		// a demotion, since the record would not be emitted at all -- but a
+		// promotion to Warn would pass silently while falsifying docs/api.md's
+		// "at info level" and the reason revokeLocked gives for choosing Info:
+		// a second WARN for every mistyped certname, beside the one each caller
+		// already emits.
+		Expect(line).To(ContainSubstring("level=INFO"),
+			"a mistyped certname must not add a second WARN beside the caller's")
 		// Not counted. The CRL-update counter drives the mixin's alert, and a
 		// typo'd certname is an operator mistake, not a CA fault -- so the
-		// exclusion for a never-issued subject is pinned here, beside the error
-		// that identifies it.
+		// exclusion for a subject the inventory does not list is pinned here,
+		// beside the error that reports it. Keyed on the inventory rather than
+		// on issuance history: ErrSubjectUnknown does not claim the latter, and
+		// a lost inventory reaches the same uncounted arm with a certificate
+		// still in storage.
 		Expect(myCA.CRLUpdateFailures()).To(BeNumerically("==", 0),
-			"a subject that was never issued must not raise the CRL-failure alert")
+			"a subject the inventory has no entry for must not raise the CRL-failure alert")
 	})
 
 	It("does not report an unreadable CRL as an unknown subject", func() {

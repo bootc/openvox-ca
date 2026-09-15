@@ -24,7 +24,7 @@ A revocation takes the per-subject lock that signing and [renewal](#certificate-
 
 A subject the inventory has no entry for is a `404 Not Found`, with a body naming it, matching Puppet Server and the [by-serial route's `404`](#revocation-by-serial). It is the only `404` this arm produces; everything else — including a CRL this CA cannot read — stays a `409`.
 
-Usually it means a mistyped certname, but do not read it as proof of one: a lost inventory answers the same way. On the structured backends it always does. On the [filesystem backend](storage-backends.md#filesystem-backend-default), the default, it does so only if the integrity file went with it — an inventory lost while `.inventory.hmac` remains fails verification instead, which is a counted `409`. That is why the body says only that there is no inventory entry rather than that nothing was ever issued, and why the counter will not separate the two for you: a typo and a lost inventory are both uncounted. What does separate them, on the filesystem backend, is the log line the serving replica emits at info level, `No inventory entry for subject; revocation cannot proceed` — its error attribute names the inventory path when the inventory is what is missing, and names no path when the subject is simply not listed. The structured backends answer from an index that verifies nothing, so both cases arrive identical there; compare against `GET /certificate_statuses` (`openvox-ca-ctl list --all`) instead, which reads the certificate index rather than the inventory — a subject it still reports as `signed` is one whose inventory entry has gone, not whose certificate has.
+Usually it means a mistyped certname, but do not read it as proof of one: a lost inventory answers the same way. On the structured backends it always does. On the [filesystem backend](storage-backends.md#filesystem-backend-default), the default, it does so only if the integrity file went with it — an inventory lost while `.inventory.hmac` remains fails verification instead, which is a counted `409`. That is why the body says only that there is no inventory entry rather than that nothing was ever issued, and why the counter will not separate the two for you: both are uncounted. What does separate them, on the filesystem backend, is the log line the serving replica emits at info level, `No inventory entry for subject; revocation cannot proceed` — its error attribute names the inventory path when the inventory is what is missing, and names no path when the subject is simply not listed. The structured backends answer from an index that verifies nothing, so both cases arrive identical there; compare against `GET /certificate_statuses` (`openvox-ca-ctl list --all`) instead, which reads the certificate index rather than the inventory — a subject it still reports as `signed` is one whose inventory entry has gone, not whose certificate has.
 
 Nor is either status code a statement about [`puppetca_crl_update_failures_total`](metrics.md#crl) in either direction: a revocation refused at the subject lock is an uncounted `409` (the case described above), and a `404` may still have moved the counter on its way out, because a revocation retires any superseded predecessor before it looks the subject up.
 
@@ -437,7 +437,13 @@ certificate goes away:
   could not be read, signed or written all count, as does an inventory read that
   *failed* while resolving the subject's serial — but not a revocation refused
   at a cross-node lock acquisition, which never reaches the CRL work, not a
-  subject that was simply never issued, and not a failed delete at all.
+  revocation that found no inventory entry for the subject, and not a failed
+  delete at all. That second case is reachable here and only here: `clean`
+  revokes only when a certificate is in storage, so on this path it means the
+  certificate is present and the inventory entry is gone — see the
+  [by-subject `404`](#certificate-status) for what the same state answers on
+  `PUT`. A subject that was never issued at all does not reach any of these
+  warnings: `clean` answers `404` before revoking anything.
 
 Otherwise the next CSR is accepted: with autosign enabled it is signed at once
 and the agent is back with a fresh, unrevoked certificate; with autosign off it
