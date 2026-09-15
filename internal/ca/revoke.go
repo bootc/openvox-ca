@@ -168,12 +168,11 @@ func (c *CA) revokeLocked(ctx context.Context, subject string) error {
 		// signal -- since the read goes through ReadInventory; the structured
 		// backends (SQL, etcd, redis) answer from an indexed lookup, which
 		// verifies nothing, so there the counted cases are connection and query
-		// failures. An *absent* inventory on a blob backend reaches
-		// fs.ErrNotExist, and is classed as never-issued rather than counted,
-		// only when its integrity MAC is absent too; with the MAC present the
-		// read fails verification and is counted by the sentence above. See
-		// ErrSubjectUnknown's godoc, which is where that rule is written out.
-		// It matters
+		// failures. An *absent* inventory reaches fs.ErrNotExist, and is
+		// returned as ErrSubjectUnknown rather than counted, only under the
+		// conditions ErrSubjectUnknown's godoc sets out; on a blob backend with
+		// the integrity MAC still present the read fails verification instead
+		// and is counted by the sentence above. It matters
 		// because Clean swallows this error and deletes anyway, so without the
 		// increment a clean silently became delete-without-revoke with one WARN
 		// line and a flat counter, leaving the alert the mixin ships unable to
@@ -210,12 +209,16 @@ func (c *CA) revokeLocked(ctx context.Context, subject string) error {
 			// maps to LevelInfo, so this is in production logs either way; what
 			// Warn would add is a second WARN for every mistyped certname,
 			// beside the one each caller already emits, for a client error the
-			// API now answers 404. The line only carries something the caller's
-			// does not in the rare case -- a lost inventory, where the error is
-			// a real *fs.PathError; in the common one the backends synthesise
-			// the not-exist and it names no path. Level cannot be chosen per
-			// case: the structured backends synthesise *fs.PathError too (with
-			// Path set to the subject), so errors.As cannot tell them apart.
+			// API now answers 404. What the line adds over the caller's is the
+			// cause, and that is worth something only on a blob backend: there
+			// a lost inventory is a real *fs.PathError naming the file, while
+			// an unlisted subject is synthesised by latestSerialFromBlob and
+			// names no path. The structured backends answer from an index that
+			// verifies nothing and synthesise *fs.PathError for both, with Path
+			// set to the subject, so the two states are indistinguishable there
+			// -- which is also why the level cannot be chosen per case, since
+			// errors.As sees the same type either way. docs/api.md says as much
+			// to operators, and sends them to the certificate index instead.
 			slog.Info("No inventory entry for subject; revocation cannot proceed",
 				"subject", subject, "error", err)
 			return fmt.Errorf("%w: %s", ErrSubjectUnknown, subject)

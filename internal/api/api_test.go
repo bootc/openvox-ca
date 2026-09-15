@@ -1459,6 +1459,19 @@ var _ = Describe("API Workflow", func() {
 
 			Expect(rr.Code).To(Equal(http.StatusNotFound),
 				"a lost inventory reaches the same sentinel, so it answers 404 too")
+			// Prove the 404 came from the sentinel arm before asserting
+			// anything about its body. ServeMux answers "404 page not found"
+			// for a path it has no pattern for, and that body contains no
+			// tmpDir either -- so without this, the guard below would pass with
+			// the route deleted and the arm never reached.
+			Expect(rr.Body.String()).To(ContainSubstring(ca.ErrSubjectUnknown.Error()))
+			// The other half of what the docs publish about this state: it is
+			// uncounted here, exactly as it is for a subject that was never
+			// listed. This variant reaches the branch through the HMAC
+			// baseline re-initialisation, which the CA-layer spec does not
+			// traverse.
+			Expect(myCA.CRLUpdateFailures()).To(BeNumerically("==", 0),
+				"a lost inventory is not a CRL-update failure, as docs/api.md states")
 			// The invariant the whole design rests on. The sentinel is returned
 			// unwrapped so this cause -- which names a filesystem path -- stays
 			// in the log; restoring the natural-looking wrap

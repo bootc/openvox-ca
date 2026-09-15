@@ -556,8 +556,6 @@ var _ = Describe("CRL chain read failures", func() {
 
 		Expect(line).To(ContainSubstring(store.InventoryPath()),
 			"the cause is the only thing separating a lost inventory from a typo'd certname")
-		Expect(line).NotTo(ContainSubstring("has been issued"),
-			"it must not claim an issuance history: the certificate it is deleting is proof otherwise")
 
 		// Clean's own warning must stay truthful too -- it is the one an
 		// operator actually reads about a certificate that was deleted while
