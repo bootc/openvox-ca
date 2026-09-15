@@ -18,6 +18,7 @@
 package ca_test
 
 import (
+	"bytes"
 	"context"
 	"crypto/ecdsa"
 	"crypto/elliptic"
@@ -29,9 +30,11 @@ import (
 	"encoding/pem"
 	"errors"
 	"io/fs"
+	"log/slog"
 	"math/big"
 	"os"
 	"path/filepath"
+	"strings"
 	"sync"
 	"sync/atomic"
 	"time"
@@ -573,11 +576,37 @@ var _ = Describe("CA Revocation", func() {
 	})
 
 	It("returns an error when revoking a subject with no inventory entry", func() {
+		// Capture the log too: docs/api.md tells operators to separate a
+		// mistyped certname from a lost inventory by whether this record's
+		// error attribute names a storage path. The lost-inventory half is
+		// pinned in crlchain_test.go; this is the other half, and without it a
+		// well-meant change that added the inventory path to the not-found
+		// error for debuggability would void the documented procedure with
+		// nothing going red.
+		var buf bytes.Buffer
+		orig := slog.Default()
+		slog.SetDefault(slog.New(slog.NewTextHandler(&buf, &slog.HandlerOptions{Level: slog.LevelInfo})))
+		defer slog.SetDefault(orig)
+
 		// Pinned to the sentinel, not merely to "an error": ErrSubjectUnknown
 		// is what the API layer turns into a 404, so an opaque assertion here
 		// would let the status code regress without a red test.
 		Expect(myCA.Revoke(context.Background(), "never-signed")).
 			To(MatchError(ca.ErrSubjectUnknown))
+
+		var line string
+		for _, l := range strings.Split(buf.String(), "\n") {
+			if strings.Contains(l, "No inventory entry for subject") {
+				line = l
+				break
+			}
+		}
+		// Positive first, so the absence assertion below cannot pass simply
+		// because the line stopped being emitted.
+		Expect(line).To(ContainSubstring("never-signed"),
+			"the record must name the subject it could not find")
+		Expect(line).NotTo(ContainSubstring(store.InventoryPath()),
+			"an unlisted subject must not name a storage path; that absence is what docs/api.md tells operators to read")
 		// Not counted. The CRL-update counter drives the mixin's alert, and a
 		// typo'd certname is an operator mistake, not a CA fault -- so the
 		// exclusion for a never-issued subject is pinned here, beside the error
