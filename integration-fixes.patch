@@ -1,0 +1,323 @@
+diff --git a/charts/openvox-ca/templates/_helpers.tpl b/charts/openvox-ca/templates/_helpers.tpl
+index 4a9efb57f601..ffda76cb33f8 100644
+--- a/charts/openvox-ca/templates/_helpers.tpl
++++ b/charts/openvox-ca/templates/_helpers.tpl
+@@ -695,7 +695,7 @@ The storage backend kind the server will run with, or nothing when the chart
+ cannot tell.
+ 
+ The server's precedence, lowest first: the config file, then
+-PUPPET_CA_STORAGE_BACKEND when it is non-empty, then --storage-backend, which
++OPENVOX_CA_STORAGE_BACKEND when it is non-empty, then --storage-backend, which
+ the chart appends to its argv through extraArgs and which wins whenever it is
+ given, even empty. A flag with its value attached settles the question whatever
+ the environment held, so it restores a verdict a Secret-fed variable had
+@@ -731,10 +731,10 @@ configuration it cannot read is worse than none.
+ {{- $envValue := "" -}}
+ {{- $known := true -}}
+ {{- range $envName, $value := .Values.env -}}
+-{{- if eq $envName "PUPPET_CA_STORAGE_BACKEND" }}{{ $envValue = $value | default "" | toString }}{{ $known = not (contains "$(" $envValue) }}{{ end -}}
++{{- if eq $envName "OPENVOX_CA_STORAGE_BACKEND" }}{{ $envValue = $value | default "" | toString }}{{ $known = not (contains "$(" $envValue) }}{{ end -}}
+ {{- end -}}
+ {{- range .Values.extraEnv -}}
+-{{- if eq .name "PUPPET_CA_STORAGE_BACKEND" -}}
++{{- if eq .name "OPENVOX_CA_STORAGE_BACKEND" -}}
+ {{- if hasKey . "valueFrom" }}{{ $known = false }}{{ else }}{{ $envValue = .value | default "" | toString }}{{ $known = not (contains "$(" $envValue) }}{{ end -}}
+ {{- end -}}
+ {{- end -}}
+@@ -1309,9 +1309,9 @@ CrashLoopBackOff or a Service that silently routes nowhere.
+ {{- $kind := include "openvox-ca.storageBackend" . -}}
+ {{- if has $kind (list "filesystem" "sqlite") -}}
+ {{- if and .Values.autoscaling.enabled (gt (int .Values.autoscaling.maxReplicas) 1) -}}
+-{{- fail (printf "autoscaling.maxReplicas is %d, but the %s storage backend supports exactly one running instance: a second replica crash-loops on the store lock, cannot attach a ReadWriteOnce volume, or on an emptyDir starts a separate CA. Set autoscaling.enabled: false with replicaCount: 1, or move the CA to postgres, mysql, etcd or redis — see https://github.com/voxpupuli/openvox-ca/blob/main/docs/storage-backends.md. The chart reads the backend from config.storage_backend, PUPPET_CA_STORAGE_BACKEND in env or extraEnv, and --storage-backend in extraArgs, and an unset one is filesystem; if a command wrapper supplies it some other way, set config.storage_backend too." (int .Values.autoscaling.maxReplicas) $kind) -}}
++{{- fail (printf "autoscaling.maxReplicas is %d, but the %s storage backend supports exactly one running instance: a second replica crash-loops on the store lock, cannot attach a ReadWriteOnce volume, or on an emptyDir starts a separate CA. Set autoscaling.enabled: false with replicaCount: 1, or move the CA to postgres, mysql, etcd or redis — see https://github.com/voxpupuli/openvox-ca/blob/main/docs/storage-backends.md. The chart reads the backend from config.storage_backend, OPENVOX_CA_STORAGE_BACKEND in env or extraEnv, and --storage-backend in extraArgs, and an unset one is filesystem; if a command wrapper supplies it some other way, set config.storage_backend too." (int .Values.autoscaling.maxReplicas) $kind) -}}
+ {{- else if and (not .Values.autoscaling.enabled) (gt (int .Values.replicaCount) 1) -}}
+-{{- fail (printf "replicaCount is %d, but the %s storage backend supports exactly one running instance: a second replica crash-loops on the store lock, cannot attach a ReadWriteOnce volume, or on an emptyDir starts a separate CA. Set replicaCount: 1, or move the CA to postgres, mysql, etcd or redis — see https://github.com/voxpupuli/openvox-ca/blob/main/docs/storage-backends.md. The chart reads the backend from config.storage_backend, PUPPET_CA_STORAGE_BACKEND in env or extraEnv, and --storage-backend in extraArgs, and an unset one is filesystem; if a command wrapper supplies it some other way, set config.storage_backend too." (int .Values.replicaCount) $kind) -}}
++{{- fail (printf "replicaCount is %d, but the %s storage backend supports exactly one running instance: a second replica crash-loops on the store lock, cannot attach a ReadWriteOnce volume, or on an emptyDir starts a separate CA. Set replicaCount: 1, or move the CA to postgres, mysql, etcd or redis — see https://github.com/voxpupuli/openvox-ca/blob/main/docs/storage-backends.md. The chart reads the backend from config.storage_backend, OPENVOX_CA_STORAGE_BACKEND in env or extraEnv, and --storage-backend in extraArgs, and an unset one is filesystem; if a command wrapper supplies it some other way, set config.storage_backend too." (int .Values.replicaCount) $kind) -}}
+ {{- end -}}
+ {{- end -}}
+ 
+diff --git a/cmd/openvox-ca-ctl/main_test.go b/cmd/openvox-ca-ctl/main_test.go
+index 25b3c9218c45..cb6e33d764f5 100644
+--- a/cmd/openvox-ca-ctl/main_test.go
++++ b/cmd/openvox-ca-ctl/main_test.go
+@@ -129,7 +129,7 @@ var _ = Describe("Global flag precedence", func() {
+ 	// other spec here passes --config, which outranks the variable, so these
+ 	// run the probe without one. Each names one of two files in turn rather
+ 	// than comparing set with unset: unset falls back to
+-	// /etc/puppet-ca/ctl.yaml, which is the host's to decide.
++	// /etc/openvox-ca/ctl.yaml, which is the host's to decide.
+ 	DescribeTable("reads the config file named by OPENVOX_CA_CTL_CONFIG",
+ 		func(pick int) {
+ 			want := []string{"/from/first.pem", "/from/second.pem"}
+diff --git a/cmd/openvox-ca/autosign_validation_test.go b/cmd/openvox-ca/autosign_validation_test.go
+index 15b013337eaa..3c112e4d41fc 100644
+--- a/cmd/openvox-ca/autosign_validation_test.go
++++ b/cmd/openvox-ca/autosign_validation_test.go
+@@ -206,13 +206,13 @@ var _ = Describe("the autosign executable preflight under --daemon", func() {
+ 
+ 	// These drive whole commands, so pin the environment and the config file
+ 	// the way keyperms_test.go's startup specs do, for the reasons given
+-	// there: none of them passes --config, and an ambient PUPPET_CA_* or a
+-	// host /etc/puppet-ca/config.yaml would change what they assert.
++	// there: none of them passes --config, and an ambient OPENVOX_CA_* or a
++	// host /etc/openvox-ca/config.yaml would change what they assert.
+ 	BeforeEach(func() {
+ 		clearServerEnv()
+ 		empty := filepath.Join(GinkgoT().TempDir(), "empty-config.yaml")
+ 		Expect(os.WriteFile(empty, []byte("{}\n"), 0o600)).To(Succeed(), "pin an empty config")
+-		GinkgoT().Setenv("PUPPET_CA_CONFIG", empty)
++		GinkgoT().Setenv("OPENVOX_CA_CONFIG", empty)
+ 	})
+ 
+ 	BeforeEach(func() {
+@@ -284,13 +284,13 @@ var _ = Describe("the autosign executable preflight under --daemon", func() {
+ var _ = Describe("the autosign executable check at startup", func() {
+ 	// These drive whole commands, so pin the environment and the config file
+ 	// the way keyperms_test.go's startup specs do, for the reasons given
+-	// there: none of them passes --config, and an ambient PUPPET_CA_* or a
+-	// host /etc/puppet-ca/config.yaml would change what they assert.
++	// there: none of them passes --config, and an ambient OPENVOX_CA_* or a
++	// host /etc/openvox-ca/config.yaml would change what they assert.
+ 	BeforeEach(func() {
+ 		clearServerEnv()
+ 		empty := filepath.Join(GinkgoT().TempDir(), "empty-config.yaml")
+ 		Expect(os.WriteFile(empty, []byte("{}\n"), 0o600)).To(Succeed(), "pin an empty config")
+-		GinkgoT().Setenv("PUPPET_CA_CONFIG", empty)
++		GinkgoT().Setenv("OPENVOX_CA_CONFIG", empty)
+ 	})
+ 
+ 	It("refuses to serve", func(ctx SpecContext) {
+diff --git a/cmd/openvox-ca/config.go b/cmd/openvox-ca/config.go
+index 34e9ed29cd9a..b5eba1b36c7e 100644
+--- a/cmd/openvox-ca/config.go
++++ b/cmd/openvox-ca/config.go
+@@ -1253,7 +1253,7 @@ func loadPuppetServerFile(path string) ([]string, error) {
+ var resolveConfigFile = config.ResolveConfigFile
+ 
+ // defaultConfigFile is the configuration file every subcommand reads when
+-// neither --config nor PUPPET_CA_CONFIG names one. The packages install
++// neither --config nor OPENVOX_CA_CONFIG names one. The packages install
+ // their config.yaml here and the unit passes no --config, so it is also the
+ // path packaging/nfpm.yaml, first-boot and postinstall have to agree with.
+ // mage test:magefile checks all three against this constant.
+@@ -1263,7 +1263,7 @@ const defaultConfigFile = "/etc/openvox-ca/config.yaml"
+ // (and is outranked by --config). Specs that pin or clear it go through this
+ // constant rather than the literal, so a rename of the variable cannot leave
+ // such a pin quietly guarding a name nothing reads any more.
+-const configEnvVar = "PUPPET_CA_CONFIG"
++const configEnvVar = "OPENVOX_CA_CONFIG"
+ 
+ // supersededWindowWarning reports whether the configured sweep interval makes
+ // the overlap window meaningfully longer than the operator asked for, and the
+diff --git a/cmd/openvox-ca/generate_test.go b/cmd/openvox-ca/generate_test.go
+index 68f4da8a8b10..0aa810353f91 100644
+--- a/cmd/openvox-ca/generate_test.go
++++ b/cmd/openvox-ca/generate_test.go
+@@ -271,7 +271,7 @@ var _ = Describe("openvox-ca generate", func() {
+ 			cfgPath := filepath.Join(GinkgoT().TempDir(), "badprovider.yaml")
+ 			Expect(os.WriteFile(cfgPath, []byte(
+ 				"ca_key_algo: ecdsa\nca_key_size: 256\nca_key_provider: nonesuch\n"), 0o644)).To(Succeed())
+-			setEnv("PUPPET_CA_CONFIG", cfgPath)
++			setEnv("OPENVOX_CA_CONFIG", cfgPath)
+ 
+ 			_, _, err := runGenerate("--cadir", caDir, "--certname", "ca", "--ttl", "1h")
+ 			Expect(err).To(MatchError(ca.ErrReservedSubject))
+diff --git a/docs/configuration.md b/docs/configuration.md
+index 214966c75c80..a8a2b27cde21 100644
+--- a/docs/configuration.md
++++ b/docs/configuration.md
+@@ -2238,7 +2238,7 @@ The executable's SHA-256 is logged at startup for change detection. It is not
+ enforced; editing the script takes effect on the next CSR.
+ 
+ `insecure_allow_unsafe_autosign_path` (`--insecure-allow-unsafe-autosign-path`,
+-`PUPPET_CA_INSECURE_ALLOW_UNSAFE_AUTOSIGN_PATH`) stops the ownership and
++`OPENVOX_CA_INSECURE_ALLOW_UNSAFE_AUTOSIGN_PATH`) stops the ownership and
+ writable findings from refusing anything. The CA logs a `WARN` for each one it
+ finds at startup (and under `--daemon` prints them to the terminal), and then
+ runs the executable regardless. The check before each run still requires the
+diff --git a/docs/systemd.md b/docs/systemd.md
+index ecf7e3026263..73ce193e9b49 100644
+--- a/docs/systemd.md
++++ b/docs/systemd.md
+@@ -74,7 +74,7 @@ That does not make sharing a host with a root-running agent free. If provisionin
+ 
+ **It is not only the CA key.** Anything the service reads as `puppet` is readable by everything else running as `puppet`: the configuration file and any credentials in it — `etcd_password`, the OpenBao AppRole `role_id` and `secret_id` files — and, on a filesystem backend, the whole cadir.
+ 
+-**Encrypting the CA key at rest does not reduce this.** [Encryption at rest](ca-key-security.md) protects a key that leaves the host — in a backup, a snapshot, a stolen disk — because whoever holds the file does not hold the passphrase. It does nothing against an attacker who *is* the `puppet` uid, because that account reads whatever decrypts the key as readily as the key itself: the server has to read its passphrase unattended in order to sign, so wherever it reads it from — a `ca_key_passphrase_file`, or `PUPPET_CA_KEY_PASSPHRASE` in its environment — that account can read it too.
++**Encrypting the CA key at rest does not reduce this.** [Encryption at rest](ca-key-security.md) protects a key that leaves the host — in a backup, a snapshot, a stolen disk — because whoever holds the file does not hold the passphrase. It does nothing against an attacker who *is* the `puppet` uid, because that account reads whatever decrypts the key as readily as the key itself: the server has to read its passphrase unattended in order to sign, so wherever it reads it from — a `ca_key_passphrase_file`, or `OPENVOX_CA_KEY_PASSPHRASE` in its environment — that account can read it too.
+ 
+ That is the price of fitting the layout Server already establishes, and it is worth knowing rather than discovering. What actually removes it is not sharing the host: a CA that matters should not live beside the server it issues for, and a dedicated CA host has no `puppet` account but its own, so the question does not arise.
+ 
+diff --git a/magefile.go b/magefile.go
+index 7ef29e96a625..8754ffe12f39 100644
+--- a/magefile.go
++++ b/magefile.go
+@@ -6955,7 +6955,7 @@ networkPolicy:
+ 			// mounts the volume where nothing looks.
+ 			name:     "a pinned persistence.mountPath moves the mount and the derived cadir",
+ 			sets:     []string{tls, "persistence.mountPath=/var/lib/puppet-ca"},
+-			wants:    []string{"mountPath: /var/lib/puppet-ca\n", "cadir: /var/lib/puppet-ca\n"},
++			wants:    []string{"mountPath: \"/var/lib/puppet-ca\"\n", "cadir: /var/lib/puppet-ca\n"},
+ 			notWants: []string{"/var/lib/openvox-ca"},
+ 		},
+ 		{
+@@ -6975,7 +6975,7 @@ config:
+         cert: /var/lib/puppet-ca/tls.crt
+         key: /var/lib/puppet-ca/tls.key
+ `,
+-			wants:    []string{"mountPath: /var/lib/puppet-ca\n", "cadir: /var/lib/puppet-ca/ca"},
++			wants:    []string{"mountPath: \"/var/lib/puppet-ca\"\n", "cadir: /var/lib/puppet-ca/ca"},
+ 			notWants: []string{"/var/lib/openvox-ca"},
+ 		},
+ 		{
+@@ -7095,7 +7095,7 @@ config:
+ 			name:  "NOTES warns about several replicas when the backend is out of sight",
+ 			notes: true,
+ 			sets: []string{tls, "autoscaling.enabled=true", "autoscaling.maxReplicas=3",
+-				"extraEnv[0].name=PUPPET_CA_STORAGE_BACKEND",
++				"extraEnv[0].name=OPENVOX_CA_STORAGE_BACKEND",
+ 				"extraEnv[0].valueFrom.secretKeyRef.name=backend", "extraEnv[0].valueFrom.secretKeyRef.key=kind"},
+ 			wants: []string{"autoscaling may run up to 3 replicas", "cannot see the backend the server will actually use"},
+ 		},
+@@ -7119,7 +7119,7 @@ config:
+ 			// stays on one line however the paragraph below it wraps.
+ 			name:     "NOTES says nothing about replicas on a backend that supports them",
+ 			notes:    true,
+-			sets:     []string{tls, "replicaCount=2", "env.PUPPET_CA_STORAGE_BACKEND=etcd"},
++			sets:     []string{tls, "replicaCount=2", "env.OPENVOX_CA_STORAGE_BACKEND=etcd"},
+ 			wants:    []string{"Storage backend: etcd"},
+ 			notWants: []string{"WARNING: replicaCount is 2"},
+ 		},
+@@ -7130,7 +7130,7 @@ config:
+ 			// that its CA lived on an emptyDir.
+ 			name:     "NOTES reads the backend from the environment when it is set there",
+ 			notes:    true,
+-			sets:     []string{tls, "persistence.enabled=false", "env.PUPPET_CA_STORAGE_BACKEND=postgres"},
++			sets:     []string{tls, "persistence.enabled=false", "env.OPENVOX_CA_STORAGE_BACKEND=postgres"},
+ 			wants:    []string{"Storage backend: postgres"},
+ 			notWants: []string{"persistence is disabled"},
+ 		},
+@@ -7151,7 +7151,7 @@ config:
+ 			// The environment outranks the config file, so a filesystem
+ 			// default overridden there is not a filesystem CA.
+ 			name:  "several replicas render when the environment names an external backend",
+-			sets:  []string{tls, "replicaCount=2", "env.PUPPET_CA_STORAGE_BACKEND=etcd"},
++			sets:  []string{tls, "replicaCount=2", "env.OPENVOX_CA_STORAGE_BACKEND=etcd"},
+ 			wants: []string{"replicas: 2"},
+ 		},
+ 		{
+@@ -7159,7 +7159,7 @@ config:
+ 			// must not refuse; the NOTES case above pins the warning instead.
+ 			name: "several replicas render when the backend comes from a Secret",
+ 			sets: []string{tls, "replicaCount=2",
+-				"extraEnv[0].name=PUPPET_CA_STORAGE_BACKEND",
++				"extraEnv[0].name=OPENVOX_CA_STORAGE_BACKEND",
+ 				"extraEnv[0].valueFrom.secretKeyRef.name=backend", "extraEnv[0].valueFrom.secretKeyRef.key=kind"},
+ 			wants: []string{"replicas: 2"},
+ 		},
+@@ -7174,22 +7174,22 @@ config:
+ 			// The server ignores an empty variable, so it defers to the config
+ 			// file rather than reading as the filesystem default.
+ 			name:  "several replicas render when an empty env variable leaves the config's backend",
+-			sets:  []string{tls, "replicaCount=2", "config.storage_backend=postgres", "env.PUPPET_CA_STORAGE_BACKEND="},
++			sets:  []string{tls, "replicaCount=2", "config.storage_backend=postgres", "env.OPENVOX_CA_STORAGE_BACKEND="},
+ 			wants: []string{"replicas: 2"},
+ 		},
+ 		{
+ 			// An extraEnv entry with neither value nor source is the empty
+ 			// string to Kubernetes, and so the same as the case above.
+ 			name:  "several replicas render when a sourceless extraEnv variable leaves the config's backend",
+-			sets:  []string{tls, "replicaCount=2", "config.storage_backend=postgres", "extraEnv[0].name=PUPPET_CA_STORAGE_BACKEND"},
++			sets:  []string{tls, "replicaCount=2", "config.storage_backend=postgres", "extraEnv[0].name=OPENVOX_CA_STORAGE_BACKEND"},
+ 			wants: []string{"replicas: 2"},
+ 		},
+ 		{
+ 			// env is rendered before extraEnv and Kubernetes keeps the last
+ 			// entry of a name, so extraEnv wins.
+ 			name: "several replicas render when extraEnv overrides an env backend",
+-			sets: []string{tls, "replicaCount=2", "env.PUPPET_CA_STORAGE_BACKEND=sqlite",
+-				"extraEnv[0].name=PUPPET_CA_STORAGE_BACKEND", "extraEnv[0].value=postgres"},
++			sets: []string{tls, "replicaCount=2", "env.OPENVOX_CA_STORAGE_BACKEND=sqlite",
++				"extraEnv[0].name=OPENVOX_CA_STORAGE_BACKEND", "extraEnv[0].value=postgres"},
+ 			wants: []string{"replicas: 2"},
+ 		},
+ 		{
+@@ -7212,7 +7212,7 @@ config:
+ 		},
+ 		{
+ 			// envFrom is the half of configFullyKnown that configFileKnown
+-			// lacks; a Secret named there can carry PUPPET_CA_STORAGE_BACKEND,
++			// lacks; a Secret named there can carry OPENVOX_CA_STORAGE_BACKEND,
+ 			// so the chart cannot judge and must not refuse.
+ 			name:  "several replicas render when envFrom may carry the backend",
+ 			sets:  []string{tls, "replicaCount=2", "envFrom[0].secretRef.name=ca-env"},
+@@ -7246,7 +7246,7 @@ config:
+ 			sets: []string{tls, "replicaCount=2",
+ 				"extraEnv[0].name=BACKEND",
+ 				"extraEnv[0].valueFrom.secretKeyRef.name=backend", "extraEnv[0].valueFrom.secretKeyRef.key=kind",
+-				"extraEnv[1].name=PUPPET_CA_STORAGE_BACKEND", "extraEnv[1].value=$(BACKEND)"},
++				"extraEnv[1].name=OPENVOX_CA_STORAGE_BACKEND", "extraEnv[1].value=$(BACKEND)"},
+ 			wants: []string{"WARNING: replicaCount is 2", "cannot see the backend the server will actually use"},
+ 		},
+ 		{
+@@ -7254,7 +7254,7 @@ config:
+ 			// before the reference to it and the kubelet expands it.
+ 			name:  "NOTES warns when an env backend carries a $(NAME) reference",
+ 			notes: true,
+-			sets:  []string{tls, "replicaCount=2", "env.BACKEND=sqlite", "env.PUPPET_CA_STORAGE_BACKEND=$(BACKEND)"},
++			sets:  []string{tls, "replicaCount=2", "env.BACKEND=sqlite", "env.OPENVOX_CA_STORAGE_BACKEND=$(BACKEND)"},
+ 			wants: []string{"WARNING: replicaCount is 2", "cannot see the backend the server will actually use"},
+ 		},
+ 		{
+@@ -7571,7 +7571,7 @@ config:
+ 			// The environment outranks the config file in both directions: here
+ 			// it turns an etcd config back into a single-instance CA.
+ 			name:    "several replicas when the environment overrides the backend to sqlite",
+-			sets:    []string{tls, "replicaCount=2", "config.storage_backend=etcd", "env.PUPPET_CA_STORAGE_BACKEND=sqlite"},
++			sets:    []string{tls, "replicaCount=2", "config.storage_backend=etcd", "env.OPENVOX_CA_STORAGE_BACKEND=sqlite"},
+ 			wantErr: "the sqlite storage backend",
+ 		},
+ 		{
+@@ -7585,7 +7585,7 @@ config:
+ 			// The extraEnv literal outranks the config file like env's does.
+ 			name: "several replicas when an extraEnv value overrides the backend to sqlite",
+ 			sets: []string{tls, "replicaCount=2", "config.storage_backend=postgres",
+-				"extraEnv[0].name=PUPPET_CA_STORAGE_BACKEND", "extraEnv[0].value=sqlite"},
++				"extraEnv[0].name=OPENVOX_CA_STORAGE_BACKEND", "extraEnv[0].value=sqlite"},
+ 			wantErr: "the sqlite storage backend",
+ 		},
+ 		{
+@@ -7594,10 +7594,10 @@ config:
+ 			// filesystem default. Taking each non-empty value as it came kept
+ 			// the earlier postgres and passed two replicas of an emptyDir CA.
+ 			name: "several replicas when an empty extraEnv duplicate discards an env backend",
+-			sets: []string{tls, "replicaCount=2", "env.PUPPET_CA_STORAGE_BACKEND=postgres"},
++			sets: []string{tls, "replicaCount=2", "env.OPENVOX_CA_STORAGE_BACKEND=postgres"},
+ 			valuesYAML: `
+ extraEnv:
+-  - name: PUPPET_CA_STORAGE_BACKEND
++  - name: OPENVOX_CA_STORAGE_BACKEND
+     value: ""
+ `,
+ 			wantErr: "the filesystem storage backend",
+@@ -7607,9 +7607,9 @@ extraEnv:
+ 			// the chart can judge the backend again.
+ 			name: "several replicas when a literal extraEnv entry follows a Secret-fed one",
+ 			sets: []string{tls, "replicaCount=2",
+-				"extraEnv[0].name=PUPPET_CA_STORAGE_BACKEND",
++				"extraEnv[0].name=OPENVOX_CA_STORAGE_BACKEND",
+ 				"extraEnv[0].valueFrom.secretKeyRef.name=backend", "extraEnv[0].valueFrom.secretKeyRef.key=kind",
+-				"extraEnv[1].name=PUPPET_CA_STORAGE_BACKEND", "extraEnv[1].value=sqlite"},
++				"extraEnv[1].name=OPENVOX_CA_STORAGE_BACKEND", "extraEnv[1].value=sqlite"},
+ 			wantErr: "the sqlite storage backend",
+ 		},
+ 		{
+@@ -7672,7 +7672,7 @@ extraEnv:
+ 			// environment feeds it from a Secret, because the flag wins.
+ 			name: "several replicas when a backend flag overrides a Secret-fed variable",
+ 			sets: []string{tls, "replicaCount=2",
+-				"extraEnv[0].name=PUPPET_CA_STORAGE_BACKEND",
++				"extraEnv[0].name=OPENVOX_CA_STORAGE_BACKEND",
+ 				"extraEnv[0].valueFrom.secretKeyRef.name=backend", "extraEnv[0].valueFrom.secretKeyRef.key=kind",
+ 				"extraArgs[0]=--storage-backend=sqlite"},
+ 			wantErr: "the sqlite storage backend",
