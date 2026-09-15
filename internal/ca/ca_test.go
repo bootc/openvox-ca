@@ -620,10 +620,49 @@ var _ = Describe("CA Revocation", func() {
 		// exclusion for a subject the inventory does not list is pinned here,
 		// beside the error that reports it. Keyed on the inventory rather than
 		// on issuance history: ErrSubjectUnknown does not claim the latter, and
-		// a lost inventory reaches the same uncounted arm with a certificate
+		// a lost inventory -- on a blob backend, one lost along with its
+		// integrity MAC -- reaches the same uncounted arm with a certificate
 		// still in storage.
+		//
+		// "By itself" is load-bearing: a 404 CAN carry a count, because the
+		// superseded-predecessor retirement runs before this lookup and counts
+		// its own failures. This fixture has no predecessors, so what is pinned
+		// here is that the not-found arm adds nothing of its own.
 		Expect(myCA.CRLUpdateFailures()).To(BeNumerically("==", 0),
-			"a subject the inventory has no entry for must not raise the CRL-failure alert")
+			"the not-found arm must not raise the CRL-failure alert by itself")
+	})
+
+	It("counts an inventory that fails verification, unlike one that simply lacks the subject", func() {
+		// The by-subject twin of the by-serial spec in revokeserial_test.go,
+		// and the assertion three other specs quietly depend on. Each of them
+		// removes .inventory.hmac alongside the inventory precisely to AVOID
+		// this branch, and each says so in a comment -- but nothing asserted
+		// what the branch they are avoiding actually does. Collapse the split
+		// and all three stay green while their stated reasons become false, and
+		// so does docs/api.md's claim that a lost inventory with its MAC intact
+		// is a counted 409 rather than the 404.
+		//
+		// It matters beyond bookkeeping: a tamper signal answered as an
+		// uncounted "no inventory entry" would report a forged inventory as an
+		// unknown node and leave PuppetCACRLUpdateFailing silent.
+		csrPEM, err := testutil.GenerateCSR("tampered-node")
+		Expect(err).NotTo(HaveOccurred())
+		_, err = myCA.SaveRequest(context.Background(), "tampered-node", csrPEM)
+		Expect(err).NotTo(HaveOccurred())
+		_, err = myCA.Sign(context.Background(), "tampered-node")
+		Expect(err).NotTo(HaveOccurred())
+
+		// The inventory only. Leaving the MAC behind is the whole point: the
+		// recomputed MAC is taken over an empty blob and cannot match, so the
+		// read fails verification rather than reporting absence.
+		Expect(os.Remove(store.InventoryPath())).To(Succeed())
+
+		err = myCA.Revoke(context.Background(), "tampered-node")
+		Expect(err).To(MatchError(storage.ErrInventoryTampered))
+		Expect(err).NotTo(MatchError(ca.ErrSubjectUnknown),
+			"a failed verification is not a subject the inventory does not list")
+		Expect(myCA.CRLUpdateFailures()).To(BeNumerically("==", 1),
+			"a revocation that could not be recorded must raise the alert")
 	})
 
 	It("does not report an unreadable CRL as an unknown subject", func() {

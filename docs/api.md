@@ -436,14 +436,22 @@ certificate goes away:
   `puppetca_crl_update_failures_total` covers most of the first — a CRL that
   could not be read, signed or written all count, as does an inventory read that
   *failed* while resolving the subject's serial — but not a revocation refused
-  at a cross-node lock acquisition, which never reaches the CRL work, not a
-  revocation that found no inventory entry for the subject, and not a failed
-  delete at all. That second case is reachable here and only here: `clean`
-  revokes only when a certificate is in storage, so on this path it means the
-  certificate is present and the inventory entry is gone — see the
-  [by-subject `404`](#certificate-status) for what the same state answers on
-  `PUT`. A subject that was never issued at all does not reach any of these
-  warnings: `clean` answers `404` before revoking anything.
+  because the CRL lock could not be taken at all, which never reaches the CRL
+  work and which `clean` leaves uncounted on every backend, since it takes that
+  lock directly rather than through the counted helper; not a re-sign that
+  failed on a faulty `crl_chain_file`, which deliberately moves
+  [`puppetca_crl_chain_refresh_failures_total`](metrics.md#crl) instead so that
+  counter's runbook stays "check the file"; not a revocation that found no
+  inventory entry for the subject; and not a failed delete at all. The no-inventory-entry exclusion is the one `clean` swallows
+  rather than surfaces: it revokes only when a certificate is in storage, so
+  here it means the certificate is present and the inventory entry is gone, and
+  the call still answers `204` with a `Clean: revoke failed` warning — where
+  [`PUT /certificate_status`](#certificate-status) answers `404` for that same
+  state. `PUT /clean` shares this path. Neither of the other two states reaches
+  the revoke path at all, since `clean` revokes only under its `hasCert` arm: a
+  subject with no certificate and no pending request is a `404` that revokes and
+  deletes nothing, and one holding only a pending request is a `204` whose sole
+  reachable warning is `Clean: delete CSR failed`.
 
 Otherwise the next CSR is accepted: with autosign enabled it is signed at once
 and the agent is back with a fresh, unrevoked certificate; with autosign off it
