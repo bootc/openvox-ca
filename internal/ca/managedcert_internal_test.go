@@ -557,6 +557,27 @@ var _ = Describe("Resolving the leaf key configuration", func() {
 			KeyConfig: KeyConfig{Algo: KeyAlgoECDSA, Size: 384},
 		})).To(Equal(KeyConfig{Algo: KeyAlgoECDSA, Size: 384}))
 	})
+
+	// The half-set entry, which is the boundary keyConfigFor carries its own
+	// copy of. The spec above sets BOTH fields and the one above that sets
+	// NEITHER, so between them they leave the OR untested: narrowing it to AND
+	// keeps both of them green while every half-set entry silently falls
+	// through to the CA's configuration instead of the operator's. That is the
+	// same disagreement leafKeyConfig exists to fix, reintroduced one level
+	// down at the per-entry granularity this changeset adds.
+	It("honours an entry's size configured without an algorithm", func() {
+		Expect(myCA.keyConfigFor(CertSpec{
+			KeyConfig: KeyConfig{Size: 2048},
+		})).To(Equal(KeyConfig{Size: 2048}),
+			"a Size-only entry must not inherit the CA's 4096")
+	})
+
+	It("honours an entry's algorithm configured without a size", func() {
+		Expect(myCA.keyConfigFor(CertSpec{
+			KeyConfig: KeyConfig{Algo: KeyAlgoECDSA},
+		})).To(Equal(KeyConfig{Algo: KeyAlgoECDSA}),
+			"an Algo-only entry must not inherit the CA's RSA-4096")
+	})
 })
 
 var _ = Describe("The leaf NotBefore backdate", func() {

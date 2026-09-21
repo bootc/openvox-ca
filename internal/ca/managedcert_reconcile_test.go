@@ -809,6 +809,18 @@ var _ = Describe("Reconciling a managed certificate", func() {
 			Expect(perr).NotTo(HaveOccurred())
 			Expect(scert.SerialNumber).NotTo(Equal(leaf.cert.SerialNumber),
 				"the CA's record must not be overwritten with a certificate it did not issue")
+
+			// What the record IS, not merely what it is not. The negative alone
+			// passes for any wrong value -- a stale certificate, a different
+			// orphan, anything at all but the foreign serial -- and so would
+			// survive a repair that put the wrong thing back. On this arm the
+			// restore is skipped by design, so the record must still hold the
+			// certificate issueLeafLocked wrote immediately before the entry's
+			// store refused it: the new orphan, which the inventory names.
+			orphanSerial, serr := store.LatestSerialForSubject(ctx, subject)
+			Expect(serr).NotTo(HaveOccurred())
+			Expect(serialHexStr(scert.SerialNumber)).To(Equal(orphanSerial),
+				"the record must hold the certificate this CA just issued")
 		})
 
 		It("leaves the predecessor valid and in the store", func() {
@@ -1336,6 +1348,137 @@ var _ = Describe("Four replicas reconciling one managed certificate", func() {
 		Expect(raceFourWays(replicas)).To(BeNumerically(">", 1),
 			"with nothing serialising them the four replicas must each issue; if this passes "+
 				"with one issuance the harness cannot observe the failure the spec above rules out")
+	})
+})
+
+var _ = Describe("ReconcileManaged over several entries", func() {
+	// The plural entry point, which is what the server's background loop
+	// actually calls -- reconcileManagedOnce calls ReconcileManaged, not
+	// ReconcileManagedCert. Everything above exercises one entry at a time, so
+	// the contract this loop exists to provide went unexercised: "Entries are
+	// independent. One that fails is logged, counted as a failure, and left for
+	// the next pass; the rest still run. A single unreachable store must not
+	// stop every other managed certificate from renewing."
+	//
+	// That sentence is the whole reason the loop has a firstErr and a continue
+	// rather than an early return, and #243 configures several component
+	// certificates against exactly it.
+	var (
+		ctx   context.Context
+		store *storage.StorageService
+		myCA  *CA
+	)
+
+	// entryFor builds an independent managed certificate and its own store, so
+	// one entry's induced failure cannot reach another's material.
+	entryFor := func(subject string) (ManagedCert, *memStore) {
+		fake := &memStore{}
+		return ManagedCert{
+			Spec: CertSpec{
+				Subject:     subject,
+				DNSNames:    []string{subject},
+				TTL:         90 * 24 * time.Hour,
+				RenewBefore: 30 * 24 * time.Hour,
+			},
+			Load: fake.load,
+			Save: fake.save,
+		}, fake
+	}
+
+	BeforeEach(func() {
+		ctx = context.Background()
+		store = storage.New(GinkgoT().TempDir())
+		myCA = New(store, AutosignConfig{Mode: "off"}, "puppet.test")
+		myCA.CAKeyConfig = KeyConfig{Algo: KeyAlgoECDSA, Size: 256}
+		myCA.LeafKeyConfig = KeyConfig{Algo: KeyAlgoECDSA, Size: 256}
+		Expect(myCA.Init(ctx)).To(Succeed())
+	})
+
+	It("issues nothing and reports nothing when no entry is configured", func() {
+		issued, err := myCA.ReconcileManaged(ctx)
+		Expect(err).NotTo(HaveOccurred())
+		Expect(issued).To(BeZero())
+	})
+
+	It("issues every entry when all of them succeed", func() {
+		first, firstStore := entryFor("first.managed.test")
+		second, secondStore := entryFor("second.managed.test")
+		myCA.ManagedCerts = []ManagedCert{first, second}
+
+		issued, err := myCA.ReconcileManaged(ctx)
+		Expect(err).NotTo(HaveOccurred())
+		Expect(issued).To(Equal(2))
+		Expect(firstStore.stored().Subject.CommonName).To(Equal("first.managed.test"))
+		Expect(secondStore.stored().Subject.CommonName).To(Equal("second.managed.test"))
+	})
+
+	It("still reconciles the healthy entry when another entry's store is unreadable", func() {
+		broken, brokenStore := entryFor("broken.managed.test")
+		brokenStore.loadErr = fmt.Errorf("backend unavailable")
+		healthy, healthyStore := entryFor("healthy.managed.test")
+		myCA.ManagedCerts = []ManagedCert{broken, healthy}
+
+		issued, err := myCA.ReconcileManaged(ctx)
+
+		// The failure is reported rather than swallowed...
+		Expect(err).To(MatchError(ContainSubstring("backend unavailable")))
+		// ...and the healthy entry still got its certificate.
+		Expect(issued).To(Equal(1), "the count must report successes, not attempts")
+		Expect(healthyStore.stored().Subject.CommonName).To(Equal("healthy.managed.test"))
+		Expect(store.HasCert(ctx, "healthy.managed.test")).To(BeTrue())
+		Expect(store.HasCert(ctx, "broken.managed.test")).To(BeFalse(),
+			"an entry whose store could not be read must not leave a certificate behind")
+	})
+
+	It("still reconciles the healthy entry when another entry's store refuses the write", func() {
+		// The other half of the failure surface: Load succeeds and Save fails,
+		// which runs the rollback arm inside that entry's own subject lock.
+		// The neighbour must be unaffected by it.
+		broken, brokenStore := entryFor("refuses.managed.test")
+		brokenStore.saveErr = fmt.Errorf("secret rejected")
+		healthy, healthyStore := entryFor("writes.managed.test")
+		myCA.ManagedCerts = []ManagedCert{broken, healthy}
+
+		issued, err := myCA.ReconcileManaged(ctx)
+		Expect(err).To(MatchError(ContainSubstring("secret rejected")))
+		Expect(issued).To(Equal(1))
+		Expect(healthyStore.stored().Subject.CommonName).To(Equal("writes.managed.test"))
+	})
+
+	It("does not stop at the first failure", func() {
+		// Three entries with the failure in the middle. An early return would
+		// leave the third unissued while still reporting an error, which the
+		// two-entry specs above cannot distinguish: with the failure first,
+		// `continue` and `return` differ only in whether the LAST entry runs.
+		first, firstStore := entryFor("one.managed.test")
+		middle, middleStore := entryFor("two.managed.test")
+		middleStore.saveErr = fmt.Errorf("middle refused")
+		last, lastStore := entryFor("three.managed.test")
+		myCA.ManagedCerts = []ManagedCert{first, middle, last}
+
+		issued, err := myCA.ReconcileManaged(ctx)
+		Expect(err).To(MatchError(ContainSubstring("middle refused")))
+		Expect(issued).To(Equal(2))
+		Expect(firstStore.stored().Subject.CommonName).To(Equal("one.managed.test"))
+		Expect(lastStore.stored().Subject.CommonName).To(Equal("three.managed.test"),
+			"the entry AFTER the failure must still be reconciled")
+	})
+
+	It("reports the first failure, not the last", func() {
+		// firstErr is written once and never overwritten. Two distinct failures
+		// make that observable: reporting the later one would pass every spec
+		// above, since each has only one failing entry.
+		earlier, earlierStore := entryFor("earlier.managed.test")
+		earlierStore.saveErr = fmt.Errorf("earlier refused")
+		later, laterStore := entryFor("later.managed.test")
+		laterStore.saveErr = fmt.Errorf("later refused")
+		myCA.ManagedCerts = []ManagedCert{earlier, later}
+
+		issued, err := myCA.ReconcileManaged(ctx)
+		Expect(issued).To(BeZero())
+		Expect(err).To(MatchError(ContainSubstring("earlier refused")))
+		Expect(err).NotTo(MatchError(ContainSubstring("later refused")),
+			"a later failure must not displace the one already recorded")
 	})
 })
 

@@ -599,6 +599,17 @@ func leafCarriesUsages(leaf *x509.Certificate, want CertSpec) bool {
 // on entries irrelevant to it. This keeps that cost at exactly one budget
 // however many certificates a deployment configures.
 //
+// One budget on every arm but one. When the entry's own store refuses the
+// write, the rollback below runs inside the same subject-lock hold on two
+// deadlines of its own, each LockTimeout/2 and each deliberately detached from
+// this pass's -- a rollback sharing a budget the failed write already spent
+// cannot run at all, which is the orphan it exists to prevent. So the worst
+// case for the subject lock is 2x LockTimeout, not one, and it falls on
+// precisely the condition most likely to hit every entry at once: a backend
+// outage. An operator sizing sql_max_open_conns or a lock-table timeout should
+// budget for the larger figure, because that is the one that applies when the
+// store is failing.
+//
 // A caller doing that should not expect the background loop's own first pass to
 // be free afterwards: it runs immediately at startup and will re-take the same
 // lock and re-read the same store moments later, finding the certificate
