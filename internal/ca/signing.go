@@ -1525,7 +1525,33 @@ func (c *CA) AutoRenew(ctx context.Context, presentedCert *x509.Certificate) ([]
 				EmailAddresses: presentedCert.EmailAddresses,
 				URIs:           presentedCert.URIs,
 			}
-			return c.issueLeafLocked(ctx, subject, presentedCert.Subject, presentedCert.PublicKey, sans, extraExtensions, nil, 0)
+			// SECURITY: carry the extended key usages forward for the same
+			// reason as the SANs, with a sharper consequence. Renewal must not
+			// hand back more authority than it was given: passing nil here
+			// means issueLeafLocked applies its serverAuth+clientAuth default,
+			// so a deliberately narrow certificate comes back wide, for the
+			// same public key and the same subject, with nothing in the
+			// exchange recording that it widened.
+			//
+			// A serverAuth-only certificate cannot reach this path today —
+			// attribute() verifies every client certificate against
+			// ExtKeyUsageClientAuth, so one lacking it is never attributed to a
+			// trust domain and never passes the tierOwnClient gate guarding
+			// this route. A clientAuth-only certificate reaches it perfectly
+			// well, and that is the one that gains serverAuth it was never
+			// issued with. The narrowing is worth keeping either way: it costs
+			// nothing, and it stops the gate being the only thing standing
+			// between a narrow certificate and a wide renewal of it.
+			//
+			// Empty means unrestricted, so it stays empty and takes the
+			// default: a certificate carrying no EKU at all is every agent
+			// issued before this CA set one, and narrowing those on renewal
+			// would break them.
+			var eku []x509.ExtKeyUsage
+			if len(presentedCert.ExtKeyUsage) > 0 {
+				eku = presentedCert.ExtKeyUsage
+			}
+			return c.issueLeafLocked(ctx, subject, presentedCert.Subject, presentedCert.PublicKey, sans, extraExtensions, eku, 0)
 		}()
 		if err != nil {
 			return err
