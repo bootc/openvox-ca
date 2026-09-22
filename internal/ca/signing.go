@@ -871,11 +871,15 @@ func (c *CA) Clean(ctx context.Context, subject string) error {
 			// why that sentinel is worded for the inventory rather than for an
 			// issuance history. docs/metrics.md names this path as uncounted on
 			// the lock arm.
+			var unknownCause error
 			if err := c.Storage.WithLock(ctx, lockNameCRL, func() error {
 				c.mu.Lock()
 				defer c.mu.Unlock()
-				return c.revokeLocked(ctx, subject)
+				return c.revokeLocked(ctx, subject, &unknownCause)
 			}); err != nil {
+				// After the closure returns, so c.mu is already released —
+				// which is the requirement logUnknownSubjectCause documents.
+				logUnknownSubjectCause(subject, unknownCause)
 				// Deliberately not fatal: clean's job is to remove the
 				// certificate. But say what that leaves behind — the
 				// certificate is gone from storage while still unrevoked, so

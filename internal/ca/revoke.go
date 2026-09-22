@@ -114,9 +114,17 @@ func (c *CA) Revoke(ctx context.Context, subject string) error {
 	// crl_update_failures rather than failing silently.
 	return c.Storage.WithLock(ctx, subjectLockName(subject), func() error {
 		return c.withCRLLockCounted(ctx, func() error {
-			c.mu.Lock()
-			defer c.mu.Unlock()
-			return c.revokeLocked(ctx, subject)
+			// c.mu is taken in its own scope so the diagnostic below is emitted
+			// after it is released rather than while it is held; the inner
+			// closure keeps the deferred unlock rather than an explicit one.
+			var unknownCause error
+			err := func() error {
+				c.mu.Lock()
+				defer c.mu.Unlock()
+				return c.revokeLocked(ctx, subject, &unknownCause)
+			}()
+			logUnknownSubjectCause(subject, unknownCause)
+			return err
 		})
 	})
 }
@@ -145,9 +153,37 @@ func (c *CA) Revoke(ctx context.Context, subject string) error {
 // here.) So the message does not claim an issuance history the CA cannot see.
 var ErrSubjectUnknown = errors.New("no inventory entry for this subject")
 
+// logUnknownSubjectCause emits the diagnostic revokeLocked deliberately does
+// not wrap into its returned error, because that error reaches an HTTP response
+// body and the cause can name a storage path.
+//
+// Callers MUST invoke this after releasing c.mu, which is the whole reason it
+// is a separate function rather than a line inside revokeLocked. Verbosity 0
+// maps to LevelInfo, so this record always writes — and writing it under c.mu
+// would make the most common failure of the revoke endpoint, a mistyped
+// certname, a process-wide serialisation point for every c.mu.RLock reader,
+// including the IsRevokedSerial call on the authentication path. That is #197's
+// finding about the OCSP responder (see the comment in ocsp.go), reached by a
+// different route: there the expensive thing under the lock was a signature,
+// here it is an io.Writer nobody can bound.
+//
+// A no-op when cause is nil, so callers need not branch.
+func logUnknownSubjectCause(subject string, cause error) {
+	if cause == nil {
+		return
+	}
+	slog.Info("No inventory entry for subject; revocation cannot proceed",
+		"subject", subject, "error", cause)
+}
+
 // revokeLocked performs the actual CRL read-modify-write. The cluster CRL
 // lock and c.mu must both be held by the caller.
-func (c *CA) revokeLocked(ctx context.Context, subject string) error {
+//
+// unknownCause is an out-parameter, set only when the subject has no inventory
+// entry, and carries the storage error behind ErrSubjectUnknown so the caller
+// can log it once c.mu is released — see logUnknownSubjectCause. It may be nil
+// when the caller does not want the diagnostic.
+func (c *CA) revokeLocked(ctx context.Context, subject string, unknownCause *error) error {
 	slog.Debug("Revoking certificate", "subject", subject)
 
 	// Ahead of the subject's own serial, and best-effort. Any predecessor
@@ -219,8 +255,14 @@ func (c *CA) revokeLocked(ctx context.Context, subject string) error {
 			// -- which is also why the level cannot be chosen per case, since
 			// errors.As sees the same type either way. docs/api.md says as much
 			// to operators, and sends them to the certificate index instead.
-			slog.Info("No inventory entry for subject; revocation cannot proceed",
-				"subject", subject, "error", err)
+			//
+			// Handed to the caller rather than logged here: this runs under
+			// c.mu, and the record always writes at the shipped verbosity. See
+			// logUnknownSubjectCause for why that matters on this arm in
+			// particular.
+			if unknownCause != nil {
+				*unknownCause = err
+			}
 			return fmt.Errorf("%w: %s", ErrSubjectUnknown, subject)
 		}
 		c.crlUpdateFailures.Add(1)

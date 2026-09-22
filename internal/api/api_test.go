@@ -1542,6 +1542,18 @@ var _ = Describe("API Workflow", func() {
 			rr := httptest.NewRecorder()
 			mux.ServeHTTP(rr, req)
 			Expect(rr.Code).To(Equal(http.StatusConflict))
+			// Assert which 409 this is, not merely that it is one. Three arms
+			// of this handler can answer 409 and two of them carry a sentinel's
+			// message; only the generic fall-through writes a bare "conflict".
+			// Without this, misrouting a missing CRL through the
+			// ErrForeignStoredCRL arm -- a plausible mistake, since that arm
+			// also concerns a CRL this CA cannot use -- would leave the spec
+			// green while changing what an operator is told to do about it.
+			Expect(rr.Body.String()).To(ContainSubstring("conflict"))
+			Expect(rr.Body.String()).NotTo(ContainSubstring(ca.ErrForeignStoredCRL.Error()),
+				"a CRL that is absent is not a CRL signed by another CA; the remedies differ")
+			Expect(rr.Body.String()).NotTo(ContainSubstring(ca.ErrSubjectUnknown.Error()),
+				"and it is emphatically not an unknown subject, which is this PR's whole point")
 		})
 	})
 
