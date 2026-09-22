@@ -26,6 +26,7 @@ import (
 	"strings"
 	"time"
 
+	"github.com/voxpupuli/openvox-ca/internal/ca"
 	"github.com/voxpupuli/openvox-ca/internal/config"
 	"github.com/voxpupuli/openvox-ca/internal/k8sexport"
 	"go.yaml.in/yaml/v3"
@@ -574,11 +575,6 @@ func (c *serverConfig) supersededCertRevokeAfter() time.Duration {
 	return defaultSupersededCertRevokeAfter
 }
 
-// defaultLeafBackdate mirrors internal/ca's own default. Resolved here so a
-// zero setting and an absent one reach the CA as the same value, rather than
-// the CA defaulting one and this package defaulting the other.
-const defaultLeafBackdate = 5 * time.Minute
-
 // maxLeafBackdateSec is the ceiling loadServerConfig enforces on
 // leaf_backdate_sec. Thirty days is far beyond any real clock-skew tolerance
 // and comfortably below the point at which the seconds-to-nanoseconds multiply
@@ -592,7 +588,13 @@ const maxLeafBackdateSec = 30 * 24 * 60 * 60
 const maxManagedCertIntervalSec = 30 * 24 * 60 * 60
 
 // leafBackdate resolves how far leaf certificates are backdated, falling back
-// to defaultLeafBackdate when unset.
+// to the CA's own ca.DefaultLeafBackdate when unset.
+//
+// Deliberately the CA's constant rather than a copy of the literal. This
+// package resolves the setting before the CA exists, so an absent setting must
+// reach it as the value the CA would have chosen anyway; two literals with a
+// comment asking them to agree is not a mechanism, and the generate CLI path
+// builds a CA without passing through here at all.
 //
 // Negative is refused at validation rather than clamped here: a negative
 // backdate means "not valid until the future", which is never what an operator
@@ -601,7 +603,7 @@ func (c *serverConfig) leafBackdate() time.Duration {
 	if c.LeafBackdateSec > 0 {
 		return time.Duration(c.LeafBackdateSec) * time.Second
 	}
-	return defaultLeafBackdate
+	return ca.DefaultLeafBackdate
 }
 
 // defaultManagedCertInterval is how often the managed-certificate reconcile

@@ -47,7 +47,7 @@ const (
 	certValidity = 5 * 365 * 24 * time.Hour
 	// CRLValidity is the default validity window written into every CRL.
 	CRLValidity = 30 * 24 * time.Hour
-	// defaultLeafBackdate is how far before the moment of issuance a leaf's
+	// DefaultLeafBackdate is how far before the moment of issuance a leaf's
 	// NotBefore is set when the CA does not say otherwise, so a verifier whose
 	// clock is behind ours still accepts a certificate we have just signed.
 	//
@@ -61,12 +61,20 @@ const (
 	// the value: issueDecision derives a certificate's forward lifetime -- the
 	// span it was actually issued to serve -- as NotAfter - NotBefore - the
 	// backdate, and that arithmetic is what clamps the renew-before window.
-	defaultLeafBackdate = 5 * time.Minute
+	//
+	// Exported because cmd/openvox-ca resolves leaf_backdate_sec before it
+	// builds the CA, and must resolve an absent setting to the same value the
+	// CA would have chosen for itself. It used to hold its own copy of this
+	// literal, with a comment saying the two had to agree and nothing making
+	// them: a CA built from configuration and one built in code (the generate
+	// CLI path) would then have disagreed about the same operator-facing
+	// behaviour, with no compile error and no failing test.
+	DefaultLeafBackdate = 5 * time.Minute
 )
 
 // leafBackdate returns how far this CA backdates a leaf's NotBefore.
 //
-// Zero (the CA struct's zero value) means defaultLeafBackdate; a negative
+// Zero (the CA struct's zero value) means DefaultLeafBackdate; a negative
 // setting is refused at startup, so a caller that reaches here with one is a
 // CA built in code rather than from configuration, and gets the default rather
 // than a certificate that is not valid until the future.
@@ -74,7 +82,7 @@ func (c *CA) leafBackdate() time.Duration {
 	if c.LeafBackdate > 0 {
 		return c.LeafBackdate
 	}
-	return defaultLeafBackdate
+	return DefaultLeafBackdate
 }
 
 // CRLValidityDuration returns the CA's configured CRL validity period.

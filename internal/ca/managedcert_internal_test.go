@@ -624,8 +624,8 @@ var _ = Describe("The leaf NotBefore backdate", func() {
 		crt := issueAndParse("default.test")
 		// Bracketed by the two instants that surround the signature, so neither
 		// bound depends on how long the call took.
-		Expect(crt.NotBefore).To(BeTemporally("<=", after.Add(-defaultLeafBackdate)))
-		Expect(crt.NotBefore).To(BeTemporally(">", before.Add(-defaultLeafBackdate-time.Minute)),
+		Expect(crt.NotBefore).To(BeTemporally("<=", after.Add(-DefaultLeafBackdate)))
+		Expect(crt.NotBefore).To(BeTemporally(">", before.Add(-DefaultLeafBackdate-time.Minute)),
 			"a much earlier NotBefore means the default is not 5 minutes")
 	})
 
@@ -683,8 +683,8 @@ var _ = Describe("The leaf NotBefore backdate", func() {
 		myCA.LeafBackdate = -time.Hour
 		before := time.Now().UTC()
 		crt := issueAndParse("negative.test")
-		Expect(crt.NotBefore).To(BeTemporally("<=", after.Add(-defaultLeafBackdate)))
-		Expect(crt.NotBefore).To(BeTemporally(">", before.Add(-defaultLeafBackdate-time.Minute)),
+		Expect(crt.NotBefore).To(BeTemporally("<=", after.Add(-DefaultLeafBackdate)))
+		Expect(crt.NotBefore).To(BeTemporally(">", before.Add(-DefaultLeafBackdate-time.Minute)),
 			"a negative setting must fall back to the default, not be applied")
 	})
 })

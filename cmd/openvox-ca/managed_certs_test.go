@@ -19,6 +19,7 @@ package main
 
 import (
 	"context"
+	"strconv"
 	"sync"
 	"time"
 
@@ -186,7 +187,7 @@ var _ = Describe("The leaf backdate and reconcile interval settings", func() {
 	It("defaults the backdate to five minutes", func() {
 		cfg, err := loadServerConfig("")
 		Expect(err).NotTo(HaveOccurred())
-		Expect(cfg.leafBackdate()).To(Equal(defaultLeafBackdate))
+		Expect(cfg.leafBackdate()).To(Equal(ca.DefaultLeafBackdate))
 		Expect(cfg.leafBackdate()).To(Equal(5*time.Minute),
 			"the shipped default is a clock-skew tolerance, not a margin for a broken fleet")
 	})
@@ -270,6 +271,37 @@ var _ = Describe("The leaf backdate and reconcile interval settings", func() {
 		_, err = loadServerConfig("")
 		Expect(err).To(MatchError(ContainSubstring("managed_cert_interval_sec must not exceed")),
 			"applyServerEnv's n > 0 gate does not block a value large enough to wrap")
+	})
+
+	It("accepts exactly the backdate ceiling, and refuses one second more", func() {
+		// The boundary itself, which the specs above leave free: they use
+		// 31536000 and 99999999999 against a 2592000 ceiling, so both a strict
+		// `>` and an accidental `>=` reject them identically. Only the exact
+		// value separates the two, and a `>=` would refuse the documented
+		// 30-day maximum -- a limit an operator can read and set.
+		setEnv("PUPPET_CA_LEAF_BACKDATE_SEC", strconv.Itoa(maxLeafBackdateSec))
+		cfg, err := loadServerConfig("")
+		Expect(err).NotTo(HaveOccurred(), "the ceiling is a permitted value, not the first refused one")
+		Expect(cfg.leafBackdate()).To(Equal(30 * 24 * time.Hour))
+
+		clearServerEnv()
+		setEnv("PUPPET_CA_LEAF_BACKDATE_SEC", strconv.Itoa(maxLeafBackdateSec+1))
+		_, err = loadServerConfig("")
+		Expect(err).To(MatchError(ContainSubstring("leaf_backdate_sec must not exceed")),
+			"one past the ceiling must be the first value refused")
+	})
+
+	It("accepts exactly the reconcile-interval ceiling, and refuses one second more", func() {
+		setEnv("PUPPET_CA_MANAGED_CERT_INTERVAL_SEC", strconv.Itoa(maxManagedCertIntervalSec))
+		cfg, err := loadServerConfig("")
+		Expect(err).NotTo(HaveOccurred(), "the ceiling is a permitted value, not the first refused one")
+		Expect(cfg.managedCertInterval()).To(Equal(30 * 24 * time.Hour))
+
+		clearServerEnv()
+		setEnv("PUPPET_CA_MANAGED_CERT_INTERVAL_SEC", strconv.Itoa(maxManagedCertIntervalSec+1))
+		_, err = loadServerConfig("")
+		Expect(err).To(MatchError(ContainSubstring("managed_cert_interval_sec must not exceed")),
+			"one past the ceiling must be the first value refused")
 	})
 
 	It("defaults the reconcile interval, and takes a configured one", func() {
