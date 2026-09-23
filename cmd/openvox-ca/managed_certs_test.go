@@ -273,6 +273,24 @@ var _ = Describe("The leaf backdate and reconcile interval settings", func() {
 			"applyServerEnv's n > 0 gate does not block a value large enough to wrap")
 	})
 
+	It("refuses a negative reconcile interval rather than ignoring it", func() {
+		// Only the config file can carry one: applyServerEnv gates
+		// PUPPET_CA_MANAGED_CERT_INTERVAL_SEC on n > 0, so the environment
+		// cannot. Before this was refused it fell through managedCertInterval's
+		// own `> 0` to the default, which is safe but silent -- the operator's
+		// typo produced a working server on a value it had discarded.
+		_, err := loadServerConfig(writeTempConfig("managed_cert_interval_sec: -1\n"))
+		Expect(err).To(MatchError(ContainSubstring("managed_cert_interval_sec must not be negative")))
+	})
+
+	It("still defaults the reconcile interval when it is absent or zero", func() {
+		// The other half, so the refusal above cannot be satisfied by refusing
+		// zero as well: zero means unset and must keep taking the default.
+		cfg, err := loadServerConfig(writeTempConfig("managed_cert_interval_sec: 0\n"))
+		Expect(err).NotTo(HaveOccurred())
+		Expect(cfg.managedCertInterval()).To(Equal(defaultManagedCertInterval))
+	})
+
 	It("accepts exactly the backdate ceiling, and refuses one second more", func() {
 		// The boundary itself, which the specs above leave free: they use
 		// 31536000 and 99999999999 against a 2592000 ceiling, so both a strict

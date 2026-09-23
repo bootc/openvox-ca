@@ -279,7 +279,7 @@ merely within one. `c.mu` was never what stood between them.
 one of them (`Sign`, `SignWithTTL`, `SaveRequest`'s autosign, `Renew`,
 `AutoRenew`, `Generate`, `ReconcileManaged`) calls `issueLeafLocked` with
 `c.mu` held — `ImportCertificate` holds `c.mu` too but signs nothing, so it is
-not on that list, and issuanceseam_test.go pins the set — and
+not on that list — and
 `x509.CreateCertificate` runs inside it
 — so with an external
 key provider (`ca_key_provider: openbao`, or the isolated signer) `c.mu`, not

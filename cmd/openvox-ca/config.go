@@ -346,6 +346,18 @@ func loadServerConfig(configFile string) (*serverConfig, error) {
 			"it is a clock-skew tolerance, and a certificate valid that far before it was "+
 			"issued is not one", maxLeafBackdateSec, cfg.LeafBackdateSec)
 	}
+	// Refused rather than ignored, for the reason the backdate's own check
+	// gives: a negative value is a typo, and falling back to the default
+	// silently is how the operator never hears about it. Only the config file
+	// can carry one here -- applyServerEnv gates the environment variable on
+	// n > 0 -- but a setting that behaves one way from YAML and another from
+	// the environment is its own trap, and the asymmetry with
+	// leaf_backdate_sec, which refuses, had no reason behind it.
+	if cfg.ManagedCertIntervalSec < 0 {
+		return nil, fmt.Errorf("managed_cert_interval_sec must not be negative (got %d): "+
+			"a reconcile interval is a period, and a negative one would silently become "+
+			"the default", cfg.ManagedCertIntervalSec)
+	}
 	// Bounded for the same overflow reason as the backdate, and one further
 	// one: a wrapped product that lands non-positive reaches time.NewTicker,
 	// which panics -- inside a background goroutine, where nothing recovers, so
@@ -592,9 +604,14 @@ const maxManagedCertIntervalSec = 30 * 24 * 60 * 60
 //
 // Deliberately the CA's constant rather than a copy of the literal. This
 // package resolves the setting before the CA exists, so an absent setting must
-// reach it as the value the CA would have chosen anyway; two literals with a
-// comment asking them to agree is not a mechanism, and the generate CLI path
-// builds a CA without passing through here at all.
+// reach it as the value the CA would have chosen anyway, and two literals with
+// a comment asking them to agree is not a mechanism.
+//
+// The value reaches every CA this package builds: applyCAConfig sets
+// LeafBackdate from here unconditionally, and generate, csr, import-ca-cert and
+// both serve paths all call it. The CAs that do NOT come through here are the
+// ones built in code -- ca.New callers in internal/ca's own tests -- which is
+// what CA.leafBackdate()'s own zero-value fallback is for.
 //
 // Negative is refused at validation rather than clamped here: a negative
 // backdate means "not valid until the future", which is never what an operator

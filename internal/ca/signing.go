@@ -66,9 +66,14 @@ const (
 	// builds the CA, and must resolve an absent setting to the same value the
 	// CA would have chosen for itself. It used to hold its own copy of this
 	// literal, with a comment saying the two had to agree and nothing making
-	// them: a CA built from configuration and one built in code (the generate
-	// CLI path) would then have disagreed about the same operator-facing
-	// behaviour, with no compile error and no failing test.
+	// them: a CA built from configuration and one built in code would then have
+	// disagreed about the same operator-facing behaviour, with no compile error
+	// and no failing test.
+	//
+	// "Built in code" means a ca.New caller that does not run applyCAConfig,
+	// which in this tree is the test constructions. Every CLI path -- generate,
+	// csr, import-ca-cert and both serve paths -- does run it, so all of them
+	// carry the configured value.
 	DefaultLeafBackdate = 5 * time.Minute
 )
 
