@@ -112,21 +112,19 @@ func (c *CA) Revoke(ctx context.Context, subject string) error {
 	// a sign or a clean for the same name; and the CRL acquisition counted, so
 	// a revocation an operator asked for that never took the lock moves
 	// crl_update_failures rather than failing silently.
-	return c.Storage.WithLock(ctx, subjectLockName(subject), func() error {
+	// unknownCause is declared out here, not inside the closures, so the
+	// diagnostic is emitted once every lock is released -- c.mu, and both of
+	// the cluster-wide names above it. See logUnknownSubjectCause.
+	var unknownCause error
+	err := c.Storage.WithLock(ctx, subjectLockName(subject), func() error {
 		return c.withCRLLockCounted(ctx, func() error {
-			// c.mu is taken in its own scope so the diagnostic below is emitted
-			// after it is released rather than while it is held; the inner
-			// closure keeps the deferred unlock rather than an explicit one.
-			var unknownCause error
-			err := func() error {
-				c.mu.Lock()
-				defer c.mu.Unlock()
-				return c.revokeLocked(ctx, subject, &unknownCause)
-			}()
-			logUnknownSubjectCause(subject, unknownCause)
-			return err
+			c.mu.Lock()
+			defer c.mu.Unlock()
+			return c.revokeLocked(ctx, subject, &unknownCause)
 		})
 	})
+	logUnknownSubjectCause(subject, unknownCause)
+	return err
 }
 
 // ErrSubjectUnknown is returned by Revoke for a subject the inventory has no

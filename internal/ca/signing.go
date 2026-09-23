@@ -844,6 +844,11 @@ func (c *CA) Clean(ctx context.Context, subject string) error {
 	//
 	// Lock ordering: subject-lock (distributed) → CRL-lock (distributed) → c.mu.
 	// No existing code path acquires CRL-lock then subject-lock, so no deadlock.
+	//
+	// unknownCause is declared out here rather than beside the revoke below, so
+	// its diagnostic is emitted after every lock is released — including the
+	// subject lock this whole closure holds. See logUnknownSubjectCause.
+	var unknownCause error
 	lockErr := c.Storage.WithLock(ctx, subjectLockName(subject), func() error {
 		hasCert := c.Storage.HasCert(ctx, subject)
 		hasCSR := c.Storage.HasCSR(ctx, subject)
@@ -871,15 +876,11 @@ func (c *CA) Clean(ctx context.Context, subject string) error {
 			// why that sentinel is worded for the inventory rather than for an
 			// issuance history. docs/metrics.md names this path as uncounted on
 			// the lock arm.
-			var unknownCause error
 			if err := c.Storage.WithLock(ctx, lockNameCRL, func() error {
 				c.mu.Lock()
 				defer c.mu.Unlock()
 				return c.revokeLocked(ctx, subject, &unknownCause)
 			}); err != nil {
-				// After the closure returns, so c.mu is already released —
-				// which is the requirement logUnknownSubjectCause documents.
-				logUnknownSubjectCause(subject, unknownCause)
 				// Deliberately not fatal: clean's job is to remove the
 				// certificate. But say what that leaves behind — the
 				// certificate is gone from storage while still unrevoked, so
@@ -904,6 +905,11 @@ func (c *CA) Clean(ctx context.Context, subject string) error {
 
 		return nil
 	})
+	// Outside the subject lock, which is the point: see logUnknownSubjectCause.
+	// Emitted whichever way the lock returned, since a clean that reached this
+	// arm and then failed for another reason still has a cause worth recording.
+	logUnknownSubjectCause(subject, unknownCause)
+
 	if lockErr != nil {
 		return lockErr
 	}
