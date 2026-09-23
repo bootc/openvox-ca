@@ -393,6 +393,85 @@ var _ = Describe("Reconciling a managed certificate", func() {
 			Expect(buf.String()).To(ContainSubstring("its certificate was revoked"))
 		})
 
+		It("does not reuse the key of a revoked certificate that also lost a name", func() {
+			// SECURITY, and the case the sibling spec above cannot reach.
+			// issueDecision returns ONE reason, chosen by priority, and it tests
+			// for missing names before it tests revoked. So a revocation that
+			// arrives alongside any other drift is not the reason reported --
+			// and a key decision derived from the reason therefore stops seeing
+			// the revocation at all, reusing exactly the material the
+			// revocation retired.
+			entry.Spec.ReuseKey = true
+			_, err := reconcile()
+			Expect(err).NotTo(HaveOccurred())
+			first := fake.stored()
+
+			Expect(myCA.Revoke(ctx, subject)).To(Succeed())
+			// Drift of a different kind, arriving with the revocation.
+			entry.Spec.DNSNames = append(entry.Spec.DNSNames, "added.example.com")
+
+			issued, err := reconcile()
+			Expect(err).NotTo(HaveOccurred())
+			Expect(issued).To(BeTrue())
+			Expect(fake.stored().PublicKey).NotTo(Equal(first.PublicKey),
+				"revocation must outrank the pin however the drift is classified")
+		})
+
+		It("does not reuse the key of a revoked certificate that also lost a usage", func() {
+			// The same shadowing by the other pre-revocation branch, since
+			// leafCarriesUsages is tested before revoked too. Two specs rather
+			// than one table entry: either branch alone restores the defect.
+			entry.Spec.ReuseKey = true
+			_, err := reconcile()
+			Expect(err).NotTo(HaveOccurred())
+			first := fake.stored()
+
+			Expect(myCA.Revoke(ctx, subject)).To(Succeed())
+			entry.Spec.ExtKeyUsage = []x509.ExtKeyUsage{
+				x509.ExtKeyUsageServerAuth,
+				x509.ExtKeyUsageClientAuth,
+				x509.ExtKeyUsageCodeSigning,
+			}
+
+			issued, err := reconcile()
+			Expect(err).NotTo(HaveOccurred())
+			Expect(issued).To(BeTrue())
+			Expect(fake.stored().PublicKey).NotTo(Equal(first.PublicKey),
+				"revocation must outrank the pin however the drift is classified")
+		})
+
+		It("does not reuse a pinned key the CRL cannot clear", func() {
+			// The pin fails CLOSED where the reissue decision fails open. A CRL
+			// the CA cannot read makes "not revoked" and "could not tell"
+			// indistinguishable, and reusing a key on the strength of the
+			// second is how a revoked key gets re-certified with a fresh
+			// lifetime. Costs a new key nobody asked for; the alternative costs
+			// the operator the revocation they performed.
+			entry.Spec.ReuseKey = true
+			_, err := reconcile()
+			Expect(err).NotTo(HaveOccurred())
+			first := fake.stored()
+
+			myCA.mu.Lock()
+			myCA.cachedCRL = nil
+			myCA.mu.Unlock()
+
+			var buf bytes.Buffer
+			prev := slog.Default()
+			slog.SetDefault(slog.New(slog.NewTextHandler(&buf, &slog.HandlerOptions{
+				Level: slog.LevelDebug,
+			})))
+			defer slog.SetDefault(prev)
+
+			issued, err := reconcileAt(dueWindow)
+			Expect(err).NotTo(HaveOccurred(),
+				"the reissue decision still fails open: an unreadable CRL must not stop renewal")
+			Expect(issued).To(BeTrue())
+			Expect(fake.stored().PublicKey).NotTo(Equal(first.PublicKey),
+				"a key that cannot be cleared against the CRL must not be reused")
+			Expect(buf.String()).To(ContainSubstring("CRL could not be read"))
+		})
+
 		It("honours a per-certificate supersession window", func() {
 			// The CA revokes inline; this entry wants an overlap.
 			myCA.SupersedeAfter = 0

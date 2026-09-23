@@ -718,9 +718,9 @@ func (c *CA) reconcileManagedCert(ctx context.Context, m ManagedCert, now time.T
 		// bytes already in memory. A certificate that will not parse here is
 		// one issueDecision reports as unparseable a moment later, so treating
 		// the failure as "not revoked" decides nothing.
-		revoked := c.storedMaterialRevoked(ctx, certPEM, subject)
+		revocation := c.storedMaterialRevoked(ctx, certPEM, subject)
 
-		issue, reason, current := issueDecision(certPEM, keyPEM, m.Spec, issuer, c.leafBackdate(), now, revoked)
+		issue, reason, current := issueDecision(certPEM, keyPEM, m.Spec, issuer, c.leafBackdate(), now, revocation.Revoked)
 		if !issue {
 			slog.Debug("Managed certificate is current",
 				"subject", subject, "not_after", current.NotAfter.Format(time.RFC3339))
@@ -735,7 +735,7 @@ func (c *CA) reconcileManagedCert(ctx context.Context, m ManagedCert, now time.T
 
 		slog.Info("Issuing managed certificate", "subject", subject, "reason", reason.String())
 
-		did, err := c.issueManagedUnderSubjectLock(ctx, m, reason, current, keyPEM)
+		did, err := c.issueManagedUnderSubjectLock(ctx, m, reason, current, keyPEM, revocation)
 		issued = did
 		return err
 	})
@@ -849,24 +849,52 @@ func (c *CA) warnIfDisplacingUnderSubjectLock(ctx context.Context, subject strin
 // while a false positive would reissue on every pass for as long as the CRL is
 // unreadable. This is not an authentication decision and must not be reused as
 // one -- refuseIfRevoked, which is, fails closed.
-func (c *CA) storedMaterialRevoked(ctx context.Context, certPEM []byte, subject string) bool {
+func (c *CA) storedMaterialRevoked(ctx context.Context, certPEM []byte, subject string) revocationState {
 	block, _ := pem.Decode(certPEM)
 	if block == nil {
-		return false
+		return revocationState{}
 	}
 	leaf, err := x509.ParseCertificate(block.Bytes)
 	if err != nil {
-		return false
+		return revocationState{}
 	}
 	revoked, err := c.IsRevokedSerial(ctx, leaf.SerialNumber)
 	if err != nil {
 		slog.Warn("Could not check the stored managed certificate against the CRL; "+
 			"treating it as not revoked for this pass",
 			"subject", subject, "error", err)
-		return false
+		return revocationState{}
 	}
-	return revoked
+	return revocationState{Revoked: revoked, Known: true}
 }
+
+// revocationState is what a pass could establish about the stored
+// certificate's revocation, which is three states rather than two: revoked,
+// not revoked, and could not tell.
+//
+// The third is why this is not a bool. The two readers want opposite defaults
+// from it, and a bool can only serve one of them:
+//
+//   - The reissue decision fails OPEN. An unreadable CRL that stopped a pass
+//     would stop renewal for as long as the CRL is unreadable, which is worse
+//     than the deferred reissue a false negative costs.
+//   - The key pin fails CLOSED. Reusing a key the CA cannot clear is how a
+//     revoked key gets re-certified, and the cost of being wrong is a new key
+//     nobody asked for -- against handing back material an operator revoked
+//     for disclosure.
+//
+// Collapsing "could not tell" into "not revoked" for both, which is what the
+// bool did, gave the second reader the first one's default.
+type revocationState struct {
+	// Revoked is what the CRL said, and is meaningful only when Known.
+	Revoked bool
+	// Known says the CRL could be read at all.
+	Known bool
+}
+
+// MustRekey says a pinned key must not be reused. True when the certificate is
+// revoked, and true when the CRL could not be read -- see revocationState.
+func (r revocationState) MustRekey() bool { return r.Revoked || !r.Known }
 
 // issueManagedUnderSubjectLock generates a key, signs a certificate for m's spec, writes
 // the pair to m's store, and retires the predecessor. The caller must hold
@@ -877,7 +905,7 @@ func (c *CA) storedMaterialRevoked(ctx context.Context, certPEM []byte, subject 
 // cadir either. That is why RetainPrivateKeyInStorage has no equivalent on this
 // path -- there is nothing to opt out of.
 func (c *CA) issueManagedUnderSubjectLock(ctx context.Context, m ManagedCert, reason issueReason,
-	current *x509.Certificate, storedKeyPEM []byte) (bool, error) {
+	current *x509.Certificate, storedKeyPEM []byte, revocation revocationState) (bool, error) {
 	subject := m.Spec.Subject
 
 	// The predecessor's bytes, kept so the CA's record can be put back if the
@@ -890,7 +918,7 @@ func (c *CA) issueManagedUnderSubjectLock(ctx context.Context, m ManagedCert, re
 	// CPU-bound and touching no shared state, so outside c.mu -- but inside the
 	// subject lock, unlike GenerateWithOptions, because the key must not exist
 	// before this replica has established that it is the one issuing.
-	key, err := c.issuanceKeyFor(m, reason, current, storedKeyPEM)
+	key, err := c.issuanceKeyFor(m, current, storedKeyPEM, revocation)
 	if err != nil {
 		return false, err
 	}
@@ -1035,7 +1063,7 @@ func (c *CA) issueManagedUnderSubjectLock(ctx context.Context, m ManagedCert, re
 	// different certificate under a different issuer -- and an already-revoked
 	// one needs nothing further. Best effort in every case: the replacement is
 	// written and a failure here must not undo it.
-	if current != nil && reason != reasonNotOurs && reason != reasonRevoked {
+	if current != nil && reason != reasonNotOurs && !revocation.Revoked {
 		oldSerial := serialHexStr(current.SerialNumber)
 		// Its own budget too, and for the same reason: by this point the pass
 		// has spent its deadline on a load, a key generation, a signature and a
@@ -1086,23 +1114,40 @@ func (c *CA) issueManagedUnderSubjectLock(ctx context.Context, m ManagedCert, re
 // # Revocation outranks the pin
 //
 // A revoked certificate is replaced with a NEW key, whatever ReuseKey says.
+//
+// The signal is the CRL result the pass computed, NOT the issueReason. That
+// distinction is the whole of a defect this carried: issueDecision returns one
+// winning reason chosen by priority, and it tests for missing names and for a
+// usage mismatch BEFORE it tests revoked. So a revoked certificate that had
+// drifted in any other way returned that other reason, this switch fell through
+// to its default arm, and the disclosed key was re-certified with a fresh
+// serial and a full lifetime -- the exact outcome the paragraph above forbids,
+// reachable whenever a revocation and a spec change arrived together.
 // Reissuing over the same key would hand back, with a fresh serial and a full
 // lifetime, exactly the material an operator revoking for key disclosure was
 // trying to retire -- and no CRL would list the replacement. That is the hazard
 // refuseIfSuperseded closes on the two renewal paths; this path reaches it by a
 // different door and has to close it too. The pin loses, loudly: a revocation
 // is a deliberate act and the operator needs telling that it broke the pin.
-func (c *CA) issuanceKeyFor(m ManagedCert, reason issueReason, current *x509.Certificate,
-	storedKeyPEM []byte) (crypto.Signer, error) {
+func (c *CA) issuanceKeyFor(m ManagedCert, current *x509.Certificate,
+	storedKeyPEM []byte, revocation revocationState) (crypto.Signer, error) {
 	subject := m.Spec.Subject
 	switch {
 	case !m.Spec.ReuseKey:
 		// Nothing to say: re-keying every renewal is the default.
-	case reason == reasonRevoked:
+	case revocation.Revoked:
 		slog.Warn("Not reusing the stored private key for a managed certificate: its "+
 			"certificate was revoked, and reissuing over the same key would return the "+
 			"material the revocation retired. Generating a new one, which breaks any "+
 			"pin on the old key",
+			"subject", subject)
+	case !revocation.Known:
+		// Fails closed, unlike the reissue decision -- see revocationState. A
+		// key the CA cannot clear against the CRL is one it must not hand back
+		// with a fresh lifetime.
+		slog.Warn("Not reusing the stored private key for a managed certificate: the CRL "+
+			"could not be read, so the certificate cannot be cleared as unrevoked. "+
+			"Generating a new one, which breaks any pin on the old key",
 			"subject", subject)
 	case len(storedKeyPEM) == 0 && current == nil:
 		// A first issuance has an empty store by definition. Nothing was
