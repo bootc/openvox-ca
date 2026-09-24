@@ -179,8 +179,8 @@ func logUnknownSubjectCause(subject string, cause error) {
 //
 // unknownCause is an out-parameter, set only when the subject has no inventory
 // entry, and carries the storage error behind ErrSubjectUnknown so the caller
-// can log it once c.mu is released — see logUnknownSubjectCause. It may be nil
-// when the caller does not want the diagnostic.
+// can log it once c.mu is released — see logUnknownSubjectCause. Both callers
+// pass a pointer; it is not optional.
 func (c *CA) revokeLocked(ctx context.Context, subject string, unknownCause *error) error {
 	slog.Debug("Revoking certificate", "subject", subject)
 
@@ -258,9 +258,7 @@ func (c *CA) revokeLocked(ctx context.Context, subject string, unknownCause *err
 			// c.mu, and the record always writes at the shipped verbosity. See
 			// logUnknownSubjectCause for why that matters on this arm in
 			// particular.
-			if unknownCause != nil {
-				*unknownCause = err
-			}
+			*unknownCause = err
 			return fmt.Errorf("%w: %s", ErrSubjectUnknown, subject)
 		}
 		c.crlUpdateFailures.Add(1)

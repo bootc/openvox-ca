@@ -566,6 +566,12 @@ var _ = Describe("CRL chain read failures", func() {
 		// still valid, and it renders the sentinel verbatim.
 		Expect(buf.String()).To(ContainSubstring("stays a valid credential until it expires"))
 		Expect(buf.String()).NotTo(ContainSubstring("has been issued"))
+
+		// The counter this arm is documented to leave flat. Clean swallows the
+		// revoke failure, so nothing else here would notice the not-found arm
+		// starting to count -- and docs/api.md publishes that it does not.
+		Expect(myCA.CRLUpdateFailures()).To(BeNumerically("==", 0),
+			"a revocation that found no inventory entry is not a CRL-update failure")
 	})
 
 	It("reads the stored blob once per re-sign, not once per purpose", func() {

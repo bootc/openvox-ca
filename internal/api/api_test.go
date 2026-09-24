@@ -1428,19 +1428,23 @@ var _ = Describe("API Workflow", func() {
 			Expect(rr.Body.String()).To(ContainSubstring("never-signed-node"))
 		})
 
-		// The same 404, deliberately, for a subject the CA has heard of. A
-		// pending CSR is not a certificate and puts nothing in the inventory,
-		// so revoke finds exactly what it finds for a name nobody has ever
-		// sent: nothing to revoke. The sameness is the point of pinning it.
+		// NOT the same as the never-heard-of case, and an earlier revision of
+		// this spec asserted that it was. Upstream splits them — Puppet Server
+		// reserves 404 for a name it does not know and 409 for a CSR that
+		// exists but is unsigned, and puppetserver-ca-cli turns that into two
+		// different messages and two different exit codes (1 and 24). #358
+		// quotes the upstream line numbers and says in terms: keep 409 for the
+		// unsigned-CSR case so the split is preserved.
 		//
-		// It is also the case a later change is most likely to get wrong,
-		// because the two arms of this handler disagree about the same subject
-		// on purpose: `signed` SIGNS a pending CSR (204), while `revoked`
-		// answers 404 for it. Anyone reading "there is a CSR here, so the
-		// subject is not unknown" into the revoke arm turns this into a 409 and
-		// breaks parity with the never-heard-of case, with nothing else to
-		// catch it.
-		It("should return the same 404 when the subject has only a pending CSR", func() {
+		// The reasoning that got this wrong is worth recording, because it was
+		// not careless: a queued request is not a certificate and puts nothing
+		// in the inventory, so revoke finds the same absence either way, and
+		// treating them alike is the internally consistent choice. That is the
+		// wrong axis. The HTTP contract is matched to Puppet Server, not to our
+		// own sense of symmetry, and this endpoint has now had the two cases
+		// collapsed in both directions — 409 for both before this PR, 404 for
+		// both midway through it.
+		It("should return 409, not 404, when the subject has only a pending CSR", func() {
 			subject := "requested-only-node"
 			csrPEM, err := testutil.GenerateCSR(subject)
 			Expect(err).NotTo(HaveOccurred())
@@ -1459,10 +1463,47 @@ var _ = Describe("API Workflow", func() {
 			rr := httptest.NewRecorder()
 			mux.ServeHTTP(rr, req)
 
-			Expect(rr.Code).To(Equal(http.StatusNotFound),
-				"a queued request is not a certificate; revoke has nothing to retire")
-			Expect(rr.Body.String()).To(ContainSubstring(ca.ErrSubjectUnknown.Error()))
+			Expect(rr.Code).To(Equal(http.StatusConflict),
+				"upstream reserves 409 for an unsigned CSR; puppetserver-ca-cli exits 24 on it")
+			Expect(rr.Body.String()).To(ContainSubstring("unsigned csr"),
+				"the body has to say which 409 this is; three other arms answer 409 too")
 			Expect(rr.Body.String()).To(ContainSubstring(subject))
+			// And NOT the unknown-subject sentinel. Asserting only the status
+			// would let the two collapse again as long as both answered 409 --
+			// which is precisely the state #358 was filed about.
+			Expect(rr.Body.String()).NotTo(ContainSubstring(ca.ErrSubjectUnknown.Error()),
+				"a queued request is not an unknown subject; that conflation is the defect")
+		})
+
+		// The two cases are only useful if they are told apart, and both
+		// historic defects here were failures to do that -- 409 for both before
+		// this PR, 404 for both midway through it. Asserting each alone cannot
+		// catch a future collapse, because either spec passes whichever way the
+		// pair is merged; asserting the pair differs is what does.
+		It("distinguishes an unknown subject from a subject with only a pending CSR", func() {
+			queued := "queued-node"
+			csrPEM, err := testutil.GenerateCSR(queued)
+			Expect(err).NotTo(HaveOccurred())
+			_, err = myCA.SaveRequest(context.Background(), queued, csrPEM)
+			Expect(err).NotTo(HaveOccurred())
+
+			revoke := func(subject string) *httptest.ResponseRecorder {
+				body, _ := json.Marshal(api.PutStatusBody{DesiredState: "revoked"})
+				rr := httptest.NewRecorder()
+				mux.ServeHTTP(rr, httptest.NewRequest(
+					"PUT", "/certificate_status/"+subject, bytes.NewReader(body)))
+				return rr
+			}
+
+			unknown := revoke("no-such-node-at-all")
+			pending := revoke(queued)
+
+			Expect(unknown.Code).NotTo(Equal(pending.Code),
+				"upstream gives these different statuses and puppetserver-ca-cli "+
+					"branches on the difference, printing different messages and "+
+					"exiting 1 versus 24")
+			Expect(unknown.Code).To(Equal(http.StatusNotFound))
+			Expect(pending.Code).To(Equal(http.StatusConflict))
 		})
 
 		// The leak guard belongs here rather than beside the spec above, and the

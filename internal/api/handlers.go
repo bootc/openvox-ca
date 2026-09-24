@@ -353,6 +353,28 @@ func (s *Server) handlePutStatus(w http.ResponseWriter, r *http.Request) {
 			// via the sentinel rather than fs.ErrNotExist, which every backend
 			// also returns for an absent blob — a missing CRL must stay 409.
 			if errors.Is(err, ca.ErrSubjectUnknown) {
+				// Upstream splits these two and #358 is explicit about it:
+				// Puppet Server reserves 404 for a name it has never heard of
+				// and 409 for "CSR exists but is unsigned"
+				// (certificate_authority_core.clj:415 and :424), and
+				// puppetserver-ca-cli branches on exactly that — 404 prints
+				// "Could not find certificate" and exits 1, 409 prints "Could
+				// not revoke unsigned csr" and exits 24.
+				//
+				// A queued request is genuinely not in the inventory, so the CA
+				// layer's sentinel is right about what it observed; the
+				// distinction is an API-boundary one and belongs here. Do not
+				// collapse these on the grounds that neither has a certificate
+				// to revoke: that reasoning is about our own consistency, and
+				// the HTTP contract is matched to Puppet Server rather than to
+				// us. Collapsing them was a real defect in this endpoint, in
+				// both directions, at different times.
+				if _, csrErr := s.CA.Storage.GetCSR(r.Context(), subject); csrErr == nil {
+					http.Error(w, fmt.Sprintf(
+						"could not revoke unsigned csr for %s: sign it first, or clean it to discard the request",
+						subject), http.StatusConflict)
+					return
+				}
 				http.Error(w, err.Error(), http.StatusNotFound)
 				return
 			}
