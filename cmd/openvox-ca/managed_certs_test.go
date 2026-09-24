@@ -283,6 +283,16 @@ var _ = Describe("The leaf backdate and reconcile interval settings", func() {
 		Expect(err).To(MatchError(ContainSubstring("managed_cert_interval_sec must not be negative")))
 	})
 
+	It("refuses a negative reconcile interval from the environment too", func() {
+		// The half the file-path spec cannot reach. applyServerEnv used to gate
+		// this variable on n > 0, so a negative value was silently discarded and
+		// the server started on the default -- the same asymmetry the refusal
+		// exists to end, left in the one path the refusal could not see.
+		setEnv("PUPPET_CA_MANAGED_CERT_INTERVAL_SEC", "-1")
+		_, err := loadServerConfig("")
+		Expect(err).To(MatchError(ContainSubstring("managed_cert_interval_sec must not be negative")))
+	})
+
 	It("still defaults the reconcile interval when it is absent or zero", func() {
 		// The other half, so the refusal above cannot be satisfied by refusing
 		// zero as well: zero means unset and must keep taking the default.

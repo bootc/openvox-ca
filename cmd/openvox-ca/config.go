@@ -348,11 +348,14 @@ func loadServerConfig(configFile string) (*serverConfig, error) {
 	}
 	// Refused rather than ignored, for the reason the backdate's own check
 	// gives: a negative value is a typo, and falling back to the default
-	// silently is how the operator never hears about it. Only the config file
-	// can carry one here -- applyServerEnv gates the environment variable on
-	// n > 0 -- but a setting that behaves one way from YAML and another from
-	// the environment is its own trap, and the asymmetry with
+	// silently is how the operator never hears about it. The asymmetry with
 	// leaf_backdate_sec, which refuses, had no reason behind it.
+	//
+	// Reachable from both the config file and the environment. It previously
+	// said only the file could carry one, which described applyServerEnv's
+	// `n > 0` gate rather than a property of the input -- and that gate was
+	// itself the YAML-versus-environment trap this paragraph calls out, left in
+	// place by the change that wrote the paragraph. The gate is gone.
 	if cfg.ManagedCertIntervalSec < 0 {
 		return nil, fmt.Errorf("managed_cert_interval_sec must not be negative (got %d): "+
 			"a reconcile interval is a period, and a negative one would silently become "+
@@ -900,7 +903,11 @@ func applyServerEnv(cfg *serverConfig) {
 		}
 	}
 	if v := os.Getenv("PUPPET_CA_MANAGED_CERT_INTERVAL_SEC"); v != "" {
-		if n, err := strconv.Atoi(v); err == nil && n > 0 {
+		// Ungated for the same reason as the backdate above, and it used not to
+		// be: with `n > 0` here a negative value was discarded and the server
+		// started on the default, which is exactly the YAML-versus-environment
+		// asymmetry the refusal in loadServerConfig was added to end.
+		if n, err := strconv.Atoi(v); err == nil {
 			cfg.ManagedCertIntervalSec = n
 		}
 	}
