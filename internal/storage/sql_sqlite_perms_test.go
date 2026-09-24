@@ -450,7 +450,7 @@ var _ = Describe("SQLiteFilePermissions", func() {
 		dir := GinkgoT().TempDir()
 		dbPath := filepath.Join(dir, "ca.db")
 
-		_, ok := sqliteFilePath("file:" + dbPath + "?mode=memory")
+		_, ok := SQLiteFilePath("file:" + dbPath + "?mode=memory")
 
 		Expect(ok).To(BeFalse(), "no file to protect")
 	})

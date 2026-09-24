@@ -290,7 +290,7 @@ func NewSQLBackend(cfg SQLConfig) (*SQLBackend, error) {
 // upgrade that finished, and refusing to start over it would turn a housekeeping
 // task into an outage.
 func warnOnStrandedSQLiteLockDir(dsn, inUse string) {
-	spelling, ok := sqliteFilePath(dsn)
+	spelling, ok := SQLiteFilePath(dsn)
 	if !ok {
 		return
 	}
@@ -1038,11 +1038,17 @@ func (b *SQLBackend) KeyFilePaths() []string {
 	return b.keyFilePaths
 }
 
-// sqliteFilePath extracts the database file path from a SQLite DSN, which the
+// SQLiteFilePath extracts the database file path from a SQLite DSN, which the
 // driver accepts either as a bare path ("/var/lib/puppet-ca/ca.db") or as a
 // "file:" URI, both optionally carrying query parameters. Reports false when
 // the DSN names no file on disk.
-func sqliteFilePath(dsn string) (string, bool) {
+//
+// Exported because the managed-certificate path check needs the same answer:
+// that database holds the inventory, the signed certificates and the CRL, so a
+// file store pointed at it would overwrite the CA's own state. Two
+// implementations of "which file does this DSN name" would be two answers, and
+// the one that drifted would be the one guarding against that.
+func SQLiteFilePath(dsn string) (string, bool) {
 	path, query := dsn, ""
 	isURI := strings.HasPrefix(path, "file:")
 	if isURI {
@@ -1116,12 +1122,12 @@ func sqliteDSNReadable(dsn string) error {
 	return nil
 }
 
-// sqliteDatabasePath is sqliteFilePath plus symlink resolution: the path every
-// derived name is built from. sqliteFilePath itself stays a pure parser of the
+// sqliteDatabasePath is SQLiteFilePath plus symlink resolution: the path every
+// derived name is built from. SQLiteFilePath itself stays a pure parser of the
 // DSN, which is what its own specs pin, so the filesystem is only consulted
 // here.
 func sqliteDatabasePath(dsn string) (string, bool) {
-	path, ok := sqliteFilePath(dsn)
+	path, ok := SQLiteFilePath(dsn)
 	if !ok {
 		return "", false
 	}
