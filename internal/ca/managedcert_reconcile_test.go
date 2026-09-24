@@ -25,9 +25,12 @@ package ca
 import (
 	"bytes"
 	"context"
+	"crypto/ecdsa"
+	"crypto/elliptic"
 	"crypto/rand"
 	"crypto/rsa"
 	"crypto/x509"
+	"crypto/x509/pkix"
 	"encoding/pem"
 	"fmt"
 	"io/fs"
@@ -346,10 +349,41 @@ var _ = Describe("Reconciling a managed certificate", func() {
 			// silently re-keying would defeat the pin the setting exists to
 			// provide. Both halves are asserted, since a later
 			// generate-on-failure fallback would satisfy only the first.
+			//
+			// The pair has to be one this CA issued, and the fixture used to
+			// swap the key alone -- leaving a certificate over a DIFFERENT key,
+			// which is a key mismatch rather than a weak pin. That reached the
+			// strength refusal only because unowned key material was reused in
+			// the first place, so it was testing the ownership hole with a weak
+			// key instead of testing the strength policy. See the spec below for
+			// the mismatch case, which now has its own answer.
 			entry.Spec.ReuseKey = true
 			_, err := reconcile()
 			Expect(err).NotTo(HaveOccurred())
+
+			weakPEM, weakCertPEM := caIssuedPairOverWeakKey(myCA, subject, spec.DNSNames)
+			fake.mu.Lock()
+			fake.certPEM, fake.keyPEM = weakCertPEM, weakPEM
+			fake.mu.Unlock()
 			good := fake.stored()
+
+			_, err = reconcileAt(dueWindow)
+			Expect(err).To(HaveOccurred(), "a weak reused key must fail the pass")
+			Expect(fake.stored().SerialNumber).To(Equal(good.SerialNumber),
+				"and must not be silently replaced with a fresh key")
+		})
+
+		It("replaces, rather than refuses, a weak key that is not the certificate's", func() {
+			// The case the spec above used to be standing in for. A weak key
+			// beside a certificate it does not belong to is not a pin at all --
+			// it is unowned material, and the ownership gate replaces it with a
+			// fresh key and says so. Distinct outcomes for distinct situations:
+			// a weak key that IS ours fails the pass until the operator fixes
+			// it, because the pin is real and cannot be honoured; a key that is
+			// not ours never gets that far.
+			entry.Spec.ReuseKey = true
+			_, err := reconcile()
+			Expect(err).NotTo(HaveOccurred())
 
 			weak, kerr := rsa.GenerateKey(rand.Reader, 1024)
 			Expect(kerr).NotTo(HaveOccurred())
@@ -360,10 +394,12 @@ var _ = Describe("Reconciling a managed certificate", func() {
 			})
 			fake.mu.Unlock()
 
-			_, err = reconcileAt(dueWindow)
-			Expect(err).To(HaveOccurred(), "a weak reused key must fail the pass")
-			Expect(fake.stored().SerialNumber).To(Equal(good.SerialNumber),
-				"and must not be silently replaced with a fresh key")
+			issued, err := reconcileAt(dueWindow)
+			Expect(err).NotTo(HaveOccurred(),
+				"unowned key material is replaced, not signed and not fatal")
+			Expect(issued).To(BeTrue())
+			Expect(fake.stored().PublicKey).NotTo(Equal(weak.Public()),
+				"the weak planted key must never be certified")
 		})
 
 		It("does not reuse the key of a certificate that was revoked", func() {
@@ -391,6 +427,105 @@ var _ = Describe("Reconciling a managed certificate", func() {
 			Expect(fake.stored().PublicKey).NotTo(Equal(first.PublicKey),
 				"a revoked certificate must be replaced with a NEW key, whatever the pin says")
 			Expect(buf.String()).To(ContainSubstring("its certificate was revoked"))
+		})
+
+		It("does not certify a key planted beside the stored certificate", func() {
+			// SECURITY. The attack ReuseKey made possible for anyone who could
+			// WRITE the store without reading it: put a key of your choosing
+			// next to the certificate. The mismatch is what TRIGGERS the
+			// reissue, and the pass it triggered then signed the planted key
+			// into a CA certificate with a fresh serial and a full lifetime --
+			// detection and use were disconnected.
+			//
+			// Write access alone was enough, which is the whole severity: an
+			// attacker who can READ the store already holds the CA-issued key
+			// and gains nothing. An update-without-get RBAC rule on the Secret,
+			// or a write-only mount for the file store, is the shape.
+			entry.Spec.ReuseKey = true
+			_, err := reconcile()
+			Expect(err).NotTo(HaveOccurred())
+
+			planted, kerr := ecdsa.GenerateKey(elliptic.P256(), rand.Reader)
+			Expect(kerr).NotTo(HaveOccurred())
+			plantedPEM, merr := marshalPrivateKeyPEM(planted)
+			Expect(merr).NotTo(HaveOccurred())
+			fake.mu.Lock()
+			fake.keyPEM = plantedPEM
+			fake.mu.Unlock()
+
+			var buf bytes.Buffer
+			prev := slog.Default()
+			slog.SetDefault(slog.New(slog.NewTextHandler(&buf, &slog.HandlerOptions{
+				Level: slog.LevelDebug,
+			})))
+			defer slog.SetDefault(prev)
+
+			issued, err := reconcile()
+			Expect(err).NotTo(HaveOccurred())
+			Expect(issued).To(BeTrue(), "the mismatch must still drive a reissue")
+			Expect(fake.stored().PublicKey).NotTo(Equal(planted.Public()),
+				"the CA must never sign a key it did not establish as one of its own")
+			Expect(buf.String()).To(ContainSubstring("not the key of a certificate this CA issued"))
+		})
+
+		It("does not certify a self-consistent pair the CA did not issue", func() {
+			// The other half, and the reason matching the key against the stored
+			// certificate is NOT on its own sufficient: an attacker who can
+			// write the store can supply a certificate AND its matching key,
+			// which is self-consistent and still not ours. Both facts have to
+			// hold -- a certificate we signed, and the key belonging to it.
+			entry.Spec.ReuseKey = true
+			_, err := reconcile()
+			Expect(err).NotTo(HaveOccurred())
+
+			foreignCA, foreignKey := selfSignedIssuer("Some other CA")
+			pair := mintLeaf(foreignCA, foreignKey, subject, spec.DNSNames, nil,
+				90*24*time.Hour, time.Now().UTC())
+			fake.mu.Lock()
+			fake.certPEM, fake.keyPEM = pair.certPEM, pair.keyPEM
+			fake.mu.Unlock()
+
+			var buf bytes.Buffer
+			prev := slog.Default()
+			slog.SetDefault(slog.New(slog.NewTextHandler(&buf, &slog.HandlerOptions{
+				Level: slog.LevelDebug,
+			})))
+			defer slog.SetDefault(prev)
+
+			issued, err := reconcile()
+			Expect(err).NotTo(HaveOccurred())
+			Expect(issued).To(BeTrue())
+			Expect(fake.stored().PublicKey).NotTo(Equal(pair.cert.PublicKey),
+				"a foreign certificate's key must not be re-certified just because it "+
+					"matches the foreign certificate")
+			Expect(buf.String()).To(ContainSubstring("not the key of a certificate this CA issued"))
+		})
+
+		It("does not blame the CRL on a first issuance", func() {
+			// The pin arms are ordered so that an empty store reaches the
+			// nothing-is-pinned arm, not the unreadable-CRL one.
+			// storedMaterialRevoked reports Known=false for a store that does
+			// not decode -- which an empty store does not -- so with the CRL
+			// arms first, every ReuseKey first issuance warned about a CRL that
+			// was never consulted. Right outcome, false telemetry: it sends an
+			// operator after an outage that does not exist and devalues the
+			// warning on the pass where the CRL really is unreadable.
+			entry.Spec.ReuseKey = true
+
+			var buf bytes.Buffer
+			prev := slog.Default()
+			slog.SetDefault(slog.New(slog.NewTextHandler(&buf, &slog.HandlerOptions{
+				Level: slog.LevelDebug,
+			})))
+			defer slog.SetDefault(prev)
+
+			issued, err := reconcile()
+			Expect(err).NotTo(HaveOccurred())
+			Expect(issued).To(BeTrue())
+			Expect(buf.String()).NotTo(ContainSubstring("CRL could not be read"),
+				"a first issuance consults no CRL and must not report one as unreadable")
+			Expect(buf.String()).NotTo(ContainSubstring("breaks any pin on the old key"),
+				"there is no old key on a first issuance, so no pin is broken")
 		})
 
 		It("does not reuse the key of a revoked certificate that also lost a name", func() {
@@ -662,6 +797,72 @@ var _ = Describe("Reconciling a managed certificate", func() {
 			"a serverAuth-only spec that still emitted clientAuth would hand out an admin credential")
 	})
 
+	It("issues anyway when the displacement check cannot read the stored certificate", func() {
+		// The displacement check is a diagnostic, not a gate: it reports a
+		// certificate the CA holds for this name that the entry cannot account
+		// for. Its own read failing must not stop the issuance -- a renewal
+		// blocked by a broken diagnostic is a certificate left to expire -- and it
+		// must say the check could not be made rather than implying there was
+		// nothing to report.
+		if os.Geteuid() == 0 {
+			Skip("mode 0000 does not deny open(2) to root, so this cannot be set up")
+		}
+		_, err := reconcile()
+		Expect(err).NotTo(HaveOccurred())
+
+		certFile := filepath.Join(storeDir, "signed", subject+".pem")
+		Expect(certFile).To(BeAnExistingFile())
+		Expect(os.Chmod(certFile, 0o000)).To(Succeed())
+		DeferCleanup(func() { _ = os.Chmod(certFile, 0o644) })
+
+		var buf bytes.Buffer
+		prev := slog.Default()
+		slog.SetDefault(slog.New(slog.NewTextHandler(&buf, &slog.HandlerOptions{
+			Level: slog.LevelDebug,
+		})))
+		defer slog.SetDefault(prev)
+
+		issued, err := reconcileAt(dueWindow)
+		Expect(err).NotTo(HaveOccurred(),
+			"a diagnostic that cannot run must not fail the pass it only annotates")
+		Expect(issued).To(BeTrue())
+		Expect(buf.String()).To(ContainSubstring("Could not read the stored certificate for a managed subject"))
+	})
+
+	It("reissues, narrowing the usage, when the operator narrows the spec", func() {
+		// SECURITY, and the end-to-end half of it. The sibling specs issue
+		// against an empty store, so they prove the spec's usage reaches a FIRST
+		// certificate. They cannot prove the case that matters operationally: a
+		// certificate already in the store, satisfying an older and wider usage,
+		// is a live credential until something forces it to be replaced. If
+		// narrowing does not take effect when the operator narrows it, the setting
+		// is decorative and the wide certificate stays valid for its full
+		// remaining life.
+		//
+		// The decision function's choice of reasonUsageMismatch is unit tested
+		// over synthetic PEM elsewhere; this drives a real pass.
+		_, err := reconcile()
+		Expect(err).NotTo(HaveOccurred())
+		wide := fake.stored()
+		Expect(wide.ExtKeyUsage).To(ContainElement(x509.ExtKeyUsageClientAuth),
+			"this spec only proves anything if the first certificate really is the wide one")
+
+		entry.Spec.ExtKeyUsage = []x509.ExtKeyUsage{x509.ExtKeyUsageServerAuth}
+
+		issued, err := reconcile()
+		Expect(err).NotTo(HaveOccurred())
+		Expect(issued).To(BeTrue(),
+			"narrowing the usage must force a reissue, not wait for the renew window")
+
+		narrow := fake.stored()
+		Expect(narrow.SerialNumber).NotTo(Equal(wide.SerialNumber),
+			"the wide certificate must actually be replaced")
+		Expect(narrow.ExtKeyUsage).To(Equal([]x509.ExtKeyUsage{x509.ExtKeyUsageServerAuth}))
+		Expect(narrow.ExtKeyUsage).NotTo(ContainElement(x509.ExtKeyUsageClientAuth),
+			"a stored certificate still carrying clientAuth after the operator removed it "+
+				"is an admin credential the configuration says should not exist")
+	})
+
 	It("issues the default usages when the spec names none", func() {
 		// The other half: an omitted EKU must not mean "unrestricted", which is
 		// what an empty ExtKeyUsage means in X.509.
@@ -823,8 +1024,8 @@ var _ = Describe("Reconciling a managed certificate", func() {
 			passCtx, cancelPass = context.WithCancel(ctx)
 			defer cancelPass()
 
-			fake.saveErr = nil
 			fake.mu.Lock()
+			fake.saveErr = nil
 			fake.saveHook = func() error {
 				cancelPass()
 				return fmt.Errorf("secret store timed out")
@@ -1560,6 +1761,35 @@ var _ = Describe("ReconcileManaged over several entries", func() {
 			"a later failure must not displace the one already recorded")
 	})
 })
+
+// caIssuedPairOverWeakKey signs a certificate with the CA's own key over an
+// RSA-1024 key, returning the key and certificate PEM. The CA's own issuance
+// would refuse such a key, which is the point: this is the only way to stage a
+// pin that is genuinely the CA's and genuinely below policy, as happens when the
+// key policy is tightened after a certificate was issued.
+func caIssuedPairOverWeakKey(myCA *CA, cn string, dnsNames []string) (keyPEM, certPEM []byte) {
+	GinkgoHelper()
+	weak, err := rsa.GenerateKey(rand.Reader, 1024)
+	Expect(err).NotTo(HaveOccurred())
+	serial, err := rand.Int(rand.Reader, new(big.Int).Lsh(big.NewInt(1), 128))
+	Expect(err).NotTo(HaveOccurred())
+	now := time.Now().UTC()
+	tmpl := &x509.Certificate{
+		SerialNumber:          serial,
+		Subject:               pkix.Name{CommonName: cn},
+		DNSNames:              dnsNames,
+		ExtKeyUsage:           defaultLeafExtKeyUsage(),
+		NotBefore:             now.Add(-5 * time.Minute),
+		NotAfter:              now.Add(90 * 24 * time.Hour),
+		KeyUsage:              x509.KeyUsageDigitalSignature | x509.KeyUsageKeyEncipherment,
+		BasicConstraintsValid: true,
+	}
+	der, err := x509.CreateCertificate(rand.Reader, tmpl, myCA.CACert, weak.Public(), myCA.CAKey)
+	Expect(err).NotTo(HaveOccurred())
+	return pem.EncodeToMemory(&pem.Block{
+		Type: "RSA PRIVATE KEY", Bytes: x509.MarshalPKCS1PrivateKey(weak),
+	}), pem.EncodeToMemory(&pem.Block{Type: "CERTIFICATE", Bytes: der})
+}
 
 // inventorySerialsFor returns the inventory serials recorded for subject, in
 // the order they were written.
