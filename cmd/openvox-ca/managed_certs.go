@@ -67,6 +67,17 @@ import (
 // is also the first change that can say what a useful value looks like. See
 // #243.
 //
+// managed_cert_interval_sec ships now despite being just as dormant, and the
+// asymmetry is deliberate. A metric is read by something that draws conclusions
+// from it: a permanently zero series is indistinguishable from a healthy one, so
+// shipping it early trains an operator to believe a failure mode is covered when
+// nothing can move the number. A setting is read by the operator, who sets it
+// and gets exactly what it says -- the interval really does govern this loop's
+// period; the loop simply has nothing to iterate over yet. It also has to exist
+// before the first instance rather than with it, since the change that adds an
+// instance would otherwise have to add the knob that paces it in the same
+// breath. Dormant-and-honest differs from dormant-and-reassuring.
+//
 // A timer, deliberately, and not the Kubernetes exporter's CRLUpdated() channel:
 // that channel fires on revocation, and renewal is driven by the clock. A CA
 // that revokes nothing for a fortnight would otherwise let every managed

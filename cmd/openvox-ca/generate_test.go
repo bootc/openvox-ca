@@ -386,6 +386,12 @@ var _ = Describe("openvox-ca generate", func() {
 			// passed just as happily with the backdate removed altogether.
 			Expect(cert.NotAfter.Sub(cert.NotBefore)).To(BeNumerically("<", 70*time.Minute),
 				"a 1h ttl plus the 5m backdate, not the multi-year default")
+			// And from below, which the upper bound alone cannot do: removing the
+			// backdate entirely leaves a 1h span, which is under 70 minutes and
+			// so passes the assertion above. Only a floor pins that a backdate
+			// is still being applied at all.
+			Expect(cert.NotAfter.Sub(cert.NotBefore)).To(BeNumerically(">", 62*time.Minute),
+				"the 5m backdate must still be applied; 1h alone means it was dropped")
 		})
 
 		It("writes the certificate to --cert-out at 0644, leaving stdout empty", func() {

@@ -349,6 +349,13 @@ reaching for the passthrough can see the setting exists and what its default
 assumes. The reference material stays in `docs/configuration.md`, which is what
 keeps the two from drifting.
 
+This applies to settings added from here on. The example block also carries
+older entries that are illustrative *values* rather than annotated defaults
+(`storage_backend: postgres`, `leaf_key_algo: ecdsa`), and settings documented
+before this rule that are absent from it altogether. Bringing those into line is
+not a prerequisite for adding a setting, and the two styles sitting side by side
+is expected until someone sweeps the block deliberately.
+
 Every fixture under `charts/openvox-ca/ci/` is linted and schema-checked in CI.
 A new template branch needs a fixture that exercises it, or it is untested —
 and schema validity is not correctness, so anything a reader has to *trust*

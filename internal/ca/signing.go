@@ -687,9 +687,14 @@ func defaultLeafExtKeyUsage() []x509.ExtKeyUsage {
 // index. ttl=0 means use the default certValidity. c.mu must be held by the
 // caller.
 //
-// eku=nil means the serverAuth+clientAuth pair every certificate this CA issues,
-// which is what all four callers pass unless something asked otherwise. It is a
-// parameter so that a managed certificate CAN be narrower: clientAuth is what
+// eku=nil means the serverAuth+clientAuth pair, and two of the four callers now
+// pass something else, so this is no longer what every certificate gets:
+// issueManagedUnderSubjectLock passes the entry's configured usages, and
+// AutoRenew passes the presented certificate's own usages forward so that a
+// renewal cannot return more authority than it was given. signWithDuration and
+// GenerateWithOptions still pass nil and take the pair.
+//
+// It is a parameter so that a certificate CAN be narrower: clientAuth is what
 // makes a certificate usable as a CA client, so a deployment that knows its
 // certificate only ever answers handshakes can withhold it. Which certificates
 // want that is the configuring caller's decision, not this function's.
