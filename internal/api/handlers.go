@@ -27,6 +27,7 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"io/fs"
 	"log/slog"
 	"math/big"
 	"net/http"
@@ -353,13 +354,25 @@ func (s *Server) handlePutStatus(w http.ResponseWriter, r *http.Request) {
 			// via the sentinel rather than fs.ErrNotExist, which every backend
 			// also returns for an absent blob — a missing CRL must stay 409.
 			if errors.Is(err, ca.ErrSubjectUnknown) {
-				// Upstream splits these two and #358 is explicit about it:
-				// Puppet Server reserves 404 for a name it has never heard of
-				// and 409 for "CSR exists but is unsigned"
-				// (certificate_authority_core.clj:415 and :424), and
-				// puppetserver-ca-cli branches on exactly that — 404 prints
-				// "Could not find certificate" and exits 1, 409 prints "Could
-				// not revoke unsigned csr" and exits 24.
+				// Upstream splits these two, and the split is keyed on whether
+				// a request exists rather than on anything about the
+				// certificate. In Puppet Server's certificate_status resource
+				// (src/clj/puppetlabs/services/ca/certificate_authority_core.clj,
+				// verified at puppetserver 88c5cd3b305293c078d0b7c995023df9b9dd0725):
+				//
+				//   :exists?  (or (certificate-issued? …) (csr-exists? …))   :441
+				//   :can-put-to-missing? false                               :415
+				//   :conflict? (when-not (certificate-issued? …) …)          :424
+				//
+				// So neither present answers 404 via :handle-not-implemented
+				// (:461, whose comment says "we want to return a 404"), while a
+				// request with no signed certificate answers 409. The line
+				// numbers are pinned to that commit because upstream moves
+				// them; the predicates are the durable part.
+				//
+				// puppetserver-ca-cli branches on the pair: 404 prints "Could
+				// not find certificate" and exits 1, 409 prints "Could not
+				// revoke unsigned csr" and exits 24.
 				//
 				// A queued request is genuinely not in the inventory, so the CA
 				// layer's sentinel is right about what it observed; the
@@ -367,15 +380,30 @@ func (s *Server) handlePutStatus(w http.ResponseWriter, r *http.Request) {
 				// collapse these on the grounds that neither has a certificate
 				// to revoke: that reasoning is about our own consistency, and
 				// the HTTP contract is matched to Puppet Server rather than to
-				// us. Collapsing them was a real defect in this endpoint, in
-				// both directions, at different times.
-				if _, csrErr := s.CA.Storage.GetCSR(r.Context(), subject); csrErr == nil {
+				// us. See issue #358, which records both collapses this
+				// endpoint has had.
+				_, csrErr := s.CA.Storage.GetCSR(r.Context(), subject)
+				switch {
+				case csrErr == nil:
 					http.Error(w, fmt.Sprintf(
 						"could not revoke unsigned csr for %s: sign it first, or clean it to discard the request",
 						subject), http.StatusConflict)
-					return
+				case errors.Is(csrErr, fs.ErrNotExist):
+					http.Error(w, err.Error(), http.StatusNotFound)
+				default:
+					// Neither answer is available: the inventory says no entry,
+					// and we could not establish whether a request exists, so
+					// both 404 and 409 would assert something unmeasured. 503
+					// is this API's documented answer for a read the CA could
+					// not complete, and upstream's csr-exists? would fail here
+					// too rather than resolve to absent. The cause goes to the
+					// log, not the body, because it can name storage paths.
+					slog.Warn("Revoke: could not determine whether a certificate request exists; "+
+						"answering 503 rather than guessing between 404 and 409",
+						"subject", subject, "error", csrErr)
+					http.Error(w, "could not read the certificate request for this subject; see the server log",
+						http.StatusServiceUnavailable)
 				}
-				http.Error(w, err.Error(), http.StatusNotFound)
 				return
 			}
 			http.Error(w, "conflict", http.StatusConflict)

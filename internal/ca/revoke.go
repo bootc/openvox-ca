@@ -215,8 +215,17 @@ func (c *CA) revokeLocked(ctx context.Context, subject string, unknownCause *err
 		// Both the blob and the SQL inventory report a missing subject by
 		// wrapping fs.ErrNotExist, so one check covers every backend.
 		//
-		// Converted to ErrSubjectUnknown here rather than passed through,
-		// exactly as revokeSerialCheckedLocked does with ErrSerialUnknown.
+		// Converted to ErrSubjectUnknown here rather than passed through, as
+		// revokeSerialCheckedLocked does with ErrSerialUnknown — the sentinel
+		// conversion is the same shape, but this arm goes further than that
+		// twin and the difference is not yet justified. It threads the cause
+		// out for post-lock logging (see logUnknownSubjectCause) where the
+		// by-serial arm discards it, even though a lost inventory reaches that
+		// arm too and the same invisibility argument applies there. That is a
+		// real asymmetry, not a deliberate one: it belongs with the filed class
+		// of unconditional logging under the CA's locks, and the twin should
+		// gain the same treatment when that is done rather than this arm
+		// losing it.
 		// What this frame knows, and no caller downstream can recover, is
 		// *which read* produced the fs.ErrNotExist: the inventory lookup above,
 		// rather than one of the CRL reads that follow. Both wrap the same

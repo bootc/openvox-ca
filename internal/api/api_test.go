@@ -1428,22 +1428,18 @@ var _ = Describe("API Workflow", func() {
 			Expect(rr.Body.String()).To(ContainSubstring("never-signed-node"))
 		})
 
-		// NOT the same as the never-heard-of case, and an earlier revision of
-		// this spec asserted that it was. Upstream splits them — Puppet Server
-		// reserves 404 for a name it does not know and 409 for a CSR that
-		// exists but is unsigned, and puppetserver-ca-cli turns that into two
-		// different messages and two different exit codes (1 and 24). #358
-		// quotes the upstream line numbers and says in terms: keep 409 for the
-		// unsigned-CSR case so the split is preserved.
+		// NOT the same as the never-heard-of case. Upstream splits them on
+		// whether a request exists, not on anything about the certificate:
+		// Puppet Server's certificate_status resource answers 404 when neither
+		// a signed certificate nor a CSR is present, and 409 when a CSR is
+		// present without a signed certificate. puppetserver-ca-cli turns that
+		// into two messages and two exit codes, 1 and 24. See issue #358.
 		//
-		// The reasoning that got this wrong is worth recording, because it was
-		// not careless: a queued request is not a certificate and puts nothing
-		// in the inventory, so revoke finds the same absence either way, and
-		// treating them alike is the internally consistent choice. That is the
-		// wrong axis. The HTTP contract is matched to Puppet Server, not to our
-		// own sense of symmetry, and this endpoint has now had the two cases
-		// collapsed in both directions — 409 for both before this PR, 404 for
-		// both midway through it.
+		// The tempting mistake is to treat them alike, because a queued request
+		// is not a certificate and puts nothing in the inventory, so revoke
+		// finds the same absence either way. That is internally consistent and
+		// it is the wrong axis: the HTTP contract is matched to Puppet Server
+		// rather than to our own symmetry.
 		It("should return 409, not 404, when the subject has only a pending CSR", func() {
 			subject := "requested-only-node"
 			csrPEM, err := testutil.GenerateCSR(subject)
@@ -1475,11 +1471,43 @@ var _ = Describe("API Workflow", func() {
 				"a queued request is not an unknown subject; that conflation is the defect")
 		})
 
-		// The two cases are only useful if they are told apart, and both
-		// historic defects here were failures to do that -- 409 for both before
-		// this PR, 404 for both midway through it. Asserting each alone cannot
-		// catch a future collapse, because either spec passes whichever way the
-		// pair is merged; asserting the pair differs is what does.
+		// The third outcome, and the one with no safe guess. The 404/409 split
+		// is decided by whether a request exists, so when that read FAILS --
+		// rather than reporting absence -- neither answer is available: 404
+		// would assert the subject is unknown and 409 would assert a queued
+		// request, and nothing has established either. 503 is this API's
+		// documented answer for a read the CA could not complete, and it is
+		// what upstream's csr-exists? would effectively do rather than
+		// resolving to absent.
+		//
+		// A directory where the CSR file belongs produces EISDIR, which is a
+		// real read failure and specifically NOT fs.ErrNotExist -- the
+		// distinction the branch turns on.
+		It("should return 503 when it cannot tell whether a request exists", func() {
+			subject := "unreadable-csr-node"
+			csrPath := filepath.Join(myCA.Storage.CSRDir(), subject+".pem")
+			Expect(os.MkdirAll(csrPath, 0o755)).To(Succeed())
+
+			body, _ := json.Marshal(api.PutStatusBody{DesiredState: "revoked"})
+			req := httptest.NewRequest("PUT", "/certificate_status/"+subject, bytes.NewReader(body))
+			rr := httptest.NewRecorder()
+			mux.ServeHTTP(rr, req)
+
+			Expect(rr.Code).To(Equal(http.StatusServiceUnavailable),
+				"neither 404 nor 409 is measured here, so neither may be asserted")
+			Expect(rr.Body.String()).NotTo(ContainSubstring(ca.ErrSubjectUnknown.Error()),
+				"a read that failed is not a subject the inventory does not list")
+			Expect(rr.Body.String()).NotTo(ContainSubstring("unsigned csr"),
+				"nor is it a queued request; that is the thing we could not determine")
+			// The cause names a storage path, so it must stay in the log.
+			Expect(rr.Body.String()).NotTo(ContainSubstring(tmpDir))
+		})
+
+		// The two cases are only useful if they are told apart, and the defect
+		// issue #358 records is a failure to do that -- both answering one
+		// status. Asserting each case alone cannot catch a collapse, because
+		// either spec passes whichever way the pair is merged; asserting that
+		// the pair differs is what does.
 		It("distinguishes an unknown subject from a subject with only a pending CSR", func() {
 			queued := "queued-node"
 			csrPEM, err := testutil.GenerateCSR(queued)
@@ -1594,7 +1622,7 @@ var _ = Describe("API Workflow", func() {
 			Expect(rr.Body.String()).NotTo(ContainSubstring(ca.ErrForeignStoredCRL.Error()),
 				"a CRL that is absent is not a CRL signed by another CA; the remedies differ")
 			Expect(rr.Body.String()).NotTo(ContainSubstring(ca.ErrSubjectUnknown.Error()),
-				"and it is emphatically not an unknown subject, which is this PR's whole point")
+				"and emphatically not an unknown subject, which is the conflation #358 is about")
 		})
 	})
 
