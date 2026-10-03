@@ -51,7 +51,8 @@ A revocation takes the per-subject lock that signing and [renewal](#certificate-
 > In this state the `WARN` line names the serial. A revocation that failed
 > *before* the CRL was reached — a lock it could not take, or a subject the
 > inventory could not resolve — does not, and the serial has to come from the
-> inventory instead.
+> inventory instead. On the filesystem backend the inventory writes it with a
+> `0x` prefix; the serial this API takes is the hex digits without it.
 
 `GET` response:
 
