@@ -1078,17 +1078,25 @@ func (s *StorageService) SavePrivateKey(ctx context.Context, subject string, pem
 }
 
 // CheckKeyPermissions reports private key files whose permissions are more
-// permissive than expected (0600). Scans the local private-key directory,
-// which for the filesystem backend also contains the CA key.
+// permissive than expected (0600). Scans the local private-key directory, and
+// the filesystem backend's CA key, which lives at the top of the cadir unless
+// the cadir predates that and keeps it in private/ (see caKeyFiler).
 func (s *StorageService) CheckKeyPermissions() []KeyPermWarning {
 	if s.localPrivateKeyDir == "" {
 		return nil
 	}
+	var warnings []KeyPermWarning
+	if f, ok := s.backend.(caKeyFiler); ok {
+		if p := f.CAKeyFile(); p != "" && filepath.Dir(p) != filepath.Clean(s.localPrivateKeyDir) {
+			if info, err := os.Stat(p); err == nil && info.Mode().Perm()&^os.FileMode(FilePermPrivate) != 0 {
+				warnings = append(warnings, KeyPermWarning{Path: p, Mode: info.Mode().Perm()})
+			}
+		}
+	}
 	entries, err := os.ReadDir(s.localPrivateKeyDir)
 	if err != nil {
-		return nil
+		return warnings
 	}
-	var warnings []KeyPermWarning
 	for _, e := range entries {
 		if e.IsDir() || !strings.HasSuffix(e.Name(), "_key.pem") {
 			continue

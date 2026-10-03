@@ -195,13 +195,13 @@ Server CA, so you can swap in `openvox-ca` without reorganising your SSL tree:
 ```text
 <cadir>/
 ├── ca_crt.pem              CA certificate
+├── ca_key.pem              CA private key (see note)          0600
 ├── ca_pub.pem              CA public key
 ├── ca_crl.pem              Certificate Revocation List (see note)
 ├── inventory.txt           Issued/revoked certificate log
 ├── superseded.json         Certificates awaiting delayed
 │                           revocation (see note)              0600
 ├── private/
-│   ├── ca_key.pem          CA private key                    0600
 │   └── <subject>_key.pem   server-generated private keys     0600
 ├── requests/
 │   └── <subject>.pem       pending CSRs
@@ -211,6 +211,13 @@ Server CA, so you can swap in `openvox-ca` without reorganising your SSL tree:
     └── <hash>.lock         same-host lock files              0600
 ```
 
+> **`ca_key.pem` is where OpenVox Server keeps its CA key**, so a cadir either
+> implementation has used has the key where the other looks. If the key is in
+> `private/ca_key.pem` instead, openvox-ca reads and writes it there. If both
+> files exist with different contents, openvox-ca refuses to start and names
+> both: either could be the key this CA signs with, and only you can say which.
+> Remove the other one.
+>
 > **`superseded.json` is absent until the first supersession.** It appears only
 > where [`superseded_cert_revoke_after_sec`](configuration.md#delayed-supersession)
 > grants renewals an overlap window, and it holds the serials — with their
@@ -227,8 +234,9 @@ Server CA, so you can swap in `openvox-ca` without reorganising your SSL tree:
 > [storage internals](development/storage-internals.md).
 
 (The directory also holds small internal integrity files; leave them in place.)
-File permissions are fixed: `0600` for anything under `private/` and for the
-lock files under `locks/`, `0644` for everything else. `openvox-ca` warns at startup about any `*_key.pem` in
+File permissions are fixed: `0600` for `ca_key.pem`, for anything under
+`private/` and for the lock files under `locks/`, `0644` for everything else.
+`openvox-ca` warns at startup about `ca_key.pem` and any `*_key.pem` in
 `private/` whose permissions are looser than `0600` and leaves them for you to
 fix.
 
@@ -854,7 +862,7 @@ the logical key `ca_key`:
 
 | Backend | Where the key is | How to remove it |
 | --- | --- | --- |
-| `filesystem` (default) | `private/ca_key.pem` under the cadir | `rm` the file |
+| `filesystem` (default) | `ca_key.pem` under the cadir (or `private/ca_key.pem`, if that is where it is) | `rm` the file |
 | `ca_key_file` overlay | the configured path | `rm` the file |
 | `sqlite`, `postgres`, `mysql` | table `puppet_ca_blobs`, column `blob_key`, value `ca_key` | `DELETE FROM puppet_ca_blobs WHERE blob_key = 'ca_key';` |
 | `etcd` | `<prefix>/ca/key` | `etcdctl del <prefix>/ca/key` |
