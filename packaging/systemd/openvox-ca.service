@@ -61,6 +61,10 @@ Group=puppet-ca
 # OpenVox/Puppet Server that is typically /etc/puppetlabs/puppet/ssl/ca. A cadir
 # OpenVox Server may take back also needs this unit to run as OpenVox Server's
 # user: see "Sharing the cadir with OpenVox Server" in docs/storage-backends.md.
+#
+# A managed certificate with a `files` store writes outside cadir by
+# definition, so its directory needs naming here too. See "managed
+# certificates" in docs/configuration.md.
 StateDirectory=puppet-ca
 StateDirectoryMode=0750
 #ReadWritePaths=/etc/puppetlabs/puppet/ssl/ca
