@@ -30,6 +30,7 @@ import (
 	"net"
 	"net/url"
 	"slices"
+	"sync"
 	"time"
 )
 
@@ -535,14 +536,63 @@ func parseStoredKey(block *pem.Block) (crypto.Signer, error) {
 //
 // Named for the lock the caller holds, not one taken here: issuer is read under
 // c.mu by reconcileManagedCert and passed in, so this touches no shared state.
-func (c *CA) storedKeyIsOursUnderSubjectLock(issuer, current *x509.Certificate, key crypto.Signer) bool {
-	if issuer == nil || current == nil || key == nil {
+func (c *CA) storedKeyIsOursUnderSubjectLock(issuer, current *x509.Certificate, key crypto.Signer, subject string) bool {
+	if key == nil {
+		return false
+	}
+	if !currentIsThisSubjectsUnderSubjectLock(issuer, current, subject) {
+		return false
+	}
+	return publicKeysEqual(key.Public(), current.PublicKey)
+}
+
+// currentIsThisSubjectsUnderSubjectLock reports whether current is a
+// certificate THIS CA issued FOR THIS SUBJECT. Three arms depend on it, and
+// each one was wrong without the second half.
+//
+// "Issued by this CA" is not a barrier to anybody. Every agent in the fleet
+// holds a certificate this CA issued for its own certname, with the matching
+// private key, and certificates are public so anyone can obtain another node's.
+// A gate that asks only for our signature therefore admits the whole fleet's
+// material, which is what made two separate attacks work against a store
+// writer:
+//
+//   - A legitimate agent pair planted in the entry's store passed the key-reuse
+//     gate, so issueLeafLocked signed the MANAGED subject's certificate over a
+//     key the agent already held. For a subject in puppet_server that is an
+//     admin credential.
+//   - Any victim certificate planted with no usable key gave reasonKeyUnusable
+//     with current set to the victim, and the supersede arm retired the
+//     victim's serial. Denial of service against an identity by writing a
+//     public document into a store.
+//
+// The subject is compared on the Common Name rather than through
+// leafCarriesNames, deliberately. leafCarriesNames asks whether the stored
+// certificate carries everything the spec currently wants, which goes false the
+// moment an operator ADDS a name -- an ordinary renewal where keeping the pinned
+// key is correct. The question here is identity, not currency.
+//
+// What this does NOT settle, and the limit is worth stating rather than
+// implying: a certificate this CA issued for this very name that the entry did
+// not issue -- an agent certificate for the managed certname -- passes. That is
+// the displacement case, and warnIfDisplacingUnderSubjectLock governs it on its
+// own terms: report it, revoke nothing, because the CA cannot prove whose it is.
+// This predicate closes the cross-subject hole; it does not claim to decide
+// same-name provenance.
+//
+// Not the inventory, though SubjectForSerial would be stronger proof. That
+// function scans the whole inventory under the inventory lock, and its own doc
+// comment reserves it for an operator-initiated single revocation "rather than
+// a hot path". A reconcile loop running per entry every 15 minutes is the hot
+// path it means.
+func currentIsThisSubjectsUnderSubjectLock(issuer, current *x509.Certificate, subject string) bool {
+	if issuer == nil || current == nil || subject == "" {
 		return false
 	}
 	if err := current.CheckSignatureFrom(issuer); err != nil {
 		return false
 	}
-	return publicKeysEqual(key.Public(), current.PublicKey)
+	return current.Subject.CommonName == subject
 }
 
 // publicKeysEqual reports whether two public keys are the same key.
@@ -710,6 +760,110 @@ func (c *CA) ReconcileManaged(ctx context.Context) (int, error) {
 	return issued, firstErr
 }
 
+// managedSaveBackoff holds, per subject, how a store that refuses writes is
+// backed off. In memory and per instance, deliberately: it is a rate limiter on
+// this process's own behaviour, not a cluster fact, and a replica that restarts
+// is entitled to try once.
+type managedSaveBackoff struct {
+	mu       sync.Mutex
+	failures map[string]managedSaveFailure
+}
+
+type managedSaveFailure struct {
+	count int
+	last  time.Time
+}
+
+// managedSaveBackoffBase is the first interval withheld after a failed store
+// write, doubling per consecutive failure up to the cap.
+//
+// Base matches the shipped reconcile interval. One failure costs nothing, so a
+// transient refusal is retried at once; the schedule starts at the second
+// consecutive failure, which is the first evidence the store is not merely
+// having a moment. A store that keeps refusing then pays 15m, 30m, 1h and so on
+// to the cap.
+const (
+	managedSaveBackoffBase = 15 * time.Minute
+	managedSaveBackoffCap  = 24 * time.Hour
+)
+
+// skipForSaveBackoff reports whether this pass should be withheld, and for how
+// much longer, because the entry's store recently refused a write.
+//
+// # Why a failed write must not simply be retried every pass
+//
+// The rollback is correct and that is the problem. When Save fails, the pass
+// revokes the certificate it just signed -- nothing ever saw the key, so there
+// is no overlap window to grant -- which appends a CRL entry and re-signs the
+// CRL. issueLeafLocked has already appended an inventory row. Both are
+// permanent. The next pass does it again.
+//
+// Nothing in the loop stops that. Only a failed LOAD ends a pass early, so a
+// store that is readable and not writable -- a read-only mount, an RBAC rule
+// granting get but not update, a filled quota -- completes the full cycle every
+// time. At the shipped 15-minute interval that is 96 revoked serials per entry
+// per day, and a revoked serial stays on the CRL until its certificate's
+// NotAfter, which for a spec with no TTL is certValidity: five years. A week of
+// misconfiguration leaves roughly 670 entries that every agent downloads, for
+// five years.
+//
+// So the backoff is not about load. It is about permanent state accumulating in
+// a shared artefact at a rate nothing bounds, on a path whose individual steps
+// are each correct.
+//
+// # Why backoff rather than the alternatives
+//
+// A pre-flight writability probe was considered and rejected: a probe that
+// succeeds does not mean the real write will, it adds a write to every healthy
+// pass, and it races. Capping the TTL of a retry issued after a recent failure
+// was also rejected -- it shortens CRL residency but still adds an entry every
+// pass, and it pays for a failure mode by altering the certificate an operator
+// asked for, which is the wrong place to take the cost.
+//
+// Withholding the pass is the only option that stops the cycle rather than
+// making each turn of it cheaper. The certificate is not renewed either way: a
+// store that refuses writes cannot hold a renewal, so a pass that would fail
+// buys nothing by running.
+func (c *CA) skipForSaveBackoff(subject string, now time.Time) (time.Duration, bool) {
+	c.saveBackoff.mu.Lock()
+	defer c.saveBackoff.mu.Unlock()
+	f, ok := c.saveBackoff.failures[subject]
+	if !ok || f.count <= 1 {
+		// One failure is free. A transient refusal should not withhold the next
+		// pass, and ReconcileManagedCert is exported precisely so a caller can
+		// get one certificate before it binds a listener -- making that caller
+		// wait out an interval because of a single blip would be surprising.
+		// Backoff begins at the second CONSECUTIVE failure, which is the first
+		// evidence that the store is not merely having a moment.
+		return 0, false
+	}
+	wait := managedSaveBackoffBase << (f.count - 2)
+	if wait > managedSaveBackoffCap || wait <= 0 {
+		wait = managedSaveBackoffCap
+	}
+	if remaining := wait - now.Sub(f.last); remaining > 0 {
+		return remaining, true
+	}
+	return 0, false
+}
+
+// recordSaveOutcome advances or clears an entry's write-failure backoff.
+func (c *CA) recordSaveOutcome(subject string, now time.Time, failed bool) {
+	c.saveBackoff.mu.Lock()
+	defer c.saveBackoff.mu.Unlock()
+	if c.saveBackoff.failures == nil {
+		c.saveBackoff.failures = make(map[string]managedSaveFailure)
+	}
+	if !failed {
+		delete(c.saveBackoff.failures, subject)
+		return
+	}
+	f := c.saveBackoff.failures[subject]
+	f.count++
+	f.last = now
+	c.saveBackoff.failures[subject] = f
+}
+
 // reconcileManagedCert runs one entry: load, decide, and issue if the decision
 // says so, all inside that subject's cluster lock.
 //
@@ -770,6 +924,20 @@ func (c *CA) reconcileManagedCert(ctx context.Context, m ManagedCert, now time.T
 				"subject", subject, "not_after", current.NotAfter.Format(time.RFC3339))
 			return nil
 		}
+		// Withheld if this entry's store has been refusing writes. Checked
+		// after the decision, so a store that starts accepting again is noticed
+		// on the first pass that would have issued, and before any signing, so
+		// a withheld pass leaves no CRL entry and no inventory row -- which is
+		// the whole point. See skipForSaveBackoff.
+		if remaining, skip := c.skipForSaveBackoff(subject, now); skip {
+			slog.Warn("Not reissuing a managed certificate yet: its store refused the last "+
+				"write, and each failed attempt leaves a revoked serial on the CRL for the "+
+				"life of the certificate it signed. Fix the store; this retries on its own",
+				"subject", subject, "reason", reason.String(),
+				"retry_in", remaining.Round(time.Second).String())
+			return nil
+		}
+
 		// Report, before issuing, any certificate this CA holds for the name
 		// that the entry does not account for. The issuance proceeds either
 		// way -- refusing would stall the self-heal #242's failure table
@@ -996,7 +1164,9 @@ func (c *CA) issueManagedUnderSubjectLock(ctx context.Context, m ManagedCert, re
 			"subject", subject, "error", err)
 	}
 
-	if err := m.Save(ctx, certPEM, keyPEM); err != nil {
+	saveErr := m.Save(ctx, certPEM, keyPEM)
+	c.recordSaveOutcome(subject, time.Now().UTC(), saveErr != nil)
+	if err := saveErr; err != nil {
 		// Nothing ever saw this key: it was generated in this call, under this
 		// lock, and the store refused it. So the certificate is revoked
 		// immediately rather than superseded with a delay -- a window exists to
@@ -1057,7 +1227,7 @@ func (c *CA) issueManagedUnderSubjectLock(ctx context.Context, m ManagedCert, re
 		// Its own deadline, for the reason the revocation above gives: the
 		// likeliest cause of a failed store write is that it hung, and a repair
 		// sharing the spent budget cannot run in the one case it exists for.
-		if current != nil && reason != reasonNotOurs {
+		if currentIsThisSubjectsUnderSubjectLock(issuer, current, subject) {
 			restoreCtx, cancelRestore := context.WithTimeout(
 				context.WithoutCancel(ctx), LockTimeout/2)
 			defer cancelRestore()
@@ -1103,7 +1273,7 @@ func (c *CA) issueManagedUnderSubjectLock(ctx context.Context, m ManagedCert, re
 	// different certificate under a different issuer -- and an already-revoked
 	// one needs nothing further. Best effort in every case: the replacement is
 	// written and a failure here must not undo it.
-	if current != nil && reason != reasonNotOurs && !revocation.Revoked {
+	if currentIsThisSubjectsUnderSubjectLock(issuer, current, subject) && !revocation.Revoked {
 		oldSerial := serialHexStr(current.SerialNumber)
 		// Its own budget too, and for the same reason: by this point the pass
 		// has spent its deadline on a load, a key generation, a signature and a
@@ -1231,7 +1401,7 @@ func (c *CA) issuanceKeyFor(m ManagedCert, issuer, current *x509.Certificate,
 			slog.Warn("Cannot reuse the stored private key for a managed certificate. "+
 				"Generating a new one, which breaks any pin on the old key",
 				"subject", subject, "error", err)
-		case !c.storedKeyIsOursUnderSubjectLock(issuer, current, key):
+		case !c.storedKeyIsOursUnderSubjectLock(issuer, current, key, subject):
 			// SECURITY, and the arm that has to come before every CRL test
 			// below: until this holds, `revocation` does not describe this key
 			// at all. See "The key must be one we issued" above.

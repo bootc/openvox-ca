@@ -312,7 +312,11 @@ type CA struct {
 	serialIndex map[string]string         // uppercase hex serial (no leading zeros) → subject; protected by mu
 	ocspCache   map[string]ocspCacheEntry // same key; protected by mu
 	cachedCRL   *x509.RevocationList      // in-memory CRL for auth checks; protected by mu
-	mu          sync.RWMutex
+	// saveBackoff rate-limits managed-certificate passes whose store keeps
+	// refusing writes -- see skipForSaveBackoff.
+	saveBackoff managedSaveBackoff
+
+	mu sync.RWMutex
 
 	// serialIndexEpoch counts in-process mutations of serialIndex (issuance and
 	// cleanup, via indexSerialLocked/unindexSerialLocked). SyncSerialIndex

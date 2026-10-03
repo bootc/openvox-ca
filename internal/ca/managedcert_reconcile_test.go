@@ -429,6 +429,149 @@ var _ = Describe("Reconciling a managed certificate", func() {
 			Expect(buf.String()).To(ContainSubstring("its certificate was revoked"))
 		})
 
+		It("stops signing every pass when the store keeps refusing writes", func() {
+			// Each failed Save leaves permanent state: the rollback revokes the
+			// certificate it just signed, which appends a CRL entry, and
+			// issueLeafLocked has already appended an inventory row. Retrying
+			// every pass therefore grows the CRL every pass -- 96 revoked
+			// serials per entry per day at the shipped interval, each resident
+			// until its certificate's NotAfter.
+			fake.saveErr = fmt.Errorf("read-only store")
+
+			// Two failures: the first is free by design, so a transient refusal
+			// is retried at once. The schedule starts at the second.
+			_, err := reconcile()
+			Expect(err).To(MatchError(ContainSubstring("read-only store")))
+			_, err = reconcile()
+			Expect(err).To(MatchError(ContainSubstring("read-only store")))
+			first := len(revokedSerialsOf(myCA))
+			Expect(first).To(BeNumerically(">", 0),
+				"the failures so far do leave revoked orphans; that is the state being bounded")
+
+			// From here the passes are withheld, so they sign nothing...
+			_, err = reconcile()
+			Expect(err).NotTo(HaveOccurred(),
+				"a withheld pass is not an error: nothing was attempted")
+			Expect(revokedSerialsOf(myCA)).To(HaveLen(first),
+				"a withheld pass must add no CRL entry")
+
+			// ...and keeps being withheld while the store stays broken.
+			for range 5 {
+				_, err = reconcile()
+				Expect(err).NotTo(HaveOccurred())
+			}
+			Expect(revokedSerialsOf(myCA)).To(HaveLen(first),
+				"repeated passes against a refusing store must not accumulate CRL entries")
+		})
+
+		It("clears the backoff on the write that succeeds, not on a timer", func() {
+			// The backoff cannot end when the store is fixed, because nothing
+			// observes the fix: the skip happens before the write, so the only
+			// way to learn the store accepts writes is to attempt one. So the
+			// contract is the weaker and honest one -- the schedule gates WHEN a
+			// pass is attempted, and a successful write clears the count
+			// outright rather than decaying it. An operator who fixes the store
+			// waits at most the current interval, and then one success returns
+			// the entry to its normal cadence.
+			fake.saveErr = fmt.Errorf("read-only store")
+			_, err := reconcile()
+			Expect(err).To(HaveOccurred())
+			_, err = reconcile()
+			Expect(err).To(HaveOccurred())
+
+			// Withheld while broken, now that two failures have accrued.
+			issued, err := reconcile()
+			Expect(err).NotTo(HaveOccurred())
+			Expect(issued).To(BeFalse())
+
+			fake.mu.Lock()
+			fake.saveErr = nil
+			fake.mu.Unlock()
+
+			// Clearing happens on the write that succeeds -- but the pass has to
+			// run to reach that write, so the backoff is stepped past by moving
+			// the clock rather than by the fix alone.
+			issued, err = reconcileAt(managedSaveBackoffBase + time.Minute)
+			Expect(err).NotTo(HaveOccurred())
+			Expect(issued).To(BeTrue(), "once the backoff elapses, a fixed store must be used")
+			Expect(fake.stored().Subject.CommonName).To(Equal(subject))
+
+			// Cleared outright: the very next pass is not withheld, which a
+			// decaying counter would not give.
+			_, skipped := myCA.skipForSaveBackoff(subject, time.Now().UTC())
+			Expect(skipped).To(BeFalse(),
+				"a successful write must clear the failure count, not reduce it")
+		})
+
+		It("does not certify another node's key as the managed identity", func() {
+			// SECURITY. "Issued by this CA" is no barrier at all: every Puppet
+			// agent in the fleet holds a valid certificate this CA issued for
+			// its OWN certname, with the matching key. A store writer who plants
+			// that legitimate pair gets reasonNamesMissing -- the CA signed it,
+			// the key matches it -- and the ownership gate, which checks only
+			// those two things, lets the key through. issueLeafLocked then signs
+			// the MANAGED subject's certificate over the agent's key, which the
+			// agent already holds. For a subject listed in puppet_server that is
+			// an admin credential.
+			//
+			// The binding the gate was missing is the subject: a certificate
+			// this CA issued FOR THIS NAME, not merely one it issued.
+			entry.Spec.ReuseKey = true
+			_, err := reconcile()
+			Expect(err).NotTo(HaveOccurred())
+
+			agentKey, agentKeyPEM, agentCertPEM, _ := caIssuedPairFor(
+				myCA, "agent01.example.com", []string{"agent01.example.com"})
+			fake.mu.Lock()
+			fake.certPEM, fake.keyPEM = agentCertPEM, agentKeyPEM
+			fake.mu.Unlock()
+
+			issued, err := reconcile()
+			Expect(err).NotTo(HaveOccurred())
+			Expect(issued).To(BeTrue())
+
+			got := fake.stored()
+			Expect(got.Subject.CommonName).To(Equal(subject),
+				"the pass must still produce the managed subject's certificate")
+			Expect(got.PublicKey).NotTo(Equal(agentKey.Public()),
+				"the CA must not sign the managed identity over a key held by another node")
+		})
+
+		It("does not revoke another node's certificate found in the entry's store", func() {
+			// SECURITY, availability. Certificates are public, so anyone can
+			// obtain the Puppet server's or another node's certificate and write
+			// it into the entry's store with no key beside it. That gives
+			// reasonKeyUnusable with `current` set to the victim's certificate,
+			// and the supersede arm gated only on "signed by this CA" then
+			// retires the victim's serial.
+			//
+			// warnIfDisplacingUnderSubjectLock already states the rule this
+			// broke: the CA revokes nothing it cannot prove is its to revoke.
+			// Proof of issuance is not proof of ownership by this entry.
+			_, _, victimCertPEM, victimCert := caIssuedPairFor(
+				myCA, "victim.example.com", []string{"victim.example.com"})
+			fake.mu.Lock()
+			fake.certPEM, fake.keyPEM = victimCertPEM, nil
+			fake.mu.Unlock()
+
+			issued, err := reconcile()
+			Expect(err).NotTo(HaveOccurred())
+			Expect(issued).To(BeTrue(), "the entry still gets its own certificate")
+
+			revoked, rerr := myCA.IsRevokedSerial(ctx, victimCert.SerialNumber)
+			Expect(rerr).NotTo(HaveOccurred())
+			Expect(revoked).To(BeFalse(),
+				"a certificate belonging to another subject must never be retired by this entry")
+
+			// And not merely deferred into the supersession queue, which would
+			// revoke it once the window elapsed.
+			Expect(myCA.ReconcileSuperseded(ctx)).Error().NotTo(HaveOccurred())
+			revoked, rerr = myCA.IsRevokedSerial(ctx, victimCert.SerialNumber)
+			Expect(rerr).NotTo(HaveOccurred())
+			Expect(revoked).To(BeFalse(),
+				"nor may the sweep revoke it after the overlap window")
+		})
+
 		It("does not certify a key planted beside the stored certificate", func() {
 			// SECURITY. The attack ReuseKey made possible for anyone who could
 			// WRITE the store without reading it: put a key of your choosing
@@ -795,6 +938,39 @@ var _ = Describe("Reconciling a managed certificate", func() {
 		Expect(fake.stored().ExtKeyUsage).To(Equal([]x509.ExtKeyUsage{x509.ExtKeyUsageServerAuth}))
 		Expect(fake.stored().ExtKeyUsage).NotTo(ContainElement(x509.ExtKeyUsageClientAuth),
 			"a serverAuth-only spec that still emitted clientAuth would hand out an admin credential")
+	})
+
+	It("feeds the CA's configured backdate into the renew-window clamp", func() {
+		// The clamp's arithmetic is covered against issueDecision directly, with a
+		// backdate passed in as a literal. The WIRING is not: the production call
+		// site reads c.leafBackdate(), and substituting DefaultLeafBackdate or 0
+		// there left the whole suite green.
+		//
+		// It matters because the clamp exists to stop an unbounded reissue loop.
+		// renewWindowFor subtracts the backdate to get the life a certificate was
+		// actually issued to serve; read the wrong backdate and the window grows
+		// past the real lifetime, so every pass finds the certificate due and
+		// reissues it.
+		//
+		// Fixture: a 24h backdate against a 1h TTL. Forward life is 1h, so the
+		// 2h RenewBefore clamps to 30m and a fresh certificate is current. With
+		// the 5-minute default substituted the window stays at 2h, which exceeds
+		// the certificate's whole life, and the second pass reissues.
+		myCA.LeafBackdate = 24 * time.Hour
+		entry.Spec.TTL = time.Hour
+		entry.Spec.RenewBefore = 2 * time.Hour
+
+		issued, err := reconcile()
+		Expect(err).NotTo(HaveOccurred())
+		Expect(issued).To(BeTrue())
+		first := fake.stored()
+
+		issued, err = reconcile()
+		Expect(err).NotTo(HaveOccurred())
+		Expect(issued).To(BeFalse(),
+			"a certificate issued moments ago must not already be due; if it is, the "+
+				"configured backdate is not reaching renewWindowFor")
+		Expect(fake.stored().SerialNumber).To(Equal(first.SerialNumber))
 	})
 
 	It("issues anyway when the displacement check cannot read the stored certificate", func() {
@@ -1761,6 +1937,50 @@ var _ = Describe("ReconcileManaged over several entries", func() {
 			"a later failure must not displace the one already recorded")
 	})
 })
+
+// revokedSerialsOf returns the serials on the CA's cached CRL -- the same copy
+// IsRevokedSerial consults, read the same way.
+func revokedSerialsOf(myCA *CA) []string {
+	GinkgoHelper()
+	myCA.mu.RLock()
+	defer myCA.mu.RUnlock()
+	Expect(myCA.cachedCRL).NotTo(BeNil(), "the CA has no CRL loaded")
+	out := make([]string, 0, len(myCA.cachedCRL.RevokedCertificateEntries))
+	for _, e := range myCA.cachedCRL.RevokedCertificateEntries {
+		out = append(out, serialHexStr(e.SerialNumber))
+	}
+	return out
+}
+
+// caIssuedPairFor signs a certificate with the CA's own key over a freshly
+// generated compliant key, for an arbitrary Common Name. It models the material
+// every fleet member legitimately holds: a certificate this CA really issued,
+// with the matching private key, for a name that is NOT the managed subject.
+func caIssuedPairFor(myCA *CA, cn string, dnsNames []string) (key *ecdsa.PrivateKey, keyPEM, certPEM []byte, cert *x509.Certificate) {
+	GinkgoHelper()
+	k, err := ecdsa.GenerateKey(elliptic.P256(), rand.Reader)
+	Expect(err).NotTo(HaveOccurred())
+	serial, err := rand.Int(rand.Reader, new(big.Int).Lsh(big.NewInt(1), 128))
+	Expect(err).NotTo(HaveOccurred())
+	now := time.Now().UTC()
+	tmpl := &x509.Certificate{
+		SerialNumber:          serial,
+		Subject:               pkix.Name{CommonName: cn},
+		DNSNames:              dnsNames,
+		ExtKeyUsage:           defaultLeafExtKeyUsage(),
+		NotBefore:             now.Add(-5 * time.Minute),
+		NotAfter:              now.Add(90 * 24 * time.Hour),
+		KeyUsage:              x509.KeyUsageDigitalSignature | x509.KeyUsageKeyEncipherment,
+		BasicConstraintsValid: true,
+	}
+	der, err := x509.CreateCertificate(rand.Reader, tmpl, myCA.CACert, k.Public(), myCA.CAKey)
+	Expect(err).NotTo(HaveOccurred())
+	parsed, err := x509.ParseCertificate(der)
+	Expect(err).NotTo(HaveOccurred())
+	kPEM, err := marshalPrivateKeyPEM(k)
+	Expect(err).NotTo(HaveOccurred())
+	return k, kPEM, pem.EncodeToMemory(&pem.Block{Type: "CERTIFICATE", Bytes: der}), parsed
+}
 
 // caIssuedPairOverWeakKey signs a certificate with the CA's own key over an
 // RSA-1024 key, returning the key and certificate PEM. The CA's own issuance
