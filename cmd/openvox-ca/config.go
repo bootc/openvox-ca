@@ -351,11 +351,10 @@ func loadServerConfig(configFile string) (*serverConfig, error) {
 	// silently is how the operator never hears about it. The asymmetry with
 	// leaf_backdate_sec, which refuses, had no reason behind it.
 	//
-	// Reachable from both the config file and the environment. It previously
-	// said only the file could carry one, which described applyServerEnv's
-	// `n > 0` gate rather than a property of the input -- and that gate was
-	// itself the YAML-versus-environment trap this paragraph calls out, left in
-	// place by the change that wrote the paragraph. The gate is gone.
+	// Reachable from both the config file and the environment, which is why
+	// applyServerEnv does not gate this variable on n > 0: a setting refused
+	// from YAML and silently defaulted from the environment would be its own
+	// trap.
 	if cfg.ManagedCertIntervalSec < 0 {
 		return nil, fmt.Errorf("managed_cert_interval_sec must not be negative (got %d): "+
 			"a reconcile interval is a period, and a negative one would silently become "+
@@ -895,9 +894,16 @@ func applyServerEnv(cfg *serverConfig) {
 		}
 	}
 	if v := os.Getenv("PUPPET_CA_LEAF_BACKDATE_SEC"); v != "" {
-		// Not gated on n > 0, unlike the intervals above: a negative value has
-		// to reach validation to be refused, and swallowing it here would leave
-		// the operator with the default and no error.
+		// Not gated on n > 0: a negative value has to reach validation to be
+		// refused, and discarding it here would leave the operator with the
+		// default and no error.
+		//
+		// A non-numeric value IS still discarded, by the err == nil guard that
+		// every numeric setting in this file uses. That is the file's
+		// convention rather than this setting's choice, and changing it means
+		// giving applyServerEnv an error return and altering what a dozen
+		// unrelated variables do with a typo -- a change to shared config
+		// handling, not to this one.
 		if n, err := strconv.Atoi(v); err == nil {
 			cfg.LeafBackdateSec = n
 		}

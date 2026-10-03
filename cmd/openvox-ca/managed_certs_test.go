@@ -270,24 +270,25 @@ var _ = Describe("The leaf backdate and reconcile interval settings", func() {
 		setEnv("PUPPET_CA_MANAGED_CERT_INTERVAL_SEC", "99999999999")
 		_, err = loadServerConfig("")
 		Expect(err).To(MatchError(ContainSubstring("managed_cert_interval_sec must not exceed")),
-			"applyServerEnv's n > 0 gate does not block a value large enough to wrap")
+			"a value large enough to wrap the nanosecond multiply must be refused before it can")
 	})
 
 	It("refuses a negative reconcile interval rather than ignoring it", func() {
-		// Only the config file can carry one: applyServerEnv gates
-		// PUPPET_CA_MANAGED_CERT_INTERVAL_SEC on n > 0, so the environment
-		// cannot. Before this was refused it fell through managedCertInterval's
-		// own `> 0` to the default, which is safe but silent -- the operator's
-		// typo produced a working server on a value it had discarded.
+		// Without the refusal a negative value fell through
+		// managedCertInterval's own `> 0` to the default, which is safe but
+		// silent: the operator's typo produced a working server on a value it
+		// had discarded. The environment path is covered by its own spec below,
+		// since a setting refused from YAML and defaulted from the environment
+		// would be its own trap.
 		_, err := loadServerConfig(writeTempConfig("managed_cert_interval_sec: -1\n"))
 		Expect(err).To(MatchError(ContainSubstring("managed_cert_interval_sec must not be negative")))
 	})
 
 	It("refuses a negative reconcile interval from the environment too", func() {
-		// The half the file-path spec cannot reach. applyServerEnv used to gate
-		// this variable on n > 0, so a negative value was silently discarded and
-		// the server started on the default -- the same asymmetry the refusal
-		// exists to end, left in the one path the refusal could not see.
+		// The half the file-path spec cannot reach: applyServerEnv must not gate
+		// this variable on n > 0, or a negative value is discarded there and the
+		// server starts on the default -- the asymmetry the refusal exists to
+		// end, in the one path the refusal cannot see.
 		setEnv("PUPPET_CA_MANAGED_CERT_INTERVAL_SEC", "-1")
 		_, err := loadServerConfig("")
 		Expect(err).To(MatchError(ContainSubstring("managed_cert_interval_sec must not be negative")))

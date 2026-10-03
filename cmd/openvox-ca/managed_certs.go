@@ -61,7 +61,8 @@ import (
 // situation the operator configured and was warned about, which is why it gets
 // a log line rather than a series.
 //
-// It is not added here because nothing configures a managed certificate yet: a
+// A never-issued metric is not added here because nothing configures a
+// managed certificate yet: a
 // counter would be permanently zero on every deployment, and docs/metrics.md
 // would gain a row nothing can move. It belongs with the first instance, which
 // is also the first change that can say what a useful value looks like. See

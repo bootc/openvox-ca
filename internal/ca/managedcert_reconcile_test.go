@@ -330,12 +330,7 @@ var _ = Describe("Reconciling a managed certificate", func() {
 			fake.keyPEM = []byte("-----BEGIN EC PRIVATE KEY-----\nnope\n-----END EC PRIVATE KEY-----\n")
 			fake.mu.Unlock()
 
-			var buf bytes.Buffer
-			prev := slog.Default()
-			slog.SetDefault(slog.New(slog.NewTextHandler(&buf, &slog.HandlerOptions{
-				Level: slog.LevelDebug,
-			})))
-			defer slog.SetDefault(prev)
+			buf := captureLogs()
 
 			issued, err := reconcile()
 			Expect(err).NotTo(HaveOccurred())
@@ -414,12 +409,7 @@ var _ = Describe("Reconciling a managed certificate", func() {
 
 			Expect(myCA.Revoke(ctx, subject)).To(Succeed())
 
-			var buf bytes.Buffer
-			prev := slog.Default()
-			slog.SetDefault(slog.New(slog.NewTextHandler(&buf, &slog.HandlerOptions{
-				Level: slog.LevelDebug,
-			})))
-			defer slog.SetDefault(prev)
+			buf := captureLogs()
 
 			issued, err := reconcile()
 			Expect(err).NotTo(HaveOccurred())
@@ -596,12 +586,7 @@ var _ = Describe("Reconciling a managed certificate", func() {
 			fake.keyPEM = plantedPEM
 			fake.mu.Unlock()
 
-			var buf bytes.Buffer
-			prev := slog.Default()
-			slog.SetDefault(slog.New(slog.NewTextHandler(&buf, &slog.HandlerOptions{
-				Level: slog.LevelDebug,
-			})))
-			defer slog.SetDefault(prev)
+			buf := captureLogs()
 
 			issued, err := reconcile()
 			Expect(err).NotTo(HaveOccurred())
@@ -628,12 +613,7 @@ var _ = Describe("Reconciling a managed certificate", func() {
 			fake.certPEM, fake.keyPEM = pair.certPEM, pair.keyPEM
 			fake.mu.Unlock()
 
-			var buf bytes.Buffer
-			prev := slog.Default()
-			slog.SetDefault(slog.New(slog.NewTextHandler(&buf, &slog.HandlerOptions{
-				Level: slog.LevelDebug,
-			})))
-			defer slog.SetDefault(prev)
+			buf := captureLogs()
 
 			issued, err := reconcile()
 			Expect(err).NotTo(HaveOccurred())
@@ -655,12 +635,7 @@ var _ = Describe("Reconciling a managed certificate", func() {
 			// warning on the pass where the CRL really is unreadable.
 			entry.Spec.ReuseKey = true
 
-			var buf bytes.Buffer
-			prev := slog.Default()
-			slog.SetDefault(slog.New(slog.NewTextHandler(&buf, &slog.HandlerOptions{
-				Level: slog.LevelDebug,
-			})))
-			defer slog.SetDefault(prev)
+			buf := captureLogs()
 
 			issued, err := reconcile()
 			Expect(err).NotTo(HaveOccurred())
@@ -734,12 +709,7 @@ var _ = Describe("Reconciling a managed certificate", func() {
 			myCA.cachedCRL = nil
 			myCA.mu.Unlock()
 
-			var buf bytes.Buffer
-			prev := slog.Default()
-			slog.SetDefault(slog.New(slog.NewTextHandler(&buf, &slog.HandlerOptions{
-				Level: slog.LevelDebug,
-			})))
-			defer slog.SetDefault(prev)
+			buf := captureLogs()
 
 			issued, err := reconcileAt(dueWindow)
 			Expect(err).NotTo(HaveOccurred(),
@@ -991,12 +961,7 @@ var _ = Describe("Reconciling a managed certificate", func() {
 		Expect(os.Chmod(certFile, 0o000)).To(Succeed())
 		DeferCleanup(func() { _ = os.Chmod(certFile, 0o644) })
 
-		var buf bytes.Buffer
-		prev := slog.Default()
-		slog.SetDefault(slog.New(slog.NewTextHandler(&buf, &slog.HandlerOptions{
-			Level: slog.LevelDebug,
-		})))
-		defer slog.SetDefault(prev)
+		buf := captureLogs()
 
 		issued, err := reconcileAt(dueWindow)
 		Expect(err).NotTo(HaveOccurred(),
@@ -1051,7 +1016,7 @@ var _ = Describe("Reconciling a managed certificate", func() {
 	It("refuses an entry whose spec would not validate, without touching the store", func() {
 		entry.Spec.RenewBefore = 0
 		issued, err := reconcile()
-		Expect(err).To(MatchError(ContainSubstring("renew_before must be positive")))
+		Expect(err).To(MatchError(ContainSubstring("RenewBefore must be positive")))
 		Expect(issued).To(BeFalse())
 		Expect(fake.saveCount()).To(BeZero())
 	})
@@ -1469,12 +1434,7 @@ var _ = Describe("Reconciling a managed certificate", func() {
 			incumbent, err := x509.ParseCertificate(block.Bytes)
 			Expect(err).NotTo(HaveOccurred())
 
-			var buf bytes.Buffer
-			prev := slog.Default()
-			slog.SetDefault(slog.New(slog.NewTextHandler(&buf, &slog.HandlerOptions{
-				Level: slog.LevelDebug,
-			})))
-			defer slog.SetDefault(prev)
+			buf := captureLogs()
 
 			_, err = reconcile()
 			Expect(err).NotTo(HaveOccurred())
@@ -1492,12 +1452,7 @@ var _ = Describe("Reconciling a managed certificate", func() {
 			_, err := reconcile()
 			Expect(err).NotTo(HaveOccurred())
 
-			var buf bytes.Buffer
-			prev := slog.Default()
-			slog.SetDefault(slog.New(slog.NewTextHandler(&buf, &slog.HandlerOptions{
-				Level: slog.LevelDebug,
-			})))
-			defer slog.SetDefault(prev)
+			buf := captureLogs()
 
 			_, err = reconcileAt(dueWindow)
 			Expect(err).NotTo(HaveOccurred())
@@ -1937,6 +1892,22 @@ var _ = Describe("ReconcileManaged over several entries", func() {
 			"a later failure must not displace the one already recorded")
 	})
 })
+
+// captureLogs redirects the default slog logger into a buffer for the rest of
+// the spec, restoring it on cleanup. Returned rather than taking a pointer so a
+// caller cannot forget the restore: DeferCleanup owns it.
+//
+// At LevelDebug, because several specs assert on Debug lines -- the reissue
+// decision logs there, and a spec that captured only Warn would pass whether or
+// not the decision was reached.
+func captureLogs() *bytes.Buffer {
+	GinkgoHelper()
+	buf := &bytes.Buffer{}
+	prev := slog.Default()
+	slog.SetDefault(slog.New(slog.NewTextHandler(buf, &slog.HandlerOptions{Level: slog.LevelDebug})))
+	DeferCleanup(func() { slog.SetDefault(prev) })
+	return buf
+}
 
 // revokedSerialsOf returns the serials on the CA's cached CRL -- the same copy
 // IsRevokedSerial consults, read the same way.

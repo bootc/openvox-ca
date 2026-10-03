@@ -176,10 +176,12 @@ type CertSpec struct {
 // entry's own setting and falling back to the CA's.
 //
 // The CA-level fallback is leafKeyConfig's, deliberately rather than a second
-// reading of the same field: this used to test Algo-or-Size where generate.go
-// tests Algo alone, and the two then disagreed about `leaf_key_size: 4096` with
-// no `leaf_key_algo` -- a configuration an operator can write today, which
-// main.go and ValidateKeyConfig both accept. One CA, two paths, two key sizes.
+// reading of the same field. Both paths now resolve through leafKeyConfig,
+// which tests Algo-or-Size; before that, generate.go tested Algo alone and the
+// two disagreed about `leaf_key_size: 4096` with no `leaf_key_algo` -- a
+// configuration an operator can write, which main.go and ValidateKeyConfig both
+// accept. One CA, two paths, two key sizes. Resolving both here is what keeps
+// them from drifting apart again.
 func (c *CA) keyConfigFor(spec CertSpec) KeyConfig {
 	if spec.KeyConfig.Algo != "" || spec.KeyConfig.Size != 0 {
 		return spec.KeyConfig
@@ -248,10 +250,10 @@ func (s CertSpec) Validate() error {
 			"(%d > %d)", s.Subject, n, maxDNSAltNames)
 	}
 	if s.TTL < 0 {
-		return fmt.Errorf("managed certificate %s: ttl must not be negative", s.Subject)
+		return fmt.Errorf("managed certificate %s: TTL must not be negative", s.Subject)
 	}
 	if s.RenewBefore <= 0 {
-		return fmt.Errorf("managed certificate %s: renew_before must be positive, "+
+		return fmt.Errorf("managed certificate %s: RenewBefore must be positive, "+
 			"or the certificate is only replaced after it has already expired", s.Subject)
 	}
 	// Refused here as well as at generation. issueLeafLocked enforces the
@@ -263,7 +265,7 @@ func (s CertSpec) Validate() error {
 		return fmt.Errorf("managed certificate %s: %w", s.Subject, err)
 	}
 	if s.SupersedeAfter != nil && *s.SupersedeAfter < 0 {
-		return fmt.Errorf("managed certificate %s: revoke_after must not be negative "+
+		return fmt.Errorf("managed certificate %s: SupersedeAfter must not be negative "+
 			"(zero revokes the predecessor inside the reconcile pass)", s.Subject)
 	}
 	return nil
