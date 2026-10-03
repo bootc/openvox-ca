@@ -135,7 +135,7 @@ openvox-ca-ctl revoke --serial 472C95FAA0DAE424BD7E911E26066010 --force
 # while no replacement has been issued for that name, and `revoke --serial
 # <hex>` (above) is what is needed once one has. The WARN line names the serial
 # only when the revocation got as far as the CRL; otherwise take it from the
-# inventory (without the 0x the filesystem inventory writes before it). See
+# inventory (the 0x the filesystem inventory writes before it is accepted). See
 # docs/api.md for which is which.
 openvox-ca-ctl clean --certname agent.example.com
 
@@ -690,8 +690,8 @@ get wrong:
 3. **Check the inventory for other live serials for that name.** With
    `revoke_on_auto_renew: false`, or after a renewal whose best-effort revoke
    failed, more than one can be valid. Step 1 retires only the newest; retire
-   each of the others with `openvox-ca-ctl revoke --serial <serial>` (the hex
-   digits only: drop the `0x` the filesystem inventory writes before them), which
+   each of the others with `openvox-ca-ctl revoke --serial <serial>` (as the
+   inventory writes it, `0x` prefix and all, or as bare hex), which
    needs `--force` where the serial is still the certificate stored for its
    subject. Step 2 applies to each of them: a revocation is not honoured by a
    replica until it reloads.
