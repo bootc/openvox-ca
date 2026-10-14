@@ -1984,7 +1984,8 @@ var ciGateExempt = []string{"ci", "automerge"}
 
 // verifyCIGate checks that every job in ci.yml is a dependency of the fan-in
 // job, so that branch protection naming one check really does cover all of
-// them.
+// them. verifyAggregateJobs checks the same for every required aggregate,
+// ci.yml's included; see its comment for how the two differ.
 //
 // Written because the omission is silent, and because it was made here: the
 // shellcheck job in .github/workflows/ci.yml went in without its `needs:` entry
@@ -2802,6 +2803,12 @@ type aggregateStep struct {
 // reports, and still fails when it should. See verifyAggregateJobsIn for the
 // rules. Every workflow is read, not only the aggregates' own, because a job
 // anywhere that reuses a required name posts a check the ruleset matches.
+// Wired into dev:check.
+//
+// For ci.yml its needs rule overlaps verifyCIGate, which came separately and
+// differs in two ways: it lists its exemptions (ciGateExempt) where this
+// derives them from the job graph, and it also refuses a needs entry naming no
+// job. Both run, so a change to either rule should look at the other.
 func verifyAggregateJobs() error {
 	sources, err := readWorkflowSources(filepath.Join(".github", "workflows"))
 	if err != nil {
