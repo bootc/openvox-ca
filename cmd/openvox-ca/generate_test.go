@@ -271,7 +271,7 @@ var _ = Describe("openvox-ca generate", func() {
 			cfgPath := filepath.Join(GinkgoT().TempDir(), "badprovider.yaml")
 			Expect(os.WriteFile(cfgPath, []byte(
 				"ca_key_algo: ecdsa\nca_key_size: 256\nca_key_provider: nonesuch\n"), 0o644)).To(Succeed())
-			setEnv("PUPPET_CA_CONFIG", cfgPath)
+			setEnv("OPENVOX_CA_CONFIG", cfgPath)
 
 			_, _, err := runGenerate("--cadir", caDir, "--certname", "ca", "--ttl", "1h")
 			Expect(err).To(MatchError(ca.ErrReservedSubject))

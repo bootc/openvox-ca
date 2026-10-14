@@ -6955,7 +6955,7 @@ networkPolicy:
 			// mounts the volume where nothing looks.
 			name:     "a pinned persistence.mountPath moves the mount and the derived cadir",
 			sets:     []string{tls, "persistence.mountPath=/var/lib/puppet-ca"},
-			wants:    []string{"mountPath: /var/lib/puppet-ca\n", "cadir: /var/lib/puppet-ca\n"},
+			wants:    []string{"mountPath: \"/var/lib/puppet-ca\"\n", "cadir: /var/lib/puppet-ca\n"},
 			notWants: []string{"/var/lib/openvox-ca"},
 		},
 		{
@@ -6975,7 +6975,7 @@ config:
         cert: /var/lib/puppet-ca/tls.crt
         key: /var/lib/puppet-ca/tls.key
 `,
-			wants:    []string{"mountPath: /var/lib/puppet-ca\n", "cadir: /var/lib/puppet-ca/ca"},
+			wants:    []string{"mountPath: \"/var/lib/puppet-ca\"\n", "cadir: /var/lib/puppet-ca/ca"},
 			notWants: []string{"/var/lib/openvox-ca"},
 		},
 		{
@@ -7095,7 +7095,7 @@ config:
 			name:  "NOTES warns about several replicas when the backend is out of sight",
 			notes: true,
 			sets: []string{tls, "autoscaling.enabled=true", "autoscaling.maxReplicas=3",
-				"extraEnv[0].name=PUPPET_CA_STORAGE_BACKEND",
+				"extraEnv[0].name=OPENVOX_CA_STORAGE_BACKEND",
 				"extraEnv[0].valueFrom.secretKeyRef.name=backend", "extraEnv[0].valueFrom.secretKeyRef.key=kind"},
 			wants: []string{"autoscaling may run up to 3 replicas", "cannot see the backend the server will actually use"},
 		},
@@ -7119,7 +7119,7 @@ config:
 			// stays on one line however the paragraph below it wraps.
 			name:     "NOTES says nothing about replicas on a backend that supports them",
 			notes:    true,
-			sets:     []string{tls, "replicaCount=2", "env.PUPPET_CA_STORAGE_BACKEND=etcd"},
+			sets:     []string{tls, "replicaCount=2", "env.OPENVOX_CA_STORAGE_BACKEND=etcd"},
 			wants:    []string{"Storage backend: etcd"},
 			notWants: []string{"WARNING: replicaCount is 2"},
 		},
@@ -7130,7 +7130,7 @@ config:
 			// that its CA lived on an emptyDir.
 			name:     "NOTES reads the backend from the environment when it is set there",
 			notes:    true,
-			sets:     []string{tls, "persistence.enabled=false", "env.PUPPET_CA_STORAGE_BACKEND=postgres"},
+			sets:     []string{tls, "persistence.enabled=false", "env.OPENVOX_CA_STORAGE_BACKEND=postgres"},
 			wants:    []string{"Storage backend: postgres"},
 			notWants: []string{"persistence is disabled"},
 		},
@@ -7151,7 +7151,7 @@ config:
 			// The environment outranks the config file, so a filesystem
 			// default overridden there is not a filesystem CA.
 			name:  "several replicas render when the environment names an external backend",
-			sets:  []string{tls, "replicaCount=2", "env.PUPPET_CA_STORAGE_BACKEND=etcd"},
+			sets:  []string{tls, "replicaCount=2", "env.OPENVOX_CA_STORAGE_BACKEND=etcd"},
 			wants: []string{"replicas: 2"},
 		},
 		{
@@ -7159,7 +7159,7 @@ config:
 			// must not refuse; the NOTES case above pins the warning instead.
 			name: "several replicas render when the backend comes from a Secret",
 			sets: []string{tls, "replicaCount=2",
-				"extraEnv[0].name=PUPPET_CA_STORAGE_BACKEND",
+				"extraEnv[0].name=OPENVOX_CA_STORAGE_BACKEND",
 				"extraEnv[0].valueFrom.secretKeyRef.name=backend", "extraEnv[0].valueFrom.secretKeyRef.key=kind"},
 			wants: []string{"replicas: 2"},
 		},
@@ -7174,22 +7174,22 @@ config:
 			// The server ignores an empty variable, so it defers to the config
 			// file rather than reading as the filesystem default.
 			name:  "several replicas render when an empty env variable leaves the config's backend",
-			sets:  []string{tls, "replicaCount=2", "config.storage_backend=postgres", "env.PUPPET_CA_STORAGE_BACKEND="},
+			sets:  []string{tls, "replicaCount=2", "config.storage_backend=postgres", "env.OPENVOX_CA_STORAGE_BACKEND="},
 			wants: []string{"replicas: 2"},
 		},
 		{
 			// An extraEnv entry with neither value nor source is the empty
 			// string to Kubernetes, and so the same as the case above.
 			name:  "several replicas render when a sourceless extraEnv variable leaves the config's backend",
-			sets:  []string{tls, "replicaCount=2", "config.storage_backend=postgres", "extraEnv[0].name=PUPPET_CA_STORAGE_BACKEND"},
+			sets:  []string{tls, "replicaCount=2", "config.storage_backend=postgres", "extraEnv[0].name=OPENVOX_CA_STORAGE_BACKEND"},
 			wants: []string{"replicas: 2"},
 		},
 		{
 			// env is rendered before extraEnv and Kubernetes keeps the last
 			// entry of a name, so extraEnv wins.
 			name: "several replicas render when extraEnv overrides an env backend",
-			sets: []string{tls, "replicaCount=2", "env.PUPPET_CA_STORAGE_BACKEND=sqlite",
-				"extraEnv[0].name=PUPPET_CA_STORAGE_BACKEND", "extraEnv[0].value=postgres"},
+			sets: []string{tls, "replicaCount=2", "env.OPENVOX_CA_STORAGE_BACKEND=sqlite",
+				"extraEnv[0].name=OPENVOX_CA_STORAGE_BACKEND", "extraEnv[0].value=postgres"},
 			wants: []string{"replicas: 2"},
 		},
 		{
@@ -7212,7 +7212,7 @@ config:
 		},
 		{
 			// envFrom is the half of configFullyKnown that configFileKnown
-			// lacks; a Secret named there can carry PUPPET_CA_STORAGE_BACKEND,
+			// lacks; a Secret named there can carry OPENVOX_CA_STORAGE_BACKEND,
 			// so the chart cannot judge and must not refuse.
 			name:  "several replicas render when envFrom may carry the backend",
 			sets:  []string{tls, "replicaCount=2", "envFrom[0].secretRef.name=ca-env"},
@@ -7246,7 +7246,7 @@ config:
 			sets: []string{tls, "replicaCount=2",
 				"extraEnv[0].name=BACKEND",
 				"extraEnv[0].valueFrom.secretKeyRef.name=backend", "extraEnv[0].valueFrom.secretKeyRef.key=kind",
-				"extraEnv[1].name=PUPPET_CA_STORAGE_BACKEND", "extraEnv[1].value=$(BACKEND)"},
+				"extraEnv[1].name=OPENVOX_CA_STORAGE_BACKEND", "extraEnv[1].value=$(BACKEND)"},
 			wants: []string{"WARNING: replicaCount is 2", "cannot see the backend the server will actually use"},
 		},
 		{
@@ -7254,7 +7254,7 @@ config:
 			// before the reference to it and the kubelet expands it.
 			name:  "NOTES warns when an env backend carries a $(NAME) reference",
 			notes: true,
-			sets:  []string{tls, "replicaCount=2", "env.BACKEND=sqlite", "env.PUPPET_CA_STORAGE_BACKEND=$(BACKEND)"},
+			sets:  []string{tls, "replicaCount=2", "env.BACKEND=sqlite", "env.OPENVOX_CA_STORAGE_BACKEND=$(BACKEND)"},
 			wants: []string{"WARNING: replicaCount is 2", "cannot see the backend the server will actually use"},
 		},
 		{
@@ -7571,7 +7571,7 @@ config:
 			// The environment outranks the config file in both directions: here
 			// it turns an etcd config back into a single-instance CA.
 			name:    "several replicas when the environment overrides the backend to sqlite",
-			sets:    []string{tls, "replicaCount=2", "config.storage_backend=etcd", "env.PUPPET_CA_STORAGE_BACKEND=sqlite"},
+			sets:    []string{tls, "replicaCount=2", "config.storage_backend=etcd", "env.OPENVOX_CA_STORAGE_BACKEND=sqlite"},
 			wantErr: "the sqlite storage backend",
 		},
 		{
@@ -7585,7 +7585,7 @@ config:
 			// The extraEnv literal outranks the config file like env's does.
 			name: "several replicas when an extraEnv value overrides the backend to sqlite",
 			sets: []string{tls, "replicaCount=2", "config.storage_backend=postgres",
-				"extraEnv[0].name=PUPPET_CA_STORAGE_BACKEND", "extraEnv[0].value=sqlite"},
+				"extraEnv[0].name=OPENVOX_CA_STORAGE_BACKEND", "extraEnv[0].value=sqlite"},
 			wantErr: "the sqlite storage backend",
 		},
 		{
@@ -7594,10 +7594,10 @@ config:
 			// filesystem default. Taking each non-empty value as it came kept
 			// the earlier postgres and passed two replicas of an emptyDir CA.
 			name: "several replicas when an empty extraEnv duplicate discards an env backend",
-			sets: []string{tls, "replicaCount=2", "env.PUPPET_CA_STORAGE_BACKEND=postgres"},
+			sets: []string{tls, "replicaCount=2", "env.OPENVOX_CA_STORAGE_BACKEND=postgres"},
 			valuesYAML: `
 extraEnv:
-  - name: PUPPET_CA_STORAGE_BACKEND
+  - name: OPENVOX_CA_STORAGE_BACKEND
     value: ""
 `,
 			wantErr: "the filesystem storage backend",
@@ -7607,9 +7607,9 @@ extraEnv:
 			// the chart can judge the backend again.
 			name: "several replicas when a literal extraEnv entry follows a Secret-fed one",
 			sets: []string{tls, "replicaCount=2",
-				"extraEnv[0].name=PUPPET_CA_STORAGE_BACKEND",
+				"extraEnv[0].name=OPENVOX_CA_STORAGE_BACKEND",
 				"extraEnv[0].valueFrom.secretKeyRef.name=backend", "extraEnv[0].valueFrom.secretKeyRef.key=kind",
-				"extraEnv[1].name=PUPPET_CA_STORAGE_BACKEND", "extraEnv[1].value=sqlite"},
+				"extraEnv[1].name=OPENVOX_CA_STORAGE_BACKEND", "extraEnv[1].value=sqlite"},
 			wantErr: "the sqlite storage backend",
 		},
 		{
@@ -7672,7 +7672,7 @@ extraEnv:
 			// environment feeds it from a Secret, because the flag wins.
 			name: "several replicas when a backend flag overrides a Secret-fed variable",
 			sets: []string{tls, "replicaCount=2",
-				"extraEnv[0].name=PUPPET_CA_STORAGE_BACKEND",
+				"extraEnv[0].name=OPENVOX_CA_STORAGE_BACKEND",
 				"extraEnv[0].valueFrom.secretKeyRef.name=backend", "extraEnv[0].valueFrom.secretKeyRef.key=kind",
 				"extraArgs[0]=--storage-backend=sqlite"},
 			wantErr: "the sqlite storage backend",

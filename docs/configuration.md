@@ -2238,7 +2238,7 @@ The executable's SHA-256 is logged at startup for change detection. It is not
 enforced; editing the script takes effect on the next CSR.
 
 `insecure_allow_unsafe_autosign_path` (`--insecure-allow-unsafe-autosign-path`,
-`PUPPET_CA_INSECURE_ALLOW_UNSAFE_AUTOSIGN_PATH`) stops the ownership and
+`OPENVOX_CA_INSECURE_ALLOW_UNSAFE_AUTOSIGN_PATH`) stops the ownership and
 writable findings from refusing anything. The CA logs a `WARN` for each one it
 finds at startup (and under `--daemon` prints them to the terminal), and then
 runs the executable regardless. The check before each run still requires the

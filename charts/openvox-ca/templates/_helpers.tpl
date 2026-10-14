@@ -695,7 +695,7 @@ The storage backend kind the server will run with, or nothing when the chart
 cannot tell.
 
 The server's precedence, lowest first: the config file, then
-PUPPET_CA_STORAGE_BACKEND when it is non-empty, then --storage-backend, which
+OPENVOX_CA_STORAGE_BACKEND when it is non-empty, then --storage-backend, which
 the chart appends to its argv through extraArgs and which wins whenever it is
 given, even empty. A flag with its value attached settles the question whatever
 the environment held, so it restores a verdict a Secret-fed variable had
@@ -731,10 +731,10 @@ configuration it cannot read is worse than none.
 {{- $envValue := "" -}}
 {{- $known := true -}}
 {{- range $envName, $value := .Values.env -}}
-{{- if eq $envName "PUPPET_CA_STORAGE_BACKEND" }}{{ $envValue = $value | default "" | toString }}{{ $known = not (contains "$(" $envValue) }}{{ end -}}
+{{- if eq $envName "OPENVOX_CA_STORAGE_BACKEND" }}{{ $envValue = $value | default "" | toString }}{{ $known = not (contains "$(" $envValue) }}{{ end -}}
 {{- end -}}
 {{- range .Values.extraEnv -}}
-{{- if eq .name "PUPPET_CA_STORAGE_BACKEND" -}}
+{{- if eq .name "OPENVOX_CA_STORAGE_BACKEND" -}}
 {{- if hasKey . "valueFrom" }}{{ $known = false }}{{ else }}{{ $envValue = .value | default "" | toString }}{{ $known = not (contains "$(" $envValue) }}{{ end -}}
 {{- end -}}
 {{- end -}}
@@ -1309,9 +1309,9 @@ CrashLoopBackOff or a Service that silently routes nowhere.
 {{- $kind := include "openvox-ca.storageBackend" . -}}
 {{- if has $kind (list "filesystem" "sqlite") -}}
 {{- if and .Values.autoscaling.enabled (gt (int .Values.autoscaling.maxReplicas) 1) -}}
-{{- fail (printf "autoscaling.maxReplicas is %d, but the %s storage backend supports exactly one running instance: a second replica crash-loops on the store lock, cannot attach a ReadWriteOnce volume, or on an emptyDir starts a separate CA. Set autoscaling.enabled: false with replicaCount: 1, or move the CA to postgres, mysql, etcd or redis — see https://github.com/voxpupuli/openvox-ca/blob/main/docs/storage-backends.md. The chart reads the backend from config.storage_backend, PUPPET_CA_STORAGE_BACKEND in env or extraEnv, and --storage-backend in extraArgs, and an unset one is filesystem; if a command wrapper supplies it some other way, set config.storage_backend too." (int .Values.autoscaling.maxReplicas) $kind) -}}
+{{- fail (printf "autoscaling.maxReplicas is %d, but the %s storage backend supports exactly one running instance: a second replica crash-loops on the store lock, cannot attach a ReadWriteOnce volume, or on an emptyDir starts a separate CA. Set autoscaling.enabled: false with replicaCount: 1, or move the CA to postgres, mysql, etcd or redis — see https://github.com/voxpupuli/openvox-ca/blob/main/docs/storage-backends.md. The chart reads the backend from config.storage_backend, OPENVOX_CA_STORAGE_BACKEND in env or extraEnv, and --storage-backend in extraArgs, and an unset one is filesystem; if a command wrapper supplies it some other way, set config.storage_backend too." (int .Values.autoscaling.maxReplicas) $kind) -}}
 {{- else if and (not .Values.autoscaling.enabled) (gt (int .Values.replicaCount) 1) -}}
-{{- fail (printf "replicaCount is %d, but the %s storage backend supports exactly one running instance: a second replica crash-loops on the store lock, cannot attach a ReadWriteOnce volume, or on an emptyDir starts a separate CA. Set replicaCount: 1, or move the CA to postgres, mysql, etcd or redis — see https://github.com/voxpupuli/openvox-ca/blob/main/docs/storage-backends.md. The chart reads the backend from config.storage_backend, PUPPET_CA_STORAGE_BACKEND in env or extraEnv, and --storage-backend in extraArgs, and an unset one is filesystem; if a command wrapper supplies it some other way, set config.storage_backend too." (int .Values.replicaCount) $kind) -}}
+{{- fail (printf "replicaCount is %d, but the %s storage backend supports exactly one running instance: a second replica crash-loops on the store lock, cannot attach a ReadWriteOnce volume, or on an emptyDir starts a separate CA. Set replicaCount: 1, or move the CA to postgres, mysql, etcd or redis — see https://github.com/voxpupuli/openvox-ca/blob/main/docs/storage-backends.md. The chart reads the backend from config.storage_backend, OPENVOX_CA_STORAGE_BACKEND in env or extraEnv, and --storage-backend in extraArgs, and an unset one is filesystem; if a command wrapper supplies it some other way, set config.storage_backend too." (int .Values.replicaCount) $kind) -}}
 {{- end -}}
 {{- end -}}
 
