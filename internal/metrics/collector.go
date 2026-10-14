@@ -15,7 +15,7 @@
 // with this program; if not, write to the Free Software Foundation, Inc.,
 // 51 Franklin Street, Fifth Floor, Boston, MA 02110-1301 USA.
 
-// Package metrics exposes a Prometheus exporter for the Puppet CA. In addition
+// Package metrics exposes a Prometheus exporter for the OpenVox CA. In addition
 // to the standard Go runtime / process collectors and HTTP request metrics
 // (wired up in metrics.go), it provides a custom collector that, on every
 // scrape, reports the state of the CA certificate, its CRL, and every known

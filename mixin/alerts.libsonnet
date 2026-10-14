@@ -17,8 +17,8 @@
             'for': $._config.downFor,
             labels: { severity: 'critical' } + $._config.alertLabels,
             annotations: {
-              summary: 'Puppet CA metrics exporter is down.',
-              description: 'Prometheus cannot scrape the Puppet CA exporter on {{ $labels.instance }}. Certificate and CRL expiry can no longer be monitored.',
+              summary: 'OpenVox CA metrics exporter is down.',
+              description: 'Prometheus cannot scrape the OpenVox CA exporter on {{ $labels.instance }}. Certificate and CRL expiry can no longer be monitored.',
             },
           },
           {
@@ -28,8 +28,8 @@
             'for': $._config.scrapeFor,
             labels: { severity: 'warning' } + $._config.alertLabels,
             annotations: {
-              summary: 'Puppet CA exporter cannot read CA state.',
-              description: 'The Puppet CA exporter on {{ $labels.instance }} is failing to gather certificate metrics from storage (openvoxca_collector_scrape_success=0).',
+              summary: 'OpenVox CA exporter cannot read CA state.',
+              description: 'The OpenVox CA exporter on {{ $labels.instance }} is failing to gather certificate metrics from storage (openvoxca_collector_scrape_success=0).',
             },
           },
           {
@@ -38,8 +38,8 @@
             'for': $._config.readyFor,
             labels: { severity: 'warning' } + $._config.alertLabels,
             annotations: {
-              summary: 'Puppet CA is not ready.',
-              description: 'The Puppet CA on {{ $labels.instance }} has been reporting not-ready (openvoxca_ca_ready=0) and cannot serve signing requests.',
+              summary: 'OpenVox CA is not ready.',
+              description: 'The OpenVox CA on {{ $labels.instance }} has been reporting not-ready (openvoxca_ca_ready=0) and cannot serve signing requests.',
             },
           },
         ],
@@ -61,7 +61,7 @@
             'for': $._config.expiryFor,
             labels: { severity: 'warning' } + $._config.alertLabels,
             annotations: {
-              summary: 'Puppet CA certificate is approaching expiry.',
+              summary: 'OpenVox CA certificate is approaching expiry.',
               description: 'The CA certificate ({{ $labels.common_name }}) on {{ $labels.instance }} expires in {{ $value | humanizeDuration }}.',
             },
           },
@@ -74,7 +74,7 @@
             'for': $._config.expiryFor,
             labels: { severity: 'critical' } + $._config.alertLabels,
             annotations: {
-              summary: 'Puppet CA certificate expires imminently.',
+              summary: 'OpenVox CA certificate expires imminently.',
               description: 'The CA certificate ({{ $labels.common_name }}) on {{ $labels.instance }} expires in {{ $value | humanizeDuration }}. Re-keying the CA is disruptive; act now.',
             },
           },
@@ -96,7 +96,7 @@
             'for': $._config.expiryFor,
             labels: { severity: 'warning' } + $._config.alertLabels,
             annotations: {
-              summary: 'Puppet CA CRL is approaching its NextUpdate.',
+              summary: 'OpenVox CA CRL is approaching its NextUpdate.',
               description: 'The CRL on {{ $labels.instance }} reaches NextUpdate in {{ $value | humanizeDuration }}. The CA normally auto-refreshes it; check the CRL refresher.',
             },
           },
@@ -106,7 +106,7 @@
             'for': $._config.expiryFor,
             labels: { severity: 'critical' } + $._config.alertLabels,
             annotations: {
-              summary: 'Puppet CA CRL has expired.',
+              summary: 'OpenVox CA CRL has expired.',
               description: 'The CRL on {{ $labels.instance }} is past its NextUpdate. Relying parties may reject it and fail revocation checks.',
             },
           },
@@ -135,7 +135,7 @@
             'for': $._config.expiryFor,
             labels: { severity: 'warning' } + $._config.alertLabels,
             annotations: {
-              summary: 'An upstream CRL published by the Puppet CA is approaching its NextUpdate.',
+              summary: 'An upstream CRL published by the OpenVox CA is approaching its NextUpdate.',
               description: 'The CRL issued by {{ $labels.issuer }} and republished by {{ $labels.instance }} reaches NextUpdate in {{ $value | humanizeDuration }}. openvox-ca cannot reissue it: refresh crl_chain_file from the issuing CA.',
             },
           },
@@ -145,7 +145,7 @@
             'for': $._config.expiryFor,
             labels: { severity: 'critical' } + $._config.alertLabels,
             annotations: {
-              summary: 'An upstream CRL published by the Puppet CA has expired.',
+              summary: 'An upstream CRL published by the OpenVox CA has expired.',
               description: 'The CRL issued by {{ $labels.issuer }} and republished by {{ $labels.instance }} is past its NextUpdate. Agents using the default certificate_revocation = chain will fail verification against the whole chain. Refresh crl_chain_file from the issuing CA.',
             },
           },
@@ -162,7 +162,7 @@
             'for': $._config.crlChainFor,
             labels: { severity: 'warning' } + $._config.alertLabels,
             annotations: {
-              summary: 'The Puppet CA is discarding CRLs from crl_chain_file.',
+              summary: 'The OpenVox CA is discarding CRLs from crl_chain_file.',
               description: '{{ $labels.instance }} dropped a CRL from crl_chain_file because no certificate in its CA bundle signed it, so the published chain is smaller than the file says. Check that the file holds CRLs from this CA\'s own ancestors and that the bundle is complete. If the file is stale rather than the bundle incomplete, OpenVoxCAUpstreamCRLRegressed is the alert for that.',
             },
           },
@@ -182,7 +182,7 @@
             'for': $._config.crlChainFor,
             labels: { severity: 'warning' } + $._config.alertLabels,
             annotations: {
-              summary: 'The Puppet CA is being offered stale upstream CRLs.',
+              summary: 'The OpenVox CA is being offered stale upstream CRLs.',
               description: 'crl_chain_file on {{ $labels.instance }} carries an upstream CRL older than the one already published, so it was passed over and the newer one kept. Revocation is unaffected. The file is stale, rolled back or being replayed: check whatever refreshes it. If the ancestor legitimately restarted its CRL numbering (a CA rebuilt from backup, still using the same key), drop it from the file for one publish cycle and then add the new CRL back -- with nothing published to compare against, it is accepted. Publishing the older list would have un-revoked, fleet-wide, everything that ancestor revoked in between.',
             },
           },
@@ -200,7 +200,7 @@
             'for': $._config.crlChainFor,
             labels: { severity: 'warning' } + $._config.alertLabels,
             annotations: {
-              summary: 'The Puppet CA has dropped an ancestor CRL from its published chain.',
+              summary: 'The OpenVox CA has dropped an ancestor CRL from its published chain.',
               description: 'An ancestor CRL has been dropped from the published chain on {{ $labels.instance }}. The file is authoritative, so this is honoured -- and it cannot be undone here, because this CA cannot re-sign another CA\'s list. There are two ways to reach this. Either the file stopped listing the ancestor -- check whatever writes it, since a glob that matched one file fewer produces exactly this -- or the ancestor\'s own certificate has left the stored CA bundle, so nothing signs its CRL any more and it can no longer be published; the log line says which, and the second is fixed by re-importing the bundle rather than by touching the file. Agents on the default certificate_revocation = chain will stop seeing anything that ancestor revoked. Act on this when you see it rather than waiting: the removal is a single event, so this alert clears after the window closes even though the ancestor stays dropped, a restart zeroes the counter, and that ancestor\'s own expiry series has simply vanished. Nothing afterwards distinguishes the shrunken chain from a correct one.',
             },
           },
@@ -222,7 +222,7 @@
             'for': $._config.crlChainFor,
             labels: { severity: 'warning' } + $._config.alertLabels,
             annotations: {
-              summary: 'The Puppet CA has never read its configured crl_chain_file.',
+              summary: 'The OpenVox CA has never read its configured crl_chain_file.',
               description: 'crl_chain_file is set on {{ $labels.instance }} but has never been opened -- a wrong path, or a Secret that never mounted. The feature is doing nothing, and because an absent file is treated as "no statement" rather than an error, nothing else reports it. Note this does not catch a subPath mount: that reads successfully forever, so it looks healthy here and shows up as OpenVoxCAUpstreamCRLExpiringSoon instead.',
             },
           },
@@ -235,7 +235,7 @@
             'for': $._config.crlChainFor,
             labels: { severity: 'warning' } + $._config.alertLabels,
             annotations: {
-              summary: 'The Puppet CA cannot refresh its upstream CRL chain.',
+              summary: 'The OpenVox CA cannot refresh its upstream CRL chain.',
               description: 'Refreshing crl_chain_file on {{ $labels.instance }} is failing, so the published ancestor CRLs are ageing with nothing renewing them. The existing chain is left in place; check the file is readable, parseable, ends on a PEM block boundary, and is under 4 MiB. Note this also blocks revocation until it is fixed.',
             },
           },
@@ -263,7 +263,7 @@
             'for': $._config.clientCRLUnusableFor,
             labels: { severity: 'critical' } + $._config.alertLabels,
             annotations: {
-              summary: 'A Puppet CA client trust domain has no usable CRL.',
+              summary: 'An OpenVox CA client trust domain has no usable CRL.',
               description: 'client_ca {{ $labels.client_ca }} on {{ $labels.instance }} holds no currently valid CRL at all — every CRL expired, every one was discarded as unverifiable, or every one was discarded as partial-scope (a delta CRL, or one scoped to an issuing distribution point, which lists only a fraction of what its issuer has revoked). Under client_revocation_policy=require every client of that issuer is rejected. Refresh its crl_file from the issuing CA, and if the delivery was recently changed check the server log for discard warnings — a full CRL is required here, since this CA is handed a file and fetches no distribution points. Note this fires only on total loss: a domain holding one anchor\'s CRL and not another\'s reads healthy here, and shows up as OpenVoxCAClientCRLRefusals instead.',
             },
           },
@@ -282,7 +282,7 @@
             'for': $._config.clientCRLUnusableFor,
             labels: { severity: 'warning' } + $._config.alertLabels,
             annotations: {
-              summary: 'The Puppet CA has stopped applying a trust domain\'s crl_file.',
+              summary: 'The OpenVox CA has stopped applying a trust domain\'s crl_file.',
               description: 'crl_file for client_ca {{ $labels.client_ca }} on {{ $labels.instance }} has not been applied for {{ $value | humanizeDuration }}. The previous CRLs are still in use and still current, so nothing else reports a problem -- but revocations published since are not being honoured. Check the server log for a reload error, or for a reload refused because it would have covered fewer anchors than the set in use, dropped an enforced partial CRL, moved an anchor backwards to an older CRL, or could not be shown to be newer at all because this server will not date the CRLs it holds for that anchor -- check this server\'s clock and the issuer\'s.',
             },
           },
@@ -300,7 +300,7 @@
             'for': $._config.clientCRLUnusableFor,
             labels: { severity: 'critical' } + $._config.alertLabels,
             annotations: {
-              summary: 'The Puppet CA is refusing clients of a trust domain for want of a CRL.',
+              summary: 'The OpenVox CA is refusing clients of a trust domain for want of a CRL.',
               description: 'client_ca {{ $labels.client_ca }} on {{ $labels.instance }} is refusing clients because revocation information was missing: an issuer in their chain has no currently valid CRL, or the presented certificate is itself one of the entry\'s anchors, which nothing can attest to. Unlike the gauge this is a fact rather than an estimate: these are requests that were turned away. The usual cause is an anchor whose CRL is missing or expired while the entry\'s other anchors are fine, or an entry anchored on a shared root whose intermediates cannot have their CRLs verified — see the crl_file notes in the configuration guide.',
             },
           },
@@ -395,8 +395,8 @@
             'for': $._config.crlUpdateFor,
             labels: { severity: 'warning' } + $._config.alertLabels,
             annotations: {
-              summary: 'Puppet CA is failing to update its CRL.',
-              description: 'The Puppet CA on {{ $labels.instance }} could not amend its CRL (openvoxca_crl_update_failures_total is rising). Revocations may not have taken effect and superseded certificates may still be valid. Check the CA logs to tell the causes apart: "Renew:"/"AutoRenew:"/"ReconcileManaged: failed to retire replaced certificate"/"Clean:" warnings are a real failure to maintain the CRL, and on filesystem or SQLite a "Revoke failed" warning on a request that took over a minute is instead a revocation that merely queued too long for its subject lock. The superseded-certificate sweep re-signs once per pass rather than once per due entry, so a failing sweep moves this counter once however many certificates were due: read a rising value as a count of failed CRL amendments, not of certificates left unrevoked, and use openvoxca_supersede_pending for those. Then check CRL storage.',
+              summary: 'OpenVox CA is failing to update its CRL.',
+              description: 'The OpenVox CA on {{ $labels.instance }} could not amend its CRL (openvoxca_crl_update_failures_total is rising). Revocations may not have taken effect and superseded certificates may still be valid. Check the CA logs to tell the causes apart: "Renew:"/"AutoRenew:"/"ReconcileManaged: failed to retire replaced certificate"/"Clean:" warnings are a real failure to maintain the CRL, and on filesystem or SQLite a "Revoke failed" warning on a request that took over a minute is instead a revocation that merely queued too long for its subject lock. The superseded-certificate sweep re-signs once per pass rather than once per due entry, so a failing sweep moves this counter once however many certificates were due: read a rising value as a count of failed CRL amendments, not of certificates left unrevoked, and use openvoxca_supersede_pending for those. Then check CRL storage.',
             },
           },
           {
@@ -421,8 +421,8 @@
             'for': $._config.supersedeFor,
             labels: { severity: 'warning' } + $._config.alertLabels,
             annotations: {
-              summary: 'Puppet CA is failing to revoke superseded certificates.',
-              description: 'The Puppet CA on {{ $labels.instance }} could not schedule or carry out the revocation of a certificate a renewal replaced (openvoxca_supersede_failures_total is rising), so that certificate is still a valid credential. Check the CA logs to tell the causes apart: "Superseded-certificate revocation sweep failed" means the sweep could not read the list, take the CRL lock or write the list back, which is the likeliest cause and blocks every pending revocation at once; "failed to retire replaced certificate" means the supersession was never recorded and the serial is in the warning; "Could not revoke superseded certificates" means they were recorded but the sweep could not amend the CRL; it re-signs once for the whole pass, so every entry that pass attempted stays listed and is retried together; "Discarding" means the entry is gone and will never be retried. A store that cannot serve the superseded key raises this even where the overlap window is closed (superseded_cert_revoke_after_sec: 0) — look for "cannot determine supersession status" or "Revoke: could not read pending supersessions", which also mean renewals are being refused. Retire anything the sweep will not with openvox-ca-ctl revoke --serial <hex>. openvoxca_supersede_pending shows how many are still waiting.',
+              summary: 'OpenVox CA is failing to revoke superseded certificates.',
+              description: 'The OpenVox CA on {{ $labels.instance }} could not schedule or carry out the revocation of a certificate a renewal replaced (openvoxca_supersede_failures_total is rising), so that certificate is still a valid credential. Check the CA logs to tell the causes apart: "Superseded-certificate revocation sweep failed" means the sweep could not read the list, take the CRL lock or write the list back, which is the likeliest cause and blocks every pending revocation at once; "failed to retire replaced certificate" means the supersession was never recorded and the serial is in the warning; "Could not revoke superseded certificates" means they were recorded but the sweep could not amend the CRL; it re-signs once for the whole pass, so every entry that pass attempted stays listed and is retried together; "Discarding" means the entry is gone and will never be retried. A store that cannot serve the superseded key raises this even where the overlap window is closed (superseded_cert_revoke_after_sec: 0) — look for "cannot determine supersession status" or "Revoke: could not read pending supersessions", which also mean renewals are being refused. Retire anything the sweep will not with openvox-ca-ctl revoke --serial <hex>. openvoxca_supersede_pending shows how many are still waiting.',
             },
           },
           {
@@ -441,8 +441,8 @@
             'for': $._config.crlSyncFor,
             labels: { severity: 'warning' } + $._config.alertLabels,
             annotations: {
-              summary: 'Puppet CA cannot reload its CRL from storage.',
-              description: 'The Puppet CA on {{ $labels.instance }} could not reload the stored CRL (openvoxca_crl_sync_failures_total is rising), so it is enforcing whichever CRL it already held. A certificate revoked on another replica may still be accepted here. Check CRL storage, and whether the CA certificate was replaced without restarting this replica.',
+              summary: 'OpenVox CA cannot reload its CRL from storage.',
+              description: 'The OpenVox CA on {{ $labels.instance }} could not reload the stored CRL (openvoxca_crl_sync_failures_total is rising), so it is enforcing whichever CRL it already held. A certificate revoked on another replica may still be accepted here. Check CRL storage, and whether the CA certificate was replaced without restarting this replica.',
             },
           },
           {
@@ -472,8 +472,8 @@
             'for': $._config.ocspIndexSyncFor,
             labels: { severity: 'warning' } + $._config.alertLabels,
             annotations: {
-              summary: 'Puppet CA cannot reload its OCSP serial index from storage.',
-              description: 'The Puppet CA on {{ $labels.instance }} could not reload the inventory into its OCSP serial index (openvoxca_ocsp_index_sync_failures_total is rising), so it is answering "unknown" for certificates its peers have signed since the last successful pass. Check inventory storage, and the inventory integrity MAC if the logs report a mismatch.',
+              summary: 'OpenVox CA cannot reload its OCSP serial index from storage.',
+              description: 'The OpenVox CA on {{ $labels.instance }} could not reload the inventory into its OCSP serial index (openvoxca_ocsp_index_sync_failures_total is rising), so it is answering "unknown" for certificates its peers have signed since the last successful pass. Check inventory storage, and the inventory integrity MAC if the logs report a mismatch.',
             },
           },
           {
@@ -517,8 +517,8 @@
             'for': $._config.crlLagFor,
             labels: { severity: 'critical' } + $._config.alertLabels,
             annotations: {
-              summary: 'Puppet CA replica is enforcing an out-of-date CRL.',
-              description: 'The Puppet CA on {{ $labels.instance }} has not caught up with the CRL in storage for more than %(crlLagFor)s, so certificates revoked on another replica are still being accepted here. Either it is behind the stored CRL, or the stored CRL cannot be read at all (in which case openvoxca_crl_number is absent for this instance). Check openvoxca_crl_sync_failures_total and the CA logs. A restart reloads the CRL, selecting the newest block this CA signed; if the stored chain carries none, startup warns and the re-sign paths refuse it, so check the stored chain rather than restarting repeatedly.' % { crlLagFor: $._config.crlLagFor },
+              summary: 'OpenVox CA replica is enforcing an out-of-date CRL.',
+              description: 'The OpenVox CA on {{ $labels.instance }} has not caught up with the CRL in storage for more than %(crlLagFor)s, so certificates revoked on another replica are still being accepted here. Either it is behind the stored CRL, or the stored CRL cannot be read at all (in which case openvoxca_crl_number is absent for this instance). Check openvoxca_crl_sync_failures_total and the CA logs. A restart reloads the CRL, selecting the newest block this CA signed; if the stored chain carries none, startup warns and the re-sign paths refuse it, so check the stored chain rather than restarting repeatedly.' % { crlLagFor: $._config.crlLagFor },
             },
           },
         ],
@@ -650,7 +650,7 @@
             labels: { severity: 'warning' } + $._config.alertLabels,
             annotations: {
               summary: 'A Kubernetes export target has never been attempted.',
-              description: 'The Puppet CA on {{ $labels.instance }} has {{ $labels.kind }}/{{ $labels.name }} in namespace {{ $labels.namespace }} configured for export but has not attempted a single apply in %(k8sExportNotRunningFor)s. The exported object holds whatever it held before, and OpenVoxCAKubernetesExportFailing cannot report on a target with no apply results. Check the CA logs for the Kubernetes export job starting, and for errors initialising the in-cluster client.' % { k8sExportNotRunningFor: $._config.k8sExportNotRunningFor },
+              description: 'The OpenVox CA on {{ $labels.instance }} has {{ $labels.kind }}/{{ $labels.name }} in namespace {{ $labels.namespace }} configured for export but has not attempted a single apply in %(k8sExportNotRunningFor)s. The exported object holds whatever it held before, and OpenVoxCAKubernetesExportFailing cannot report on a target with no apply results. Check the CA logs for the Kubernetes export job starting, and for errors initialising the in-cluster client.' % { k8sExportNotRunningFor: $._config.k8sExportNotRunningFor },
             },
           },
         ],
@@ -758,7 +758,7 @@
             labels: { severity: 'warning' } + $._config.alertLabels,
             annotations: {
               summary: 'A managed certificate has never been issued, or holds only revoked ones.',
-              description: 'The Puppet CA on {{ $labels.instance }} has {{ $labels.subject }} configured in managed_certs or serving_cert but no usable certificate for it after %(managedCertNeverIssuedFor)s: either none was ever issued, or every certificate it has is revoked. Whatever depends on that certificate has nothing to present. Check the CA logs for the managed-certificate reconcile pass and for the store it writes to -- a Secret refused by RBAC, an unadoptable Secret holding somebody else\'s material, or a directory that does not exist. If the subject is the CA\'s own certname it came from serving_cert, and the CA would not have started at all had it never been issued -- so a certificate that existed no longer has a live inventory row. The rule fires on the absence of a non-revoked row, so revocation is the likeliest cause but not the only one -- check the CRL first, then the inventory itself.' % { managedCertNeverIssuedFor: $._config.managedCertNeverIssuedFor },
+              description: 'The OpenVox CA on {{ $labels.instance }} has {{ $labels.subject }} configured in managed_certs or serving_cert but no usable certificate for it after %(managedCertNeverIssuedFor)s: either none was ever issued, or every certificate it has is revoked. Whatever depends on that certificate has nothing to present. Check the CA logs for the managed-certificate reconcile pass and for the store it writes to -- a Secret refused by RBAC, an unadoptable Secret holding somebody else\'s material, or a directory that does not exist. If the subject is the CA\'s own certname it came from serving_cert, and the CA would not have started at all had it never been issued -- so a certificate that existed no longer has a live inventory row. The rule fires on the absence of a non-revoked row, so revocation is the likeliest cause but not the only one -- check the CRL first, then the inventory itself.' % { managedCertNeverIssuedFor: $._config.managedCertNeverIssuedFor },
             },
           },
         ],

@@ -148,7 +148,7 @@ func (e *Exporter) newServer(addr string, timeouts httpserver.Timeouts) *http.Se
 	// endpoint when probed by a human or a liveness check.
 	mux.HandleFunc("GET /", func(w http.ResponseWriter, _ *http.Request) {
 		w.Header().Set("Content-Type", "text/plain; charset=utf-8")
-		_, _ = w.Write([]byte("Puppet CA metrics exporter\nSee /metrics\n"))
+		_, _ = w.Write([]byte("OpenVox CA metrics exporter\nSee /metrics\n"))
 	})
 	return httpserver.New(addr, mux, timeouts)
 }
