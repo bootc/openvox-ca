@@ -8,7 +8,7 @@
 // thresholds, e.g.:
 //
 //   (import 'openvox-ca-mixin/mixin.libsonnet') + {
-//     _config+:: { puppetCASelector: 'job="pki/openvox-ca"' },
+//     _config+:: { openvoxCASelector: 'job="pki/openvox-ca"' },
 //   }
 (import 'config.libsonnet') +
 (import 'alerts.libsonnet')
