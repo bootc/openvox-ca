@@ -760,7 +760,7 @@ func newRootCmd() *cobra.Command {
 			notifier.Status("Loading configuration")
 
 			// --- Config loading (file → env → CLI flags) ---
-			resolved := resolveConfigFile(configFile, "PUPPET_CA_CONFIG", "/etc/openvox-ca/config.yaml")
+			resolved := resolveConfigFile(configFile, "PUPPET_CA_CONFIG", defaultConfigFile)
 			cfg, err := loadServerConfig(resolved)
 			if err != nil {
 				return err
@@ -1526,7 +1526,7 @@ func newRootCmd() *cobra.Command {
 	}
 
 	f := cmd.Flags()
-	f.StringVar(&configFile, "config", "", "Path to YAML config file (default: /etc/openvox-ca/config.yaml if it exists)")
+	f.StringVar(&configFile, "config", "", "Path to YAML config file (default: "+defaultConfigFile+" if it exists)")
 	f.StringVar(&caDir, "cadir", "", "Directory for CA storage (or set PUPPET_CA_CADIR)")
 	f.StringVar(&autosignVal, "autosign-config", "", "Autosign configuration: 'true', 'false', or path to file/executable")
 	f.StringVar(&host, "host", "0.0.0.0", "Address to listen on")
