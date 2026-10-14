@@ -31,6 +31,7 @@ import (
 	"github.com/prometheus/client_golang/prometheus"
 	"github.com/voxpupuli/openvox-ca/internal/api"
 	"github.com/voxpupuli/openvox-ca/internal/config"
+	"github.com/voxpupuli/openvox-ca/internal/constants"
 )
 
 // parseAnchorBundle reads a PEM bundle of trust anchors.
@@ -615,7 +616,7 @@ func newClientCRLMetrics(reg prometheus.Registerer) *clientCRLMetrics {
 	}
 	m := &clientCRLMetrics{
 		usable: prometheus.NewGaugeVec(prometheus.GaugeOpts{
-			Namespace: "openvoxca",
+			Namespace: constants.MetricsNamespace,
 			Subsystem: "client_crl",
 			Name:      "usable",
 			Help: "1 when a client_ca trust domain holds any currently valid CRL, 0 when it holds " +
@@ -628,7 +629,7 @@ func newClientCRLMetrics(reg prometheus.Registerer) *clientCRLMetrics {
 				"for that, because it counts refusals that actually happened.",
 		}, []string{"client_ca"}),
 		refusals: prometheus.NewCounterVec(prometheus.CounterOpts{
-			Namespace: "openvoxca",
+			Namespace: constants.MetricsNamespace,
 			Subsystem: "client_crl",
 			Name:      "refusals_total",
 			Help: "Clients refused because revocation information was missing -- their issuer " +
@@ -640,7 +641,7 @@ func newClientCRLMetrics(reg prometheus.Registerer) *clientCRLMetrics {
 				"load-time check can distinguish from a healthy one. Alert on increase() > 0.",
 		}, []string{"client_ca"}),
 		lastReload: prometheus.NewGaugeVec(prometheus.GaugeOpts{
-			Namespace: "openvoxca",
+			Namespace: constants.MetricsNamespace,
 			Subsystem: "client_crl",
 			Name:      "last_reload_timestamp_seconds",
 			Help: "When this client_ca entry's crl_file was last applied, in seconds since the " +

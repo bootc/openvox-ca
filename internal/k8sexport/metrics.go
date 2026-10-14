@@ -19,12 +19,14 @@ package k8sexport
 
 import (
 	"github.com/prometheus/client_golang/prometheus"
+
+	"github.com/voxpupuli/openvox-ca/internal/constants"
 )
 
-// metricsNamespace matches the namespace used by internal/metrics so the
+// metricsNamespace is the namespace internal/metrics registers under, so the
 // export series appear alongside the other openvoxca_* metrics.
 const (
-	metricsNamespace = "openvoxca"
+	metricsNamespace = constants.MetricsNamespace
 	metricsSubsystem = "k8s_export"
 )
 

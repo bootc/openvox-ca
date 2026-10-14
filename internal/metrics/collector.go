@@ -35,12 +35,13 @@ import (
 
 	"github.com/prometheus/client_golang/prometheus"
 	"github.com/voxpupuli/openvox-ca/internal/ca"
+	"github.com/voxpupuli/openvox-ca/internal/constants"
 )
 
 // namespace is the common Prometheus metric prefix for every CA-specific
 // series. It is deliberately distinct from the Go/process collectors so that
 // openvoxca_* groups the exporter's domain metrics together.
-const namespace = "openvoxca"
+const namespace = constants.MetricsNamespace
 
 // Leaf certificate issuance states reported via the `state` label. "expired" is
 // intentionally not a state: expiry is derived by alerting rules from the
