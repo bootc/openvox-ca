@@ -331,7 +331,14 @@ var _ = Describe("Collector", func() {
 	// watch.
 	It("reports the delayed-supersession series", func() {
 		g := gather(metrics.NewCollector(myCA))
-		Expect(counterValue(g.findByLabels("openvoxca_supersede_failures_total", nil))).
+		// The failure counter is only ever observed at zero here, and the
+		// getters behind counterValue read zero from a missing family and from a
+		// gauge alike, so its presence and its type are what pin the series the
+		// mixin alerts on.
+		supersedeFailures := g.findByLabels("openvoxca_supersede_failures_total", nil)
+		Expect(supersedeFailures).NotTo(BeNil())
+		Expect(supersedeFailures.GetCounter()).NotTo(BeNil(), "supersede_failures_total must be a counter")
+		Expect(counterValue(supersedeFailures)).
 			To(Equal(0.0), "a CA that has recorded nothing has lost nothing")
 		Expect(gaugeValue(g.findByLabels("openvoxca_supersede_pending", nil))).
 			To(Equal(0.0), "an absent list is a genuine zero, and must be reported as one")
