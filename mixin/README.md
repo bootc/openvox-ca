@@ -52,20 +52,35 @@ alerting rules for the openvox-ca exporter. It alerts on:
   leave revoked or superseded certificates still valid. On filesystem and
   SQLite a revocation that merely queued too long for its subject's lock is
   counted here too, so the alert distinguishes the two by log line — see
-  [metrics](../docs/metrics.md).
+  [metrics](../docs/metrics.md). It fires on two failures within three hours,
+  not one: a backend restart that catches a single amendment stays silent,
+  while a CRL that stays unreadable, or whose lock cannot be taken, fails on
+  every hourly refresh pass and warns by the second, 15 minutes after it. A
+  CRL that reads but cannot be signed or written counts only when the CA
+  tries to amend it, because the refresh pass writes only when the CRL is due.
+  A best-effort revocation the CA does not retry — in a clean, or of a
+  certificate a renewal or managed-certificate reissue replaced with immediate
+  revocation — failing once is left to its log warning. See
+  [storage-retry alerts](../docs/metrics.md#storage-retry-alerts).
 - **CRL propagation** — a replica that cannot reload the stored CRL, or that
   keeps enforcing one behind it. On a shared backend each replica decides
   revocation from its own copy, so a replica left behind still accepts
   certificates revoked elsewhere; see `crl_sync_interval_sec` in
-  [configuration](../docs/configuration.md).
+  [configuration](../docs/configuration.md). The reload warning fires on three
+  failed reloads within ten minutes, so a backend restart that costs one or two
+  stays silent, while a replica that fails every pass — the usual cause is a
+  CA certificate replaced without restarting it — warns about five minutes in,
+  ahead of the lag page.
 - **OCSP index propagation** — a replica that cannot reload the inventory into
   the serial index its OCSP responder answers from. While that fails the
   responder answers `unknown` for certificates its peers have signed since the
   last successful pass, which is not fail-open but does split a fleet: a
   verifier that hard-fails on `unknown` rejects against that replica and no
   other. See `ocsp_index_sync_interval_sec` in
-  [configuration](../docs/configuration.md). Silent when `enable_ocsp` is off,
-  since the series it reads is then not exported.
+  [configuration](../docs/configuration.md). It fires on three failed passes
+  within 30 minutes, so a backend restart that costs one or two stays silent,
+  while an inventory that stays unreadable warns 15 to 20 minutes in. Silent
+  when `enable_ocsp` is off, since the series it reads is then not exported.
 - **Inventory tampering** — the periodic inventory verification finding the
   stored integrity value no longer matching the inventory, on any backend:
   rows added, removed or edited outside the CA. Critical, and fires on the
@@ -84,7 +99,9 @@ alerting rules for the openvox-ca exporter. It alerts on:
   a valid credential. Live on any CA that renews certificates, since
   `superseded_cert_revoke_after_sec` defaults to 24 hours; only where it is set
   to `0` does the revocation happen inside the renewal instead, and a failure
-  there is counted by the CRL-update alert above. Even then a store that cannot
+  there counts towards the CRL-update alert above, which needs a second failure
+  within its window: a single one is left to its log warning. Even then a store
+  that cannot
   serve the pending-supersession key fires this, because the sweep, every
   renewal and every subject revocation read that key whatever the setting says.
   See
@@ -215,12 +232,15 @@ jsonnet -J vendor -m . mixin.jsonnet
 | `leafExpiryWarningSeconds` | 7 days | Leaf certificate expiry warning threshold. |
 | `leafExpiryCriticalSeconds` | 1 day | Leaf certificate expiry critical threshold. |
 | `pendingFor` | `1h` | How long a request may stay pending before alerting. |
-| `crlUpdateWindow` | `1h` | Window over which CRL-update failures are counted (the metric is a restart-resetting counter). |
-| `crlUpdateFor` | `15m` | `for:` debounce for the CRL-update-failure alert. |
-| `crlSyncWindow` | `1h` | Window over which CRL-reload failures are counted (the metric is a restart-resetting counter). |
-| `crlSyncFor` | `5m` | `for:` debounce for the CRL-reload-failure alert. Keep it below `crlLagFor` so the warning precedes the page it explains. |
-| `ocspIndexSyncWindow` | `1h` | Window over which OCSP-index-reload failures are counted (the metric is a restart-resetting counter). |
-| `ocspIndexSyncFor` | `15m` | `for:` debounce for the OCSP-index-reload-failure alert. Longer than `crlSyncFor` because an `unknown` is not fail-open. Note `increase()` over the window stays true for the whole window after one failure, so this delays the page rather than filtering a transient. |
+| `crlUpdateWindow` | `3h` | Window over which CRL-update failures are counted (the metric is a restart-resetting counter). The CRL refresh job takes the CRL lock and reads the stored CRL on every pass, so a CRL that stays unreadable, or whose lock cannot be taken, fails at least once per `crl_refresh_interval_sec` (1h by default); one that reads but cannot be written counts only when the CA tries to amend it. Keep the window at least `crlUpdateThreshold` + 1 intervals: at exactly the threshold a persistent fault flaps, and below it the alert never fires. Raise it alongside that setting. |
+| `crlUpdateThreshold` | `2` | Failures within `crlUpdateWindow` before the CRL-update-failure alert fires. Above one so that a backend restart costing a single amendment stays silent. With `crl_chain_file` set, the upstream chain refresh counts into the same counter on its own hourly pass, so a restart that overlaps both passes counts two and fires; set this to `3`, and `crlUpdateWindow` to `4h`, if you want those silent. |
+| `crlUpdateFor` | `15m` | `for:` debounce for the CRL-update-failure alert. Once the threshold is crossed `increase()` stays above it until the window passes the older failures, so this delays the alert rather than filtering a transient. |
+| `crlSyncWindow` | `10m` | Window over which CRL-reload failures are counted (the metric is a restart-resetting counter). Keep it at least `crlSyncThreshold` + 1 times `crl_sync_interval_sec` (60s by default), and raise it alongside that setting, or the alert can never fire. |
+| `crlSyncThreshold` | `3` | Failed reloads within `crlSyncWindow` before the CRL-reload-failure alert fires. A backend restart costs one; a replica holding a rotated CA certificate fails every pass. |
+| `crlSyncFor` | `2m` | `for:` debounce for the CRL-reload-failure alert. Keep the threshold's intervals plus this below `crlLagFor`, so the warning precedes the page it explains. |
+| `ocspIndexSyncWindow` | `30m` | Window over which OCSP-index-reload failures are counted (the metric is a restart-resetting counter). Keep it at least `ocspIndexSyncThreshold` + 1 times `ocsp_index_sync_interval_sec` (5m by default), and raise it alongside that setting, or the alert can never fire. |
+| `ocspIndexSyncThreshold` | `3` | Failed passes within `ocspIndexSyncWindow` before the OCSP-index-reload-failure alert fires. A backend restart costs one. |
+| `ocspIndexSyncFor` | `5m` | `for:` debounce for the OCSP-index-reload-failure alert. As with `crlUpdateFor`, this delays the alert once the threshold is crossed rather than filtering a transient. |
 | `inventoryTamperWindow` | `1h` | Window over which inventory tamper detections are counted (the metric is a restart-resetting counter), and so how long one detection keeps `OpenVoxCAInventoryTampered` firing. Keep it at least twice `inventory_verify_interval_sec`: a persisting mismatch counts once per pass, and a window near the interval lets the alert resolve and re-fire between passes. |
 | `inventoryUnreadableWindow` | `30m` | Window over which failed inventory reads by the periodic verification are counted. Must hold `inventoryUnreadableThreshold` + 1 intervals of `inventory_verify_interval_sec` (5m by default); widen it alongside a longer interval, or the alert can never fire. |
 | `inventoryUnreadableThreshold` | `3` | Failed reads in the window that raise `OpenVoxCAInventoryUnreadable`. A backend restart costs one failed pass and a ten-minute outage two, so neither fires it; an inventory that cannot be read at all crosses it 10 to 15 minutes in. |

@@ -620,8 +620,10 @@ the record that says which scheme failed.
 Other paths still report a mismatch under another name. On filesystem a
 revocation that meets one reads through a verifying call, so the failure lands
 in `openvoxca_crl_update_failures_total` and can raise
-`OpenVoxCACRLUpdateFailing`, naming a tamper signal a CRL problem; and the OCSP
-index sync's counter rises for any failed read, a mismatch included. A refused
+`OpenVoxCACRLUpdateFailing` once a second failure follows within its window (see
+[storage-retry alerts](../metrics.md#storage-retry-alerts)), naming a tamper
+signal a CRL problem; and the OCSP index sync's counter rises for any failed
+read, a mismatch included. A refused
 start aborts before the metrics listener binds, so it shows up as
 `OpenVoxCAExporterDown` (or a bare `absent(up)`) rather than `OpenVoxCANotReady`.
 
